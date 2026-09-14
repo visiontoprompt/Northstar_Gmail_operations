@@ -3,7 +3,12 @@ __pycache__/
 .venv/
 .pytest_cache/
 backend/data/
+data/
+*.egg-info/
 .env
 node_modules/
 frontend/dist/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 premium-audit.json
