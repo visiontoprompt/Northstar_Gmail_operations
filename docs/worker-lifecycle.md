@@ -62,9 +62,13 @@ Tests run against `fakeredis://` with a short poll interval (0.1 s).
 ## Browser observer
 
 When `BROWSER_LAUNCH_ENABLED` and `BROWSER_OBSERVER_ENABLED` are both true, the
-launched Chrome opens with `--remote-debugging-port` (`BROWSER_CDP_PORT`,
-or a random free port when `0`), and `BrowserObserver`
+launched Chrome opens with `--remote-debugging-port` (a random free port when
+`0`), and `BrowserObserver`
 (`app/observer.py`) connects over CDP with Playwright.
+
+The local one-command launcher deliberately sets `BROWSER_OBSERVER_ENABLED=false`
+so Google authentication happens in a standard Chrome surface. Enable CDP only
+for an explicitly approved post-login diagnostic workflow.
 
 - Each poll reads URL/title/visible text, classifies it with `classify_page`, and
   records it via `observe_session_page`.

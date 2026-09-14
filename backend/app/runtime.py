@@ -34,15 +34,14 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         return False, None
     _terminate_stale_browser(profile_path)
 
+    # Manual authentication uses a normal Chrome startup surface with only
+    # profile isolation. CDP is intentionally opt-in because Google may reject
+    # a sign-in attempt made from an attached automation/debugging environment.
     command = [
         executable,
         f"--user-data-dir={profile_path}",
         "--profile-directory=Default",
         "--new-window",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-background-networking",
-        "--no-session-restore",
         "https://accounts.google.com/",
     ]
     if settings.browser_observer_enabled:

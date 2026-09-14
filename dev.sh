@@ -71,7 +71,9 @@ if [[ "$backend_ready" != true ]]; then
     # Local development always opens the dedicated account Chrome window.
     # Production workers must supply these settings through their deployment.
     export BROWSER_LAUNCH_ENABLED=true
-    export BROWSER_OBSERVER_ENABLED=true
+    # Keep authentication in a standard Chrome surface. Observation/CDP is
+    # opt-in for a later post-login diagnostic workflow.
+    export BROWSER_OBSERVER_ENABLED=false
     exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
   ) &
   backend_pid=$!

@@ -24,7 +24,8 @@ def test_browser_observer_uses_an_ephemeral_cdp_port_per_profile(tmp_path) -> No
         assert "--remote-debugging-port=0" in command
         assert "--remote-debugging-port=9222" not in command
         assert "--new-window" in command
-        assert "--no-session-restore" in command
+        assert "--disable-background-networking" not in command
+        assert "--no-session-restore" not in command
         assert runtime.browser_debug_port("session_1") == 41001
         kill_stale.assert_called_once()
     finally:

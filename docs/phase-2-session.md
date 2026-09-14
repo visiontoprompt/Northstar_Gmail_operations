@@ -14,7 +14,7 @@ The account secret remains in the encrypted secret store. Session responses, aud
 
 1. Admin opens account detail and selects **Open login session**, or starts a controlled login batch for a group.
 2. The API locks each account profile and returns `LOGIN_REQUIRED` sessions. A batch opens only its configured concurrency and keeps the remaining accounts queued.
-3. When `BROWSER_LAUNCH_ENABLED=true` in local development, the API opens a separate Chrome process using `--user-data-dir` for that profile. The SaaS console remains in its original browser session. A future Playwright worker will own this runtime boundary in production.
+3. When `BROWSER_LAUNCH_ENABLED=true` in local development, the API opens a separate standard Chrome process using only an isolated `--user-data-dir` for that profile. The SaaS console remains in its original browser session. CDP observation is disabled during manual authentication because Google may reject sign-in from a debugging/automation-attached environment. A future Playwright worker will own this runtime boundary in production.
 4. A trusted browser/runtime event can record `LOGIN_COMPLETED` or `VERIFICATION_REQUIRED`; the associated batch item is updated automatically.
 5. Closing the session releases the profile lock but preserves its storage reference and session history.
 
