@@ -43,9 +43,9 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
 - API validation failures stay in the form with inline corrections; network/server failures stay in the form with retry.
 - Search/filter changes reset the page to 1 and preserve state in URL parameters when the frontend is connected to a router.
 - Rows link to an account detail shell. Detail tabs are non-functional placeholders until their phase is implemented, but the overview clearly marks them as future work.
-- Account detail exposes edit metadata, move group, and delete interaction shells. These controls are frontend-only until their server contracts exist; they must not show optimistic success or mutate the registry locally.
-- Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer must state that no external action occurs until a reviewed connector is connected.
-- Archive is not exposed in Phase 1. Delete remains a guarded, backend-confirmed action because it affects account, secret, session, and profile records.
+- Account detail exposes server-backed edit metadata, move group, and guarded archive controls. The API validates, audits, and reloads the registry after success.
+- Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer saves a versioned, non-secret plan; no external action occurs when a plan is saved.
+- Archive is exposed only through the guarded Delete action because it affects account, secret, session, and profile records.
 
 ## Accessibility and responsive behavior
 
