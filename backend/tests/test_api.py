@@ -1,0 +1,81 @@
+import os
+
+os.environ["DATABASE_URL"] = "sqlite:///./data/test_gmail_ops.db"
+os.environ["SECRET_KEY"] = "test-secret-key-without-credential-material"
+
+from fastapi.testclient import TestClient
+
+from app.db import Base, engine
+from app.main import app
+from app.security import SecretCipher
+
+
+def setup_function() -> None:
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    with TestClient(app):
+        pass
+
+
+def test_bulk_preview_masks_secret_material() -> None:
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        group_id = groups[0]["id"]
+        raw = "agent01@gmail.com:S3cretPassword:recovery@example.com:TOTPSECRET"
+        response = client.post("/api/v1/accounts/bulk/preview", json={"raw_lines": raw, "group_id": group_id})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["valid_rows"] == 1
+        serialized = response.text
+        assert "S3cretPassword" not in serialized
+        assert "TOTPSECRET" not in serialized
+        assert "recovery@example.com" not in serialized
+        assert payload["rows"][0]["recovery_masked"].startswith("r")
+
+
+def test_bulk_import_persists_metadata_separately_from_encrypted_secret() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        raw = "agent02@gmail.com:S3cretPassword:recovery@example.com:TOTPSECRET"
+        response = client.post("/api/v1/accounts/bulk/import", json={"raw_lines": raw, "group_id": group_id, "idempotency_key": "import-test-0001"})
+        assert response.status_code == 201
+        account_id = response.json()["account_ids"][0]
+        detail = client.get(f"/api/v1/accounts/{account_id}")
+        assert detail.status_code == 200
+        body = detail.text
+        assert "S3cretPassword" not in body
+        assert "TOTPSECRET" not in body
+        assert body.find("READY_FOR_LOGIN") >= 0
+        assert body.find("STORED_ENCRYPTED") >= 0
+        account_list = client.get("/api/v1/accounts").json()
+        assert account_list["total"] == 1
+        assert account_list["items"][0]["profile"]["status"] == "RESERVED"
+
+
+def test_deduplicates_case_insensitively_and_reports_invalid_rows() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        raw = "agent03@gmail.com:one:recovery@example.com:totp\nAGENT03@GMAIL.COM:two:recovery@example.com:totp\nnot-an-email:three:recovery@example.com:totp\nmalformed"
+        preview = client.post("/api/v1/accounts/bulk/preview", json={"raw_lines": raw, "group_id": group_id}).json()
+        assert preview["valid_rows"] == 1
+        assert preview["duplicate_rows"] == 1
+        assert preview["invalid_rows"] == 2
+        imported = client.post("/api/v1/accounts/bulk/import", json={"raw_lines": raw, "group_id": group_id}).json()
+        assert imported == {"imported": 1, "duplicates": 1, "invalid": 2, "account_ids": imported["account_ids"]}
+
+
+def test_secret_cipher_round_trip_is_not_plaintext() -> None:
+    plaintext = {"password": "password-value", "recovery": "recover@example.com", "2fa": "totp-value"}
+    encrypted = SecretCipher().encrypt(plaintext)
+    assert "password-value" not in encrypted
+    assert SecretCipher().decrypt(encrypted) == plaintext
+
+
+def test_bulk_import_idempotency_key_does_not_duplicate_accounts() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        payload = {"raw_lines": "idempotent@gmail.com:pass:recover@example.com:totp", "group_id": group_id, "idempotency_key": "import-idempotent-1"}
+        first = client.post("/api/v1/accounts/bulk/import", json=payload).json()
+        second = client.post("/api/v1/accounts/bulk/import", json=payload).json()
+        assert second == first
+        assert client.get("/api/v1/accounts").json()["total"] == 1
