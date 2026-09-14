@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import defaultdict
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -73,6 +74,8 @@ class BrowserObserver:
         self._credentials_tried = False
         self._auto_attempted_urls: set[str] = set()
         self._chooser_clicked_urls: set[str] = set()
+        self._submitted_urls: set[str] = set()
+        self._fill_failed_urls: dict[str, int] = defaultdict(int)
         self._reported_no_page = False
         self._logged_states: set[tuple[str, str]] = set()
 
@@ -271,39 +274,52 @@ def _resolve_credentials(observer: "BrowserObserver") -> tuple[str, str] | None:
 
 def _fill_sign_in_form(page: "Page", observer: "BrowserObserver", url: str) -> None:
     """Enter the stored identifier/password into Google's own sign-in form and
-    press the primary submit button. Attempting a page once prevents a rejected
-    password from being retyped in a loop; fields that are already filled (for
-    example after Google pre-fills on retry) are never overwritten."""
+    submit each step. Only *visible* fields are touched (Google duplicates some
+    inputs in the DOM). A transient failure mid-navigation is retried on the
+    next tick instead of silently aborting the whole sign-in; a persistent one
+    is reported and the URL is attempted once and then paused."""
     credentials = _resolve_credentials(observer)
     if credentials is None:
         observer._auto_attempted_urls.add(url)
         observer._emit("skipped", "no stored credentials for account")
         return
     identifier, password = credentials
+    password_selector = "input[type=password]:visible, input[name=Passwd]:visible, #password:visible"
+    identifier_selector = "input[type=email]:visible, input[name=identifier]:visible, input[name=Email]:visible, input[id=identifierId]:visible"
+    failures = observer._fill_failed_urls.get(url, 0)
     try:
-        password_field = page.locator("input[type=password], input[name=Passwd], #password")
-        identifier_field = page.locator("input[type=email], input[name=identifier], input[name=Email], input[id=identifierId], input[name=identifier]")
+        password_field = page.locator(password_selector)
+        identifier_field = page.locator(identifier_selector)
         if password_field.count() and password_field.first.input_value(timeout=1000):
-            observer._auto_attempted_urls.add(url)
+            if url not in observer._submitted_urls:
+                _click_submit(page, url)
+                observer._submitted_urls.add(url)
             return
         if identifier_field.count() and identifier_field.first.input_value(timeout=1000):
-            observer._auto_attempted_urls.add(url)
+            if url not in observer._submitted_urls:
+                _click_submit(page, url)
+                observer._submitted_urls.add(url)
             return
         if password_field.count():
-            password_field.first.fill(password, timeout=1500)
-            observer._auto_attempted_urls.add(url)
+            password_field.first.fill(password, timeout=2000)
             observer._emit("password_filled", url)
             _click_submit(page, url)
+            observer._submitted_urls.add(url)
+            observer._auto_attempted_urls.add(url)
             return
         if identifier_field.count():
-            identifier_field.first.fill(identifier, timeout=1500)
-            observer._auto_attempted_urls.add(url)
+            identifier_field.first.fill(identifier, timeout=2000)
             observer._emit("identifier_filled", url)
             _click_submit(page, url)
+            observer._submitted_urls.add(url)
+            observer._auto_attempted_urls.add(url)
             return
-    except Exception:  # noqa: BLE001
-        observer._auto_attempted_urls.add(url)
-        observer._emit("failed", f"interaction failed on {url}", result="failure")
+    except Exception as exc:  # noqa: BLE001
+        observer._fill_failed_urls[url] = failures + 1
+        logger.exception("auto sign-in attempt failed for session %s on %s (will retry)", observer.session_id, url)
+        if failures + 1 >= 3:
+            observer._auto_attempted_urls.add(url)
+            observer._emit("failed", f"persistent sign-in interaction failure on {url}: {exc}", result="failure")
 
 
 def _has_credential_input(page: "Page") -> bool:

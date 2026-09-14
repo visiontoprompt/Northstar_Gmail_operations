@@ -195,7 +195,21 @@ def test_auto_login_does_not_overwrite_filled_field():
     with patch("app.observer.classify_page", return_value=(PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE)):
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["email"].value == "alice@example.com"
-    assert getattr(button, "clicked", False) is not True
+    assert getattr(button, "clicked", False) is True
+
+
+def test_auto_login_retries_a_transient_submit_failure():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://accounts.google.com/", "sign in", "Email or phone", identifier="", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), report_event=lambda *a: None)
+    browser = _fake_browser([page])
+    with patch("app.observer.classify_page", return_value=(PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE)), patch("app.observer._click_submit", side_effect=[TimeoutError("boom"), None]):
+        observer._tick(browser)
+        assert "https://accounts.google.com/" not in observer._auto_attempted_urls
+        assert page.cred_fields["email"].value == "alice@example.com"
+        observer._tick(browser)
+    assert "https://accounts.google.com/" in observer._submitted_urls
+    assert "https://accounts.google.com/" not in observer._auto_attempted_urls
 
 
 def test_auto_login_skips_when_no_credentials_stored():
