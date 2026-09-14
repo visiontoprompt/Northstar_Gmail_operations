@@ -16,14 +16,17 @@ def test_browser_observer_uses_an_ephemeral_cdp_port_per_profile(tmp_path) -> No
     process = Mock(pid=1234)
     process.poll.return_value = None
     try:
-        with patch("app.runtime.shutil.which", return_value="/usr/bin/google-chrome"), patch("app.runtime.subprocess.Popen", return_value=process) as popen, patch("app.runtime._wait_for_cdp_port", return_value=41001):
+        with patch("app.runtime.shutil.which", return_value="/usr/bin/google-chrome"), patch("app.runtime.subprocess.Popen", return_value=process) as popen, patch("app.runtime._wait_for_cdp_port", return_value=41001), patch("app.runtime._terminate_stale_browser") as kill_stale:
             launched, pid = runtime.launch_local_browser("profile_1", "session_1")
         command = popen.call_args.args[0]
         assert launched is True
         assert pid == 1234
         assert "--remote-debugging-port=0" in command
         assert "--remote-debugging-port=9222" not in command
+        assert "--new-window" in command
+        assert "--no-session-restore" in command
         assert runtime.browser_debug_port("session_1") == 41001
+        kill_stale.assert_called_once()
     finally:
         runtime.close_local_browser("session_1")
         settings.browser_launch_enabled = original_launch

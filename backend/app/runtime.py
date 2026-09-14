@@ -1,4 +1,6 @@
+import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         active_port_file.unlink(missing_ok=True)
     except OSError:
         return False, None
+    _terminate_stale_browser(profile_path)
 
     command = [
         executable,
@@ -39,6 +42,7 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-background-networking",
+        "--no-session-restore",
         "https://accounts.google.com/",
     ]
     if settings.browser_observer_enabled:
@@ -62,6 +66,46 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         else:
             logger.warning("browser started without a reachable CDP endpoint for session %s", session_id)
     return True, process.pid
+
+
+def _terminate_stale_browser(profile_path: Path) -> None:
+    """Kill any leftover Chrome bound to this profile dir so the launch opens a
+    fresh, dedicated window instead of being swallowed into the old instance."""
+    stale = _find_chrome_pids_for_profile(profile_path)
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    if stale:
+        time.sleep(0.5)
+    for pid in stale:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _find_chrome_pids_for_profile(profile_path: Path) -> list[int]:
+    """Return PIDs of running Chrome processes whose command line references the
+    profile dir. Used so a re-login never piggybacks on an existing window."""
+    pids = []
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmd = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            except (OSError, IsADirectoryError):
+                continue
+            if str(profile_path) in cmd and "chrome" in cmd.split()[0].lower():
+                try:
+                    pids.append(int(entry.name))
+                except ValueError:
+                    continue
+    except (FileNotFoundError, PermissionError):
+        pass
+    return pids
 
 
 def _wait_for_cdp_port(profile_path: Path, timeout: float = 10.0) -> int | None:

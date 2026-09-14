@@ -39,6 +39,11 @@ class ImportValidationError(ValueError):
     pass
 
 
+class BrowserLaunchError(ImportValidationError):
+    """Raised when the local Chrome process could not be started. Nothing is
+    persisted for the session, so a later attempt can retry cleanly."""
+
+
 def _bump_job(db: Session, job: LoginJob, **deltas: int) -> None:
     values = {}
     for field, delta in deltas.items():
@@ -506,6 +511,13 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
             break
         try:
             session = start_login_session(db, organization_id, actor_id, item.account_id)
+        except BrowserLaunchError as exc:
+            # Launch failed before anything was persisted: leave the item queued.
+            # Break, not continue, so the worker does not hot-loop the same item.
+            locks.force_release(item.account_id)
+            queue.requeue(job.id, item.id, item.account_id)
+            logger.warning("login item %s (account=%s) not dispatched; requeued: %s", item.id, item.account_id, exc)
+            break
         except ImportValidationError as exc:
             locks.force_release(item.account_id)
             item.state = "ATTENTION"
@@ -704,26 +716,25 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
         if active:
             raise ImportValidationError("This account already has an open login session")
-    session = BrowserSession(id=_new_id("session"), organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_HANDOFF", metadata_json={"boundary": "human_login"})
+    session_id = _new_id("session")
+    launched, process_id = launch_local_browser(profile.id, session_id)
+    logger.info("session %s: browser launch result=%s process_id=%s (browser_launch_enabled=%s, observer_enabled=%s)", session_id, launched, process_id, get_settings().browser_launch_enabled, get_settings().browser_observer_enabled)
+    if not launched:
+        # Nothing is persisted for this attempt, so the account/profile stay
+        # clean and a later attempt can retry without a zombie session blocking it.
+        raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "browser_opened": True, "process_id": process_id})
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
     profile.last_opened_at = utcnow()
     account.login_status = "REQUIRED"
     db.add(session)
-    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_HANDOFF"}))
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.commit()
-    launched, process_id = launch_local_browser(profile.id, session.id)
-    logger.info("session %s: browser launch result=%s process_id=%s (browser_launch_enabled=%s, observer_enabled=%s)", session.id, launched, process_id, get_settings().browser_launch_enabled, get_settings().browser_observer_enabled)
-    if launched:
-        session.runtime_type = "LOCAL_CHROME"
-        session.metadata_json = {"boundary": "human_login", "browser_opened": True, "process_id": process_id}
-        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
-        db.commit()
-        observer_started = _start_observer(session.id, profile.id, organization_id, actor_id)
-        logger.info("session %s: observer started=%s", session.id, observer_started)
-    else:
-        logger.warning("session %s: browser was NOT launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)", session.id)
+    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id)
+    logger.info("session %s: observer started=%s", session.id, observer_started)
     return get_session(db, organization_id, session.id)
 
 

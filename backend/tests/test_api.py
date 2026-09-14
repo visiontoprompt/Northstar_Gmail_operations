@@ -101,6 +101,24 @@ def test_bulk_import_idempotency_key_does_not_duplicate_accounts() -> None:
         assert client.get("/api/v1/accounts").json()["total"] == 1
 
 
+def test_failed_browser_launch_does_not_block_retry(monkeypatch) -> None:
+    from app import service
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "retry@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+
+        monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (False, None))
+        failed = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert failed.status_code == 422
+        assert "launched" in failed.json()["detail"].lower()
+
+        monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert opened.status_code == 201
+        assert opened.json()["browser_opened"] is True
+
+
 def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
@@ -111,7 +129,7 @@ def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
         assert session["state"] == "LOGIN_REQUIRED"
         assert session["login_state"] == "REQUIRED"
         assert session["profile_status"] == "OPEN"
-        assert session["browser_opened"] is False
+        assert session["browser_opened"] is True
         assert "secret" not in opened.text
         conflict = client.post(f"/api/v1/accounts/{account['id']}/sessions")
         assert conflict.status_code == 409
