@@ -281,6 +281,21 @@ tbody tr:hover { background: #fbfdfc; }
 .session-step small { margin-top: 4px; color: #899994; font-size: 10px; line-height: 1.4; }
 .session-warning { display: flex; gap: 9px; margin-top: 17px; padding: 12px; color: #697e76; background: #fff9ed; border: 1px solid #f0dfbd; border-radius: 9px; font-size: 10px; line-height: 1.45; }
 .session-warning svg { flex: 0 0 auto; color: var(--color-accent); }
+.credential-backdrop { z-index: 25; background: rgba(17,24,32,.28); }
+.credential-modal { width: min(100%, 560px); }
+.credential-stack { display: grid; gap: 16px; margin-top: 19px; }
+.batch-modal { width: min(100%, 590px); }
+.batch-control { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 14px; background: #fbfdfc; border: 1px solid #e3ece9; border-radius: 10px; }
+.batch-control label, .batch-control small { display: block; }
+.batch-control label { color: var(--color-ink-soft); font-size: 11px; font-weight: 600; }
+.batch-control small { margin-top: 5px; color: #8d9a96; font-size: 10px; }
+.batch-control input { width: 78px; min-height: 42px; padding: 10px; color: var(--color-primary); background: #fff; border: 1px solid #cddfd9; border-radius: 9px; font-family: var(--font-data); font-size: 14px; text-align: center; }
+.batch-control input:focus { border-color: #68aca2; box-shadow: 0 0 0 3px rgba(15,118,110,.09); outline: 0; }
+.dispatch-preview { display: grid; gap: 9px; margin-top: 18px; padding: 15px; background: #f5faf8; border: 1px solid #dce9e4; border-radius: 10px; }
+.dispatch-preview strong { display: block; color: #31564d; font-family: var(--font-data); font-size: 12px; font-weight: 500; }
+.dispatch-preview small { color: #78908a; font-size: 10px; line-height: 1.4; }
+.dispatch-meter { height: 6px; overflow: hidden; background: #dcebe6; border-radius: 999px; }
+.dispatch-meter span { display: block; height: 100%; background: var(--color-primary); border-radius: inherit; transition: width .2s ease; }
 .modal-footer .button, .modal-footer a.button { text-decoration: none; }
 .toast-region { position: fixed; z-index: 50; top: 19px; right: 20px; display: grid; gap: 8px; width: min(340px, calc(100vw - 40px)); }
 .toast { display: flex; align-items: center; gap: 9px; padding: 12px 14px; color: #3b514a; background: #fff; border: 1px solid var(--color-line); border-left: 3px solid var(--color-primary); border-radius: 9px; box-shadow: 0 10px 28px rgba(17,24,32,.13); font-size: 11px; }
