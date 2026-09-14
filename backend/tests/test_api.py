@@ -184,6 +184,7 @@ def test_login_job_queues_group_accounts_and_honors_concurrency() -> None:
         assert started.status_code == 200
         assert started.json()["status"] == "RUNNING"
         assert started.json()["running_count"] == 2
+        assert client.get(f"/api/v1/login-jobs/{job['id']}/progress").json()["total_count"] == 3
         running_item = next(item for item in started.json()["items"] if item["state"] == "RUNNING")
         completed = client.post(f"/api/v1/sessions/{running_item['session_id']}/events", json={"event_type": "LOGIN_COMPLETED"})
         assert completed.status_code == 200

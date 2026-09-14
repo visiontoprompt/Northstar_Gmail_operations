@@ -64,13 +64,14 @@ function App() {
   const [isBatchOpen, setBatchOpen] = useState(false);
   const [activeAccount, setActiveAccount] = useState<Account | null>(null);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
+  const [activeJob, setActiveJob] = useState<LoginJob | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [mobileNav, setMobileNav] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestRef = useRef<AbortController | null>(null);
 
-  useEffect(() => { document.title = activeSession ? "Login session — Gmail Operations" : activeAccount ? "Account detail — Gmail Operations" : "Account registry — Gmail Operations"; }, [activeAccount, activeSession]);
+  useEffect(() => { document.title = activeJob ? "Login batch — Gmail Operations" : activeSession ? "Login session — Gmail Operations" : activeAccount ? "Account detail — Gmail Operations" : "Account registry — Gmail Operations"; }, [activeAccount, activeSession, activeJob]);
 
   useEffect(() => {
     api<Group[]>("/api/v1/groups").then((data) => { setGroups(data); if (data.length && selectedGroup === "all") setSelectedGroup("all"); }).catch(() => setError("Groups are unavailable. Start the API and retry."));
@@ -153,7 +154,8 @@ function App() {
       {isOnboardingOpen && <OnboardingModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} onClose={() => setOnboardingOpen(false)} onSuccess={(message) => { setOnboardingOpen(false); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeAccount && <AccountDetail account={activeAccount} onClose={() => setActiveAccount(null)} onSessionOpened={setActiveSession} onUpdated={() => { setActiveAccount(null); reload(); }} onError={(message) => notify("error", message)} />}
       {activeSession && <SessionWorkspace session={activeSession} onUpdate={(session) => { setActiveSession(session); reload(); }} onClose={() => { setActiveSession(null); reload(); }} onError={(message) => notify("error", message)} />}
-      {isBatchOpen && <LoginBatchModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} onClose={() => setBatchOpen(false)} onSuccess={(message) => { setBatchOpen(false); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
+      {isBatchOpen && <LoginBatchModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} onClose={() => setBatchOpen(false)} onStarted={(job) => { setBatchOpen(false); setActiveJob(job); notify("success", `${job.running_count} profile sessions opened`); reload(); }} onError={(message) => notify("error", message)} />}
+      {activeJob && <LoginJobWorkspace job={activeJob} onUpdate={(job) => { setActiveJob(job); reload(); }} onClose={() => { setActiveJob(null); reload(); }} onError={(message) => notify("error", message)} />}
       <ToastRegion toasts={toasts} />
     </div>
   );
@@ -243,7 +245,7 @@ function CredentialEditor({ account, onClose, onSaved, onError }: { account: Acc
   return <div className="modal-backdrop credential-backdrop" role="presentation"><section className="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> ENCRYPTED REVISION</div><h2 id="credential-title">Update account credentials</h2><p>{account.email} · the previous revision remains audit-visible, never readable</p></div><button type="button" className="icon-button" aria-label="Close credential editor" onClick={onClose}><X size={18} /></button></div><form id="credential-editor" className="modal-body" onSubmit={save} noValidate>{error && <div className="form-error" role="alert"><XCircle size={17} /><span>{error}</span></div>}<div className="security-callout"><LockKeyhole size={17} /><div><strong>Revision-safe update</strong><span>Values are encrypted at the API boundary. Saving marks this account ready for a fresh login run.</span></div></div><div className="credential-stack"><SecretField label="New password" id="revision-password" value={form.password} onChange={(value) => update("password", value)} visible={!!shown.password} onToggle={() => setShown((current) => ({ ...current, password: !current.password }))} autoComplete="new-password" /><SecretField label="Recovery email or code" id="revision-recovery" value={form.recovery} onChange={(value) => update("recovery", value)} visible={!!shown.recovery} onToggle={() => setShown((current) => ({ ...current, recovery: !current.recovery }))} autoComplete="off" /><SecretField label="2FA secret" id="revision-two-fa" value={form.two_fa} onChange={(value) => update("two_fa", value)} visible={!!shown.two_fa} onToggle={() => setShown((current) => ({ ...current, two_fa: !current.two_fa }))} autoComplete="off" /></div></form><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" form="credential-editor" className="button primary" disabled={pending} aria-busy={pending}>{pending && <span className="button-spinner" />}Save encrypted revision</button></div></section></div>;
 }
 
-function LoginBatchModal({ groups, initialGroup, onClose, onSuccess, onError }: { groups: Group[]; initialGroup: string; onClose: () => void; onSuccess: (message: string) => void; onError: (message: string) => void }) {
+function LoginBatchModal({ groups, initialGroup, onClose, onStarted, onError }: { groups: Group[]; initialGroup: string; onClose: () => void; onStarted: (job: LoginJob) => void; onError: (message: string) => void }) {
   const [groupId, setGroupId] = useState(initialGroup);
   const [concurrency, setConcurrency] = useState("4");
   const [pending, setPending] = useState(false);
@@ -255,13 +257,33 @@ function LoginBatchModal({ groups, initialGroup, onClose, onSuccess, onError }: 
     try {
       const created = await api<LoginJob>("/api/v1/login-jobs", { method: "POST", body: JSON.stringify({ group_id: groupId, concurrency_limit: Number(concurrency) }) });
       const started = await api<LoginJob>(`/api/v1/login-jobs/${created.id}/start`, { method: "POST" });
-      onSuccess(`${started.total_count} account${started.total_count === 1 ? "" : "s"} queued · ${started.running_count} profile session${started.running_count === 1 ? "" : "s"} opened · concurrency ${started.concurrency_limit}`);
+      onStarted(started);
     } catch (requestError) { const message = (requestError as Error).message; setError(message); onError(message); }
     finally { setPending(false); }
   };
   const group = groups.find((candidate) => candidate.id === groupId);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal batch-modal" role="dialog" aria-modal="true" aria-labelledby="batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> CONTROLLED DISPATCH</div><h2 id="batch-title">Queue a login batch</h2><p>Open isolated saved profiles in waves. Each account keeps its own session lock.</p></div><button type="button" className="icon-button" aria-label="Close login batch dialog" onClick={onClose}><X size={18} /></button></div><form id="batch-form" className="modal-body" onSubmit={submit} noValidate>{error && <div className="form-error" role="alert"><XCircle size={17} /><span>{error}</span></div>}<div className="field"><label htmlFor="batch-group">Account group <span className="required">Required</span></label><select id="batch-group" value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">Select a group</option>{groups.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.ready_count}/{candidate.capacity} ready</option>)}</select></div><div className="batch-control"><div><label htmlFor="concurrency">Concurrent profiles</label><small>How many account sessions can be open at the same time.</small></div><input id="concurrency" type="number" min="1" max="50" value={concurrency} onChange={(event) => setConcurrency(event.target.value)} /></div><div className="dispatch-preview"><div><span className="detail-label">Dispatch preview</span><strong>{group?.ready_count ?? 0} accounts in scope</strong></div><div className="dispatch-meter" aria-hidden="true"><span style={{ width: `${Math.min(100, ((group?.ready_count ?? 0) / Math.max(1, group?.capacity ?? 300)) * 100)}%` }} /></div><small>Remaining accounts stay queued until a running profile finishes or the batch is dispatched again.</small></div><div className="security-callout"><ShieldCheck size={17} /><div><strong>Challenge-safe behavior</strong><span>Normal sign-in work can continue in isolated profiles. CAPTCHA, MFA, and unknown pages pause the affected account for operator attention.</span></div></div></form><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" form="batch-form" className="button primary" disabled={pending} aria-busy={pending}>{pending && <span className="button-spinner" />}Open controlled batch</button></div></section></div>;
 }
+
+function LoginJobWorkspace({ job, onUpdate, onClose, onError }: { job: LoginJob; onUpdate: (job: LoginJob) => void; onClose: () => void; onError: (message: string) => void }) {
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!["RUNNING", "QUEUED"].includes(job.status)) return;
+    const timer = window.setInterval(() => { api<LoginJob>(`/api/v1/login-jobs/${job.id}/progress`).then(onUpdate).catch(() => undefined); }, 4000);
+    return () => window.clearInterval(timer);
+  }, [job.id, job.status, onUpdate]);
+  const action = async (name: "dispatch-next" | "pause" | "resume" | "cancel") => {
+    setPending(name);
+    try { onUpdate(await api<LoginJob>(`/api/v1/login-jobs/${job.id}/${name}`, { method: "POST" })); }
+    catch (requestError) { const message = (requestError as Error).message; onError(message); }
+    finally { setPending(null); }
+  };
+  const completedCount = job.succeeded_count + job.attention_count + job.failed_count;
+  const progress = job.total_count ? Math.round((completedCount / job.total_count) * 100) : 0;
+  return <div className="modal-backdrop" role="presentation"><section className="modal job-modal" role="dialog" aria-modal="true" aria-labelledby="job-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> BATCH CONTROL</div><h2 id="job-title">Login batch progress</h2><p>{job.total_count} accounts · concurrency {job.concurrency_limit} · {labelStatus(job.status)}</p></div><button type="button" className="icon-button" aria-label="Close batch workspace" onClick={onClose}><X size={18} /></button></div><div className="job-body"><div className="job-progress-head"><div><span className="detail-label">Completion</span><strong>{completedCount} of {job.total_count}</strong></div><span className="job-percent">{progress}%</span></div><div className="job-progress" aria-label={`${progress}% complete`}><span style={{ width: `${progress}%` }} /></div><div className="job-stats"><JobStat label="Running" value={job.running_count} tone="running" /><JobStat label="Queued" value={job.queued_count} tone="queued" /><JobStat label="Completed" value={job.succeeded_count} tone="done" /><JobStat label="Attention" value={job.attention_count} tone="attention" /></div><div className="job-list" aria-label="Account batch progress"><div className="job-list-head"><span>ACCOUNT</span><span>STATE</span></div>{job.items.map((item) => <div className="job-item" key={item.id}><div><strong>{item.account_email}</strong><small>{item.session_id ? `Session ${item.session_id}` : "Waiting for an isolated profile"}</small></div><span className={`job-item-state ${item.state.toLowerCase()}`}>{labelStatus(item.state)}</span></div>)}</div><div className="security-callout"><ShieldCheck size={17} /><div><strong>Audit-safe control</strong><span>Each profile is isolated and locked to one account. Google security challenges pause only the affected item.</span></div></div></div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Keep workspace open</button>{job.status === "RUNNING" && <button type="button" className="button secondary" onClick={() => action("pause")} disabled={pending !== null} aria-busy={pending === "pause"}>Pause batch</button>}{job.status === "PAUSED" && <button type="button" className="button secondary" onClick={() => action("resume")} disabled={pending !== null} aria-busy={pending === "resume"}><Play size={16} /> Resume batch</button>}{job.status === "RUNNING" && job.queued_count > 0 && <button type="button" className="button secondary" onClick={() => action("dispatch-next")} disabled={pending !== null} aria-busy={pending === "dispatch-next"}><Play size={16} /> Dispatch next wave</button>}{["QUEUED", "RUNNING", "PAUSED"].includes(job.status) && <button type="button" className="button danger" onClick={() => action("cancel")} disabled={pending !== null} aria-busy={pending === "cancel"}>Cancel batch</button>}</div></section></div>;
+}
+
+function JobStat({ label, value, tone }: { label: string; value: number; tone: string }) { return <div className={`job-stat ${tone}`}><span>{label}</span><strong>{value}</strong></div>; }
 
 function SessionWorkspace({ session, onUpdate, onClose, onError }: { session: Session; onUpdate: (session: Session) => void; onClose: () => void; onError: (message: string) => void }) {
   const [pending, setPending] = useState<"complete" | "verify" | "close" | null>(null);

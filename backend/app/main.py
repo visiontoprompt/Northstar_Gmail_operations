@@ -10,7 +10,7 @@ from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
 from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupResponse, ImportSummary, LoginJobCreate, LoginJobResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate
-from .service import ImportValidationError, account_response, add_account, close_session, create_login_job, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_sessions, observe_session_page, preview_import, record_session_event, session_response, start_login_session, update_credentials, update_login_job_state
+from .service import ImportValidationError, account_response, add_account, close_session, create_login_job, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_sessions, observe_session_page, preview_import, recover_stale_sessions, record_session_event, resume_login_job, session_response, start_login_session, update_credentials, update_login_job_state
 
 settings = get_settings()
 
@@ -163,12 +163,38 @@ def dispatch_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
+@app.get("/api/v1/login-jobs/{job_id}/progress", response_model=LoginJobResponse)
+def login_job_progress(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = get_login_job(db, settings.demo_org_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Login batch not found")
+    return job
+
+
+@app.post("/api/v1/login-jobs/{job_id}/dispatch-next", response_model=LoginJobResponse)
+def dispatch_next_login_wave(job_id: str, db: Session = Depends(get_db)) -> dict:
+    return dispatch_bulk_login_job(job_id, db)
+
+
+@app.post("/api/v1/login-jobs/{job_id}/resume", response_model=LoginJobResponse)
+def resume_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return resume_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/login-jobs/{job_id}/cancel", response_model=LoginJobResponse)
 def cancel_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     try:
         return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "CANCELLED")
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/maintenance/recover-stale-sessions")
+def recover_stale_session_locks(stale_after_seconds: int = Query(default=900, ge=60, le=86400), db: Session = Depends(get_db)) -> dict[str, int]:
+    return {"recovered": recover_stale_sessions(db, settings.demo_org_id, "system", stale_after_seconds)}
 
 
 @app.get("/api/v1/audit-events", response_model=list[AuditEventResponse])

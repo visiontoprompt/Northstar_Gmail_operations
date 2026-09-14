@@ -281,6 +281,40 @@ def dispatch_login_job(db: Session, organization_id: str, actor_id: str, job_id:
     return get_login_job(db, organization_id, job.id)
 
 
+def resume_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+    job = db.scalar(select(LoginJob).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    if not job:
+        raise ImportValidationError("Login batch not found")
+    if job.status == "PAUSED":
+        update_login_job_state(db, organization_id, actor_id, job_id, "QUEUED")
+    update_login_job_state(db, organization_id, actor_id, job_id, "RUNNING")
+    return dispatch_login_job(db, organization_id, actor_id, job_id)
+
+
+def recover_stale_sessions(db: Session, organization_id: str, actor_id: str, stale_after_seconds: int = 900) -> int:
+    cutoff = utcnow().timestamp() - stale_after_seconds
+    sessions = db.scalars(select(BrowserSession).options(joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))).all()
+    recovered = 0
+    for session in sessions:
+        if session.last_event_at.timestamp() >= cutoff:
+            continue
+        close_local_browser(session.id)
+        session.state = "NEEDS_ATTENTION"
+        session.login_state = "STALE_WORKER"
+        session.failure_reason = "The session stopped reporting heartbeats"
+        session.last_event_at = utcnow()
+        session.profile.status = "RESERVED"
+        session.profile.lock_state = "UNLOCKED"
+        session.profile.active_session_id = None
+        session.profile.last_closed_at = utcnow()
+        _sync_job_item_for_session(db, session.id, session.state)
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="attention", metadata_json={"account_id": session.account_id, "stale_after_seconds": stale_after_seconds}))
+        recovered += 1
+    if recovered:
+        db.commit()
+    return recovered
+
+
 def _sync_job_item_for_session(db: Session, session_id: str, session_state: str) -> None:
     item = db.scalar(select(LoginJobItem).where(LoginJobItem.session_id == session_id))
     if not item or item.state != "RUNNING":

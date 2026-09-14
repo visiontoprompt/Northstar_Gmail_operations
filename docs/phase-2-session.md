@@ -33,4 +33,8 @@ The application does not solve or bypass CAPTCHA/MFA, or use stealth/fingerprint
 - `GET /api/v1/login-jobs/{id}` — read batch progress and per-account states.
 - `POST /api/v1/login-jobs/{id}/start` — dispatch the first concurrency-limited wave of isolated profiles.
 - `POST /api/v1/login-jobs/{id}/dispatch` — dispatch the next available wave.
+- `GET /api/v1/login-jobs/{id}/progress` — read the same progress payload for polling clients.
+- `POST /api/v1/login-jobs/{id}/dispatch-next` — dispatch the next available wave using an explicit operation name.
+- `POST /api/v1/login-jobs/{id}/resume` — resume a paused batch and dispatch available profiles.
 - `POST /api/v1/login-jobs/{id}/pause` / `cancel` — control queued work and release profiles on cancellation.
+- `POST /api/v1/maintenance/recover-stale-sessions` — release profiles whose workers stopped reporting heartbeats and mark them for attention.
