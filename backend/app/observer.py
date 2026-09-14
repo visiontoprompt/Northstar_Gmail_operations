@@ -69,7 +69,13 @@ class BrowserObserver:
                         self._tick(browser)
                         self._stop.wait(self._interval)
                 finally:
-                    browser.close()
+                    # This Browser is attached to a Chrome process owned by
+                    # runtime.py. Calling browser.close() over CDP closes the
+                    # remote Chrome and breaks the user's dedicated session.
+                    # Exiting sync_playwright below disconnects the observer;
+                    # runtime.close_local_browser remains the only owner that
+                    # may terminate the Chrome process.
+                    logger.debug("observer disconnecting from session %s", self.session_id)
         except Exception:  # noqa: BLE001 - observer must never kill the worker
             logger.exception("browser observer ended for session %s", self.session_id)
 

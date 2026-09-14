@@ -146,6 +146,24 @@ def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
         assert client.get(f"/api/v1/sessions?account_id={account['id']}").json()[0]["id"] == session["id"]
 
 
+def test_dead_browser_session_is_recovered_before_retry(monkeypatch) -> None:
+    from app import service
+
+    service.get_settings().browser_launch_enabled = True
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "stale-browser@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        first = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert first.status_code == 201
+        monkeypatch.setattr(service, "local_browser_is_alive", lambda _profile_id, _session_id: False)
+
+        second = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert second.status_code == 201
+        history = client.get(f"/api/v1/sessions?account_id={account['id']}").json()
+        assert history[0]["state"] == "LOGIN_REQUIRED"
+        assert history[1]["state"] == "CLOSED"
+
+
 def test_verification_event_is_visible_without_exposing_secrets() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]

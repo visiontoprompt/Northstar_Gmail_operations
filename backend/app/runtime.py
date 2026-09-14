@@ -128,6 +128,20 @@ def browser_debug_port(session_id: str) -> int | None:
     return _cdp_ports.get(session_id)
 
 
+def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bool:
+    """Return whether the account's dedicated Chrome process is still alive.
+
+    The in-memory process registry is empty after an API restart, so also scan
+    the profile-specific command line. This prevents a durable session row from
+    blocking a retry after its Chrome process has already exited.
+    """
+    process = _processes.get(session_id) if session_id else None
+    if process is not None:
+        return process.poll() is None
+    profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
+    return bool(_find_chrome_pids_for_profile(profile_path))
+
+
 def close_local_browser(session_id: str) -> None:
     process = _processes.pop(session_id, None)
     _cdp_ports.pop(session_id, None)

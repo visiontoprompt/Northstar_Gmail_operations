@@ -18,4 +18,5 @@ os.environ.setdefault("WORKER_MAX_ACTIVE_PROFILES", "50")
 @pytest.fixture(autouse=True)
 def fake_browser_launch(monkeypatch):
     monkeypatch.setattr("app.service.launch_local_browser", lambda profile_id, session_id: (True, 4242))
+    monkeypatch.setattr("app.service.local_browser_is_alive", lambda profile_id, session_id: True)
     yield

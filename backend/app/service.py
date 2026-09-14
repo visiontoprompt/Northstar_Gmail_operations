@@ -14,7 +14,7 @@ from .db import SessionLocal
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
-from .runtime import browser_debug_port, close_local_browser, launch_local_browser
+from .runtime import browser_debug_port, close_local_browser, launch_local_browser, local_browser_is_alive
 from .observer import BrowserObserver
 from .login_policy import PageObservation, classify_page
 from .worker.locks import RedisLocks, account_lock_key
@@ -460,6 +460,24 @@ def _stop_observer(session_id: str) -> None:
         observer.stop()
 
 
+def _recover_stale_session(db: Session, organization_id: str, actor_id: str, session: BrowserSession) -> None:
+    """Release a durable session row whose dedicated browser is gone."""
+    close_local_browser(session.id)
+    _stop_observer(session.id)
+    now = utcnow()
+    session.state = "CLOSED"
+    session.closed_at = now
+    session.last_event_at = now
+    session.profile.status = "RESERVED"
+    session.profile.lock_state = "UNLOCKED"
+    session.profile.active_session_id = None
+    session.profile.last_closed_at = now
+    if session.login_state == "REQUIRED":
+        session.account.login_status = "NOT_STARTED"
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id, "reason": "dedicated_browser_not_running"}))
+    logger.warning("session %s: recovered stale profile lock because its browser is not running", session.id)
+
+
 def _observe_in_own_session(organization_id: str, actor_id: str, session_id: str, url: str, title: str, text: str) -> None:
     db = SessionLocal()
     try:
@@ -715,7 +733,11 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     if profile.active_session_id:
         active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
         if active:
-            raise ImportValidationError("This account already has an open login session")
+            browser_opened = bool(active.metadata_json.get("browser_opened"))
+            browser_alive = browser_opened and local_browser_is_alive(profile.id, active.id)
+            if browser_alive or not get_settings().browser_launch_enabled:
+                raise ImportValidationError("This account already has an open login session")
+            _recover_stale_session(db, organization_id, actor_id, active)
     session_id = _new_id("session")
     launched, process_id = launch_local_browser(profile.id, session_id)
     logger.info("session %s: browser launch result=%s process_id=%s (browser_launch_enabled=%s, observer_enabled=%s)", session_id, launched, process_id, get_settings().browser_launch_enabled, get_settings().browser_observer_enabled)

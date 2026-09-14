@@ -39,7 +39,7 @@ def chrome_profile(tmp_path: Path):
                 pass
         if port is None:
             time.sleep(0.25)
-    yield port
+    yield proc, port
     proc.terminate()
     try:
         proc.wait(timeout=3)
@@ -48,6 +48,7 @@ def chrome_profile(tmp_path: Path):
 
 
 def test_observer_connects_to_chrome_cdp(chrome_profile):
+    proc, chrome_profile = chrome_profile
     if chrome_profile is None:
         pytest.skip("Chrome did not expose DevToolsActivePort")
     observed = []
@@ -58,3 +59,4 @@ def test_observer_connects_to_chrome_cdp(chrome_profile):
         time.sleep(0.05)
     observer.stop()
     assert any(("about:blank" in url or url) for url, _ in observed)
+    assert proc.poll() is None

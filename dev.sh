@@ -68,6 +68,10 @@ fi
 if [[ "$backend_ready" != true ]]; then
   (
     cd "$BACKEND_DIR"
+    # Local development always opens the dedicated account Chrome window.
+    # Production workers must supply these settings through their deployment.
+    export BROWSER_LAUNCH_ENABLED=true
+    export BROWSER_OBSERVER_ENABLED=true
     exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
   ) &
   backend_pid=$!
