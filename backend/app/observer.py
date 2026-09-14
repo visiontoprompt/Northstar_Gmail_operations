@@ -56,8 +56,8 @@ _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
-_CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], #password"
-_OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, #totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
+_CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], input#password"
+_OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
 
 
 class BrowserObserver:
@@ -369,18 +369,18 @@ def _fill_sign_in_form(page: "Page", observer: "BrowserObserver", url: str) -> N
         observer._emit("skipped", "no stored credentials for account")
         return
     identifier, password = credentials
-    password_selector = "input[type=password]:visible, input[name=Passwd]:visible, #password:visible"
+    password_selector = "input[type=password]:visible, input[name=Passwd]:visible, input#password:visible"
     identifier_selector = "input[type=email]:visible, input[name=identifier]:visible, input[name=Email]:visible, input[id=identifierId]:visible"
     failures = observer._fill_failed_urls.get(url, 0)
     try:
         password_field = page.locator(password_selector)
         identifier_field = page.locator(identifier_selector)
-        if password_field.count() and password_field.first.input_value(timeout=1000):
+        if password_field.count() and _input_value(password_field.first):
             if url not in observer._submitted_urls:
                 _click_submit(page, url)
                 observer._submitted_urls.add(url)
             return
-        if identifier_field.count() and identifier_field.first.input_value(timeout=1000):
+        if identifier_field.count() and _input_value(identifier_field.first):
             if url not in observer._submitted_urls:
                 _click_submit(page, url)
                 observer._submitted_urls.add(url)
@@ -453,7 +453,7 @@ def _fill_otp_code(page: "Page", observer: "BrowserObserver", url: str) -> None:
         return
     try:
         otp_field = page.locator(_OTP_FIELD_SELECTOR)
-        if otp_field.count() and not otp_field.first.input_value(timeout=1000):
+        if otp_field.count() and not _input_value(otp_field.first):
             otp_field.first.fill(code, timeout=2000)
             observer._emit("otp_filled", url)
             _click_submit(page, url)
@@ -523,6 +523,19 @@ def _click_submit(page: "Page", url: str) -> None:
 def _visible_text(page: "Page") -> str:
     try:
         return (page.locator("body").inner_text(timeout=1000)[:4000] if page.locator("body").count() else "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _input_value(field) -> str:
+    """Read a field's current value without aborting the sign-in step.
+
+    The selector may match a wrapper element carrying a credential-looking id
+    (Google wraps the password field in a div#password), which is not an
+    <input> and makes Locator.input_value raise. Such a node simply counts as
+    empty so the flow falls through to the real input and fills it."""
+    try:
+        return field.input_value(timeout=1000)
     except Exception:  # noqa: BLE001
         return ""
 

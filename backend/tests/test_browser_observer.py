@@ -358,6 +358,27 @@ def test_login_policy_requires_a_mailbox_route_and_marker():
     assert action is PageAction.SAFE_TO_OBSERVE
 
 
+def test_input_value_guards_against_non_input_nodes():
+    from app.observer import _input_value
+
+    class _NonInput:
+        def input_value(self, timeout: int = 1000):
+            raise RuntimeError("Node is not an <input>")
+
+    assert _input_value(_NonInput()) == ""
+
+
+def test_selector_constraints_only_match_inputs_for_password_ids():
+    from app.observer import _CREDENTIAL_FIELD_SELECTOR, _OTP_FIELD_SELECTOR
+
+    credential_parts = {part.strip() for part in _CREDENTIAL_FIELD_SELECTOR.split(",")}
+    assert "#password" not in credential_parts
+    assert "input#password" in credential_parts
+    otp_parts = {part.strip() for part in _OTP_FIELD_SELECTOR.split(",")}
+    assert "#totpPin" not in otp_parts
+    assert any(part.startswith("input#totpPin") for part in otp_parts)
+
+
 def test_observer_stop_joins_thread():
     def _block_until_stopped(_pw, _observer):
         _observer._stop.wait(10)
