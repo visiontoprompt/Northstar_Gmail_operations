@@ -84,12 +84,14 @@ def test_observer_clicks_safe_consent():
     assert getattr(button, "clicked", False) is True
 
 
-def test_observer_pauses_for_human_on_captcha():
-    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, interval=0.05)
+def test_observer_reports_captcha_to_session_but_keeps_watching():
+    seen = []
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05)
     page = _FakePage("https://accounts.google.com/v3/signin/challenge", "security check", "verify it's you")
     with patch("app.observer.classify_page", return_value=(PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN)):
         observer._tick(_fake_browser([page]))
-    assert observer._stop.is_set()
+    assert seen, "the challenge must be reported to the session"
+    assert not observer._stop.is_set(), "observer must stay alive to catch Gmail after the human clears the challenge"
 
 
 def test_observer_records_observations():
@@ -110,6 +112,29 @@ def test_observer_deduplicates_unchanged_observations():
         observer._tick(browser)
         observer._tick(browser)
     assert len(seen) == 1
+
+
+def test_observer_ignores_transient_unknown_during_cold_page_load():
+    seen = []
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05, settle_seconds=5.0)
+    page = _FakePage("https://accounts.google.com/", "", "")
+    browser = _fake_browser([page])
+    with patch("app.observer.classify_page", return_value=(PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION)):
+        observer._tick(browser)
+    assert seen == []
+    assert not observer._stop.is_set()
+    assert observer._unknown_since is not None
+
+
+def test_observer_reports_unknown_after_settle_window():
+    seen = []
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05, settle_seconds=0.0)
+    page = _FakePage("https://accounts.google.com/", "unexpected page", "some unexpected content")
+    browser = _fake_browser([page])
+    with patch("app.observer.classify_page", return_value=(PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION)):
+        observer._tick(browser)
+    assert seen, "a settled unknown page must be reported"
+    assert not observer._stop.is_set()
 
 
 def test_observer_requires_an_exact_google_host_for_consent():

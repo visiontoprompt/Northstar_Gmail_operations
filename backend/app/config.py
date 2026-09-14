@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     browser_observer_enabled: bool = True
     browser_cdp_port: int = 0
     browser_observe_interval: float = 1.0
+    browser_observe_settle_seconds: float = 5.0
     redis_url: str = "redis://localhost:6379/0"
     worker_enabled: bool = False
     worker_poll_interval: float = 5.0

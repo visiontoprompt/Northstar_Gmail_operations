@@ -7,9 +7,9 @@ The login worker boundary is observation-first. It may classify normal Google pa
 - `LOGIN_FORM` — Google sign-in surface detected; human-controlled sign-in may continue.
 - `GMAIL_HOME` — Gmail surface detected.
 - `ORDINARY_INTERSTITIAL` — known consent/welcome/terms-style page; safe to observe and hand to the approved worker flow.
-- `CAPTCHA` — pause and require a human to complete the challenge.
-- `MFA_OR_SECURITY_CHECK` — pause and require a human to complete the verification.
-- `UNKNOWN` — stop and send the session to attention rather than guessing.
+- `CAPTCHA` — pause (the session is marked `NEEDS_ATTENTION`) and require a human to complete the challenge; the observer keeps watching so Gmail is still detected after it is cleared.
+- `MFA_OR_SECURITY_CHECK` — same pause-and-keep-watching behavior.
+- `UNKNOWN` — a page is only judged after a settle window (`BROWSER_OBSERVE_SETTLE_SECONDS`, default 5) so a still-loading page can never fail a fresh session; a page that stays unknown is sent to attention rather than guessed.
 
 `POST /api/v1/sessions/{id}/observations` accepts a page observation from a future worker. The API stores only the signal, host, and bounded path in the audit event; it does not persist page text, query strings, fragments, or credential material.
 

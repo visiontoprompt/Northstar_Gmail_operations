@@ -8,6 +8,8 @@ The observer is a read-only, consent-only automation:
   accounts.* / consent.*) by clicking the match;
 - reports CAPTCHA / MFA / security / unknown pages by calling
   observe_session_page, which pauses the session for a human;
+- keeps watching after a page pauses, so the mailbox is detected as soon as the
+  human clears a challenge and Gmail loads.
 
 It never fills or submits credentials, recovery codes, or 2FA secrets, never
 clears/deletes cookies, and never manipulates fingerprint/stealth signals.
@@ -24,23 +26,37 @@ from urllib.parse import urlparse
 from .login_policy import PageAction, PageObservation, classify_page
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Browser, Page, sync_playwright
+    from playwright.sync_api import Browser, Page
 
 logger = logging.getLogger(__name__)
 
 _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "ok")
 
+_BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
+
 
 class BrowserObserver:
-    def __init__(self, session_id: str, profile_id: str, cdp_port: int, observe_session_page=object, interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        profile_id: str,
+        cdp_port: int,
+        observe_session_page=object,
+        interval: float = 1.0,
+        settle_seconds: float = 5.0,
+        connect_timeout: float = 12.0,
+    ) -> None:
         self.session_id = session_id
         self.profile_id = profile_id
         self.cdp_port = cdp_port
         self._observe_session_page = observe_session_page
         self._interval = interval
+        self._settle_seconds = settle_seconds
+        self._connect_timeout = connect_timeout
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_observation: tuple[str, str, str, str] | None = None
+        self._unknown_since: float | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -60,45 +76,101 @@ class BrowserObserver:
         except ImportError:  # pragmatic fallback: no observer, session is human hand-off
             logger.warning("playwright not installed; session %s is human hand-off", self.session_id)
             return
-        try:
-            with sync_playwright() as pw:
-                logger.info("observer connecting to CDP on port %s for session %s", self.cdp_port, self.session_id)
-                browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
-                try:
-                    while not self._stop.is_set():
+        with sync_playwright() as pw:
+            browser = _connect_with_retry(pw, self.cdp_port, self.session_id, self._connect_timeout, self._stop)
+            if browser is None:
+                return
+            logger.info("AUTOMATION ACTIVE: observer attached to session %s on CDP port %s", self.session_id, self.cdp_port)
+            try:
+                while not self._stop.is_set():
+                    try:
                         self._tick(browser)
-                        self._stop.wait(self._interval)
-                finally:
-                    # This Browser is attached to a Chrome process owned by
-                    # runtime.py. Calling browser.close() over CDP closes the
-                    # remote Chrome and breaks the user's dedicated session.
-                    # Exiting sync_playwright below disconnects the observer;
-                    # runtime.close_local_browser remains the only owner that
-                    # may terminate the Chrome process.
-                    logger.debug("observer disconnecting from session %s", self.session_id)
-        except Exception:  # noqa: BLE001 - observer must never kill the worker
-            logger.exception("browser observer ended for session %s", self.session_id)
+                    except Exception:  # noqa: BLE001 - a bad page must not kill the observer
+                        logger.exception("observer tick failed for session %s", self.session_id)
+                    self._stop.wait(self._interval)
+            finally:
+                # This Browser is attached to a Chrome process owned by
+                # runtime.py. Calling browser.close() over CDP closes the
+                # remote Chrome and breaks the user's dedicated session.
+                # Exiting sync_playwright below disconnects the observer;
+                # runtime.close_local_browser remains the only owner that
+                # may terminate the Chrome process.
+                logger.debug("observer disconnecting from session %s", self.session_id)
 
     def _tick(self, browser: "Browser") -> None:
-        for page in browser.contexts[0].pages if browser.contexts else []:
-            url = page.url or ""
-            title = page.title() or ""
-            text = _visible_text(page)
-            signal, action = classify_page(PageObservation(url=url, title=title, text=text))
-            observation_key = (url, title, signal.value, action.value)
-            if self._observe_session_page is not object and observation_key != self._last_observation:
-                try:
-                    self._observe_session_page(self.session_id, url, title, text)
-                    self._last_observation = observation_key
-                except Exception:  # noqa: BLE001
-                    self._stop.set()
-                    return
-            if action == PageAction.WAIT_FOR_HUMAN or signal.value == "UNKNOWN":
-                logger.info("session %s paused for human on %s", self.session_id, signal.value)
+        page = _active_page(browser)
+        if page is None:
+            return
+        url = page.url or ""
+        title = page.title() or ""
+        text = _visible_text(page)
+        signal, action = classify_page(PageObservation(url=url, title=title, text=text))
+
+        if signal.value == "UNKNOWN":
+            if not _page_has_settled(self, url, text):
+                # The page engine is often still loading when the observer first
+                # attaches. Judge it only after the settle window so opening the
+                # browser never fails the session during a cold start.
+                return
+        else:
+            self._unknown_since = None
+
+        observation_key = (url, title, signal.value, action.value)
+        if self._observe_session_page is not object and observation_key != self._last_observation:
+            try:
+                self._observe_session_page(self.session_id, url, title, text)
+                self._last_observation = observation_key
+                if signal.value == "LOGIN_FORM":
+                    logger.info("session %s: login form detected on %s; awaiting manual sign-in in the opened window", self.session_id, url)
+                elif signal.value == "UNKNOWN":
+                    logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
+            except Exception:  # noqa: BLE001
                 self._stop.set()
                 return
-            if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
-                _click_consent(page)
+
+        if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
+            _click_consent(page)
+
+
+def _connect_with_retry(pw, cdp_port: int, session_id: str, timeout: float, stop: threading.Event):
+    """Chrome may not have finished opening its debugging endpoint when the
+    observer thread starts; keep retrying for the attach window."""
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline and not stop.is_set():
+        try:
+            logger.info("observer connecting to CDP on port %s for session %s", cdp_port, session_id)
+            return pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(0.5)
+    logger.warning("observer could not attach to session %s within %.0fs: %s", session_id, timeout, last_error)
+    return None
+
+
+def _active_page(browser: "Browser") -> "Page | None":
+    for context in browser.contexts:
+        for page in context.pages:
+            url = page.url or ""
+            if url and not url.startswith(_BLANK_URL_PREFIXES):
+                return page
+    for context in browser.contexts:
+        if context.pages:
+            return context.pages[0]
+    return None
+
+
+def _page_has_settled(observer: "BrowserObserver", url: str, text: str) -> bool:
+    now = time.monotonic()
+    if observer._unknown_since is None:
+        observer._unknown_since = now
+    if not url or url.startswith(_BLANK_URL_PREFIXES) or not text:
+        # Engine is still mid-load; give it more time before judging.
+        return False
+    settled = now - observer._unknown_since >= observer._settle_seconds
+    if not settled:
+        logger.debug("session %s: page unresolved on %s; inside settle window", observer.session_id, url)
+    return settled
 
 
 def _visible_text(page: "Page") -> str:

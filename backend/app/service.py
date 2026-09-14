@@ -435,11 +435,13 @@ _observers: dict[str, BrowserObserver] = {}
 def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str) -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
-        logger.info("observer disabled by config for session %s", session_id)
+        logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
+        _record_observer_status(session_id, organization_id, actor_id, False, "BROWSER_OBSERVER_ENABLED is false")
         return False
     cdp_port = browser_debug_port(session_id)
     if not cdp_port:
-        logger.warning("no CDP endpoint available for session %s; observer will not start", session_id)
+        logger.warning("session %s: browser window opened but no CDP endpoint was detected; automation cannot attach (check BROWSER_OBSERVER_ENABLED and playwright)", session_id)
+        _record_observer_status(session_id, organization_id, actor_id, False, "no CDP endpoint detected")
         return False
     observer = BrowserObserver(
         session_id,
@@ -447,11 +449,30 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         cdp_port,
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         interval=settings.browser_observe_interval,
+        settle_seconds=settings.browser_observe_settle_seconds,
     )
     _observers[session_id] = observer
     observer.start()
-    logger.info("observer started for session %s on CDP port %s", session_id, cdp_port)
+    _record_observer_status(session_id, organization_id, actor_id, True)
+    logger.info("AUTOMATION ACTIVE: observer attached to session %s on CDP port %s", session_id, cdp_port)
     return True
+
+
+def _record_observer_status(session_id: str, organization_id: str, actor_id: str, attached: bool, reason: str | None = None) -> None:
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session:
+            return
+        metadata = dict(session.metadata_json or {})
+        metadata["observer_attached"] = attached
+        if reason:
+            metadata["observer_reason"] = reason
+        session.metadata_json = metadata
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.observer_attached" if attached else "session.observer_not_attached", target_type="browser_session", target_id=session.id, result="success" if attached else "failure", metadata_json={"account_id": session.account_id, "reason": reason or ""}))
+        db.commit()
+    finally:
+        db.close()
 
 
 def _stop_observer(session_id: str) -> None:
@@ -704,6 +725,7 @@ def session_response(session: BrowserSession) -> dict:
         "login_state": session.login_state,
         "runtime_type": session.runtime_type,
         "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
+        "observer_attached": bool(session.metadata_json.get("observer_attached", False)),
         "session_url": f"/session/{session.id}",
         "opened_at": session.opened_at,
         "last_event_at": session.last_event_at,

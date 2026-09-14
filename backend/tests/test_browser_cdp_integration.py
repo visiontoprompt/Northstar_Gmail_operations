@@ -23,7 +23,7 @@ def chrome_profile(tmp_path: Path):
             f"--user-data-dir={tmp_path / 'profile'}",
             "--remote-debugging-port=0",
             "--no-first-run",
-            "about:blank",
+            "data:text/html,<h1>Sign in</h1>",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -52,11 +52,11 @@ def test_observer_connects_to_chrome_cdp(chrome_profile):
     if chrome_profile is None:
         pytest.skip("Chrome did not expose DevToolsActivePort")
     observed = []
-    observer = BrowserObserver("s1", "p1", chrome_profile, observe_session_page=lambda sid, url, title, text: observed.append((url, title)), interval=0.05)
+    observer = BrowserObserver("s1", "p1", chrome_profile, observe_session_page=lambda sid, url, title, text: observed.append((url, title)), interval=0.05, settle_seconds=0.0)
     observer.start()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 8
     while time.monotonic() < deadline and not observed:
         time.sleep(0.05)
     observer.stop()
-    assert any(("about:blank" in url or url) for url, _ in observed)
+    assert any(url.startswith("data:") for url, _ in observed), observed
     assert proc.poll() is None
