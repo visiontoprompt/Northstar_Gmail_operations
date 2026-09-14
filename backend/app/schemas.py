@@ -109,6 +109,29 @@ class AccountResponse(BaseModel):
     updated_at: datetime
 
 
+class AccountMetadataUpdate(BaseModel):
+    proxy_label: str | None = Field(default=None, max_length=160)
+    proxy_region: str | None = Field(default=None, max_length=80)
+
+    @field_validator("proxy_label", "proxy_region")
+    @classmethod
+    def clean_metadata(cls, value: str | None) -> str | None:
+        return " ".join(value.split()) if value is not None and value.strip() else None
+
+
+class GroupMoveRequest(BaseModel):
+    destination_group_id: str = Field(min_length=1, max_length=64)
+
+
+class AccountDeleteRequest(BaseModel):
+    confirmation_email: str = Field(min_length=3, max_length=320)
+
+    @field_validator("confirmation_email")
+    @classmethod
+    def normalize_confirmation(cls, value: str) -> str:
+        return value.strip().lower()
+
+
 class AccountListResponse(BaseModel):
     items: list[AccountResponse]
     page: int
@@ -139,6 +162,26 @@ class CredentialRevisionResponse(BaseModel):
     recovery_masked: str
     two_fa_configured: bool
     created_at: datetime
+
+
+OPERATION_TYPES = ("contacts", "security", "labels", "apps", "mail", "addons", "alerts")
+
+
+class OperationDraftCreate(BaseModel):
+    operation_type: Literal["contacts", "security", "labels", "apps", "mail", "addons", "alerts"]
+    configuration: dict[str, str] = Field(default_factory=dict, max_length=20)
+
+
+class OperationDraftResponse(BaseModel):
+    id: str
+    account_id: str
+    operation_type: str
+    version: int
+    status: str
+    configuration: dict[str, str]
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class LoginJobCreate(BaseModel):
@@ -174,6 +217,35 @@ class LoginJobResponse(BaseModel):
     completed_at: datetime | None
     updated_at: datetime
     items: list[LoginJobItemResponse] = []
+
+
+class LoginJobProgressItem(BaseModel):
+    id: str
+    account_id: str
+    account_email: str
+    session_id: str | None
+    state: str
+    attempts: int
+    last_error: str | None
+    paused_reason: str | None
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class LoginJobProgressResponse(BaseModel):
+    id: str
+    status: str
+    concurrency_limit: int
+    total_count: int
+    queued_count: int
+    running_count: int
+    succeeded_count: int
+    attention_count: int
+    failed_count: int
+    cancelled_count: int
+    progress_percent: int
+    states: dict[str, int]
+    items: list[LoginJobProgressItem]
 
 
 class AuditEventResponse(BaseModel):

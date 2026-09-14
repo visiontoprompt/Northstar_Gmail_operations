@@ -1,22 +1,48 @@
+import os
 import re
+import socket
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
-from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, LoginJob, LoginJobItem, utcnow
+from .config import get_settings
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser
 from .login_policy import PageObservation, classify_page
+from .worker.locks import RedisLocks, account_lock_key
+from .worker.queue import RedisQueue
 from urllib.parse import urlparse
+
+WORKER_PREFIX = "worker-"
+API_WORKER_ID = "orchestrator-api"
+OPERATION_TYPES = {"contacts", "security", "labels", "apps", "mail", "addons", "alerts"}
+FORBIDDEN_OPERATION_KEY_PARTS = ("password", "recovery", "2fa", "totp", "cookie", "token", "secret")
+
+
+def _worker_token() -> str:
+    return f"{WORKER_PREFIX}{socket.gethostname()}_{os.getpid()}"
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class ImportValidationError(ValueError):
     pass
+
+
+def _bump_job(db: Session, job: LoginJob, **deltas: int) -> None:
+    values = {}
+    for field, delta in deltas.items():
+        if delta:
+            values[field] = getattr(LoginJob, field) + delta
+    if values:
+        db.execute(update(LoginJob).where(LoginJob.id == job.id).values(**values))
+        db.flush()
+        db.refresh(job)
 
 
 @dataclass
@@ -132,7 +158,7 @@ def account_response(account: GmailAccount) -> dict:
 
 
 def list_accounts(db: Session, organization_id: str, q: str | None, group_id: str | None, status: str | None, page: int, page_size: int) -> dict:
-    filters = [GmailAccount.organization_id == organization_id]
+    filters = [GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED"]
     if q:
         term = f"%{q.strip().lower()}%"
         filters.append(or_(GmailAccount.email.ilike(term), AccountGroup.name.ilike(term)))
@@ -147,6 +173,127 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
 
 def get_account(db: Session, organization_id: str, account_id: str) -> GmailAccount | None:
     return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+
+
+def update_account_metadata(db: Session, organization_id: str, actor_id: str, account_id: str, proxy_label: str | None, proxy_region: str | None) -> dict:
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    if not account:
+        raise ImportValidationError("Account not found")
+    if account.lifecycle_status == "ARCHIVED":
+        raise ImportValidationError("Archived accounts cannot be edited")
+    account.proxy_label = proxy_label
+    account.proxy_region = proxy_region
+    account.proxy_status = "ASSIGNED" if proxy_label or proxy_region else "UNASSIGNED"
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.metadata_updated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_label_changed": True, "proxy_region_changed": True, "proxy_status": account.proxy_status}))
+    db.commit()
+    return account_response(get_account(db, organization_id, account.id))
+
+
+def move_account_group(db: Session, organization_id: str, actor_id: str, account_id: str, destination_group_id: str) -> dict:
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    if not account:
+        raise ImportValidationError("Account not found")
+    if account.lifecycle_status == "ARCHIVED":
+        raise ImportValidationError("Archived accounts cannot be moved")
+    destination = db.scalar(select(AccountGroup).where(AccountGroup.organization_id == organization_id, AccountGroup.id == destination_group_id).with_for_update())
+    if not destination:
+        raise ImportValidationError("Choose a valid destination group")
+    if account.group_id == destination.id:
+        raise ImportValidationError("Account is already in this group")
+    active_count = db.scalar(select(func.count(GmailAccount.id)).where(GmailAccount.organization_id == organization_id, GmailAccount.group_id == destination.id, GmailAccount.lifecycle_status != "ARCHIVED")) or 0
+    if active_count >= destination.capacity:
+        raise ImportValidationError("Destination group is at capacity")
+    previous_group_id = account.group_id
+    account.group_id = destination.id
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.group_moved", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"from_group_id": previous_group_id, "to_group_id": destination.id}))
+    db.commit()
+    return account_response(get_account(db, organization_id, account.id))
+
+
+def archive_account(db: Session, organization_id: str, actor_id: str, account_id: str, confirmation_email: str) -> dict:
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    if not account:
+        raise ImportValidationError("Account not found")
+    if account.email.lower() != confirmation_email.lower():
+        raise ImportValidationError("Confirmation email does not match the account")
+    if account.lifecycle_status == "ARCHIVED":
+        raise ImportValidationError("Account is already archived")
+    now = utcnow()
+    active_sessions = db.scalars(select(BrowserSession).where(BrowserSession.organization_id == organization_id, BrowserSession.account_id == account.id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))).all()
+    for session in active_sessions:
+        close_local_browser(session.id)
+        session.state = "CLOSED"
+        session.closed_at = now
+        session.last_event_at = now
+        session.profile.status = "ARCHIVED"
+        session.profile.lock_state = "UNLOCKED"
+        session.profile.active_session_id = None
+        session.profile.last_closed_at = now
+    for item in db.scalars(select(LoginJobItem).where(LoginJobItem.organization_id == organization_id, LoginJobItem.account_id == account.id, LoginJobItem.state.in_(["QUEUED", "RUNNING"]))).all():
+        job = db.get(LoginJob, item.job_id)
+        if item.state == "RUNNING":
+            _release_item_lease(db, item)
+            if job:
+                _bump_job(db, job, running_count=-1)
+        else:
+            if job:
+                _bump_job(db, job, queued_count=-1)
+        item.state = "CANCELLED"
+        item.completed_at = now
+        item.paused_reason = "Account archived by operator"
+        _queue().clear(item.job_id)
+        if job and job.queued_count == 0 and job.running_count == 0 and job.status == "RUNNING":
+            job.status = "COMPLETED"
+            job.completed_at = now
+    account.lifecycle_status = "ARCHIVED"
+    account.readiness_status = "ARCHIVED"
+    account.login_status = "ARCHIVED"
+    account.gmail_status = "ARCHIVED"
+    if account.browser_profile:
+        account.browser_profile.status = "ARCHIVED"
+        account.browser_profile.lock_state = "UNLOCKED"
+        account.browser_profile.active_session_id = None
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.archived", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"profile_retained": True, "sessions_closed": len(active_sessions), "retention": "policy_managed"}))
+    db.commit()
+    return account_response(get_account(db, organization_id, account.id))
+
+
+def _operation_draft_response(draft: OperationDraft) -> dict:
+    return {"id": draft.id, "account_id": draft.account_id, "operation_type": draft.operation_type, "version": draft.version, "status": draft.status, "configuration": draft.configuration_json, "created_by": draft.created_by, "created_at": draft.created_at, "updated_at": draft.updated_at}
+
+
+def create_operation_draft(db: Session, organization_id: str, actor_id: str, account_id: str, operation_type: str, configuration: dict[str, str]) -> dict:
+    if operation_type not in OPERATION_TYPES:
+        raise ImportValidationError("Choose a supported operation type")
+    if len(configuration) > 20:
+        raise ImportValidationError("Operation drafts support at most 20 fields")
+    safe_configuration: dict[str, str] = {}
+    for key, value in configuration.items():
+        normalized_key = key.strip().lower()
+        if not normalized_key or any(part in normalized_key for part in FORBIDDEN_OPERATION_KEY_PARTS):
+            raise ImportValidationError("Operation drafts cannot contain credential or session secrets")
+        if len(normalized_key) > 64 or len(value) > 2000:
+            raise ImportValidationError("Operation draft fields are too long")
+        safe_configuration[normalized_key] = value.strip()
+    account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+    if not account:
+        raise ImportValidationError("Account not found")
+    if account.lifecycle_status == "ARCHIVED":
+        raise ImportValidationError("Archived accounts cannot receive operation drafts")
+    latest = db.scalar(select(func.max(OperationDraft.version)).where(OperationDraft.organization_id == organization_id, OperationDraft.account_id == account_id, OperationDraft.operation_type == operation_type)) or 0
+    draft = OperationDraft(id=_new_id("opdraft"), organization_id=organization_id, account_id=account_id, operation_type=operation_type, version=latest + 1, status="DRAFT", configuration_json=safe_configuration, created_by=actor_id)
+    db.add(draft)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="operation_draft.created", target_type="operation_draft", target_id=draft.id, result="success", metadata_json={"account_id": account_id, "operation_type": operation_type, "version": draft.version, "configuration_keys": sorted(safe_configuration)}))
+    db.commit()
+    db.refresh(draft)
+    return _operation_draft_response(draft)
+
+
+def list_operation_drafts(db: Session, organization_id: str, account_id: str) -> list[dict]:
+    if not db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id)):
+        raise ImportValidationError("Account not found")
+    drafts = db.scalars(select(OperationDraft).where(OperationDraft.organization_id == organization_id, OperationDraft.account_id == account_id).order_by(OperationDraft.created_at.desc())).all()
+    return [_operation_draft_response(draft) for draft in drafts]
 
 
 def update_credentials(db: Session, organization_id: str, actor_id: str, account_id: str, password: str, recovery: str, two_fa: str) -> dict:
@@ -188,7 +335,7 @@ def _login_job_response(job: LoginJob, items: list[LoginJobItem] | None = None) 
 def create_login_job(db: Session, organization_id: str, actor_id: str, group_id: str | None, account_ids: list[str], concurrency_limit: int) -> dict:
     if group_id and not db.scalar(select(AccountGroup.id).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id)):
         raise ImportValidationError("Choose a valid destination group")
-    query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.readiness_status == "READY_FOR_LOGIN")
+    query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED", GmailAccount.readiness_status == "READY_FOR_LOGIN")
     if group_id:
         query = query.where(GmailAccount.group_id == group_id)
     if account_ids:
@@ -205,6 +352,7 @@ def create_login_job(db: Session, organization_id: str, actor_id: str, group_id:
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.created", target_type="login_job", target_id=job.id, result="success", metadata_json={"group_id": group_id, "account_count": len(accounts), "concurrency_limit": concurrency_limit, "mode": "isolated_profile_queue"}))
     db.commit()
     job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.id == job.id))
+    enqueue_queued_items(db, job.id)
     return _login_job_response(job)
 
 
@@ -222,12 +370,16 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
     job = db.scalar(select(LoginJob).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
     if not job:
         raise ImportValidationError("Login batch not found")
-    transitions = {"QUEUED": {"PAUSED", "CANCELLED", "RUNNING"}, "RUNNING": {"PAUSED", "CANCELLED"}, "PAUSED": {"QUEUED", "CANCELLED"}}
+    transitions = {"QUEUED": {"PAUSED", "CANCELLED", "RUNNING"}, "RUNNING": {"PAUSED", "CANCELLED"}, "PAUSED": {"QUEUED", "CANCELLED", "RUNNING"}}
     if next_state not in transitions.get(job.status, set()):
         raise ImportValidationError(f"Cannot move a {job.status.lower()} batch to {next_state.lower()}")
     job.status = next_state
     if next_state == "RUNNING" and not job.started_at:
         job.started_at = utcnow()
+    if next_state == "PAUSED":
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.paused", target_type="login_job", target_id=job.id, result="success", metadata_json={"concurrency_limit": job.concurrency_limit, "running_count": job.running_count}))
+        db.commit()
+        return get_login_job(db, organization_id, job.id)
     if next_state == "CANCELLED":
         for item in db.scalars(select(LoginJobItem).where(LoginJobItem.job_id == job.id, LoginJobItem.state.in_(["QUEUED", "RUNNING"]))).all():
             if item.session_id:
@@ -242,94 +394,203 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
                     session.profile.lock_state = "UNLOCKED"
                     session.profile.active_session_id = None
                     session.profile.last_closed_at = now
+                    item.session_id = None
+            if item.state == "RUNNING":
+                _release_item_lease(db, item)
             item.state = "CANCELLED"
-        job.running_count = 0
-        job.queued_count = 0
+            item.completed_at = utcnow()
+            item.paused_reason = "Batch cancelled by operator"
+        _queue().clear(job.id)
+        db.execute(update(LoginJob).where(LoginJob.id == job.id).values(running_count=0, queued_count=0))
+        db.flush()
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"login_job.{next_state.lower()}", target_type="login_job", target_id=job.id, result="success", metadata_json={"concurrency_limit": job.concurrency_limit}))
     db.commit()
     return get_login_job(db, organization_id, job.id)
 
 
-def dispatch_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+def _queue() -> RedisQueue:
+    return RedisQueue()
+
+
+def _locks() -> RedisLocks:
+    return RedisLocks()
+
+
+def enqueue_queued_items(db: Session, job_id: str) -> int:
+    """Push every QUEUED item of a job into the Redis queue."""
+    items = db.scalars(select(LoginJobItem).where(LoginJobItem.job_id == job_id, LoginJobItem.state == "QUEUED")).all()
+    if not items:
+        return 0
+    entries = [(item.id, item.account_id, item.created_at.timestamp()) for item in items]
+    _queue().enqueue_many(job_id, entries)
+    return len(entries)
+
+
+def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+    """Start as many queued items as the job's concurrency and the global
+    active-profile cap allow. Each start acquires one account/profile lease."""
     job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
     if not job:
         raise ImportValidationError("Login batch not found")
     if job.status != "RUNNING":
         raise ImportValidationError("Start the login batch before dispatching profiles")
-    slots = max(0, job.concurrency_limit - job.running_count)
-    queued = [item for item in job.items if item.state == "QUEUED"][:slots]
-    for item in queued:
+    settings = get_settings()
+    queue = _queue()
+    locks = _locks()
+    worker_id = _worker_token() if actor_id.startswith(WORKER_PREFIX) else API_WORKER_ID
+    started = 0
+    while True:
+        running = queue.running_count(job.id)
+        if running >= job.concurrency_limit:
+            break
+        if queue.active_profile_count() >= settings.worker_max_active_profiles:
+            break
+        if job.queued_count <= 0:
+            break
+        candidate = queue.pop_next(job.id)
+        if not candidate:
+            break
+        item = db.get(LoginJobItem, candidate["item_id"])
+        if not item or item.state != "QUEUED" or item.job_id != job.id:
+            continue
+        token = locks.acquire(item.account_id, worker_id, "", settings.worker_lock_ttl * 1000)
+        if not token:
+            queue.requeue(job.id, item.id, item.account_id)
+            break
         try:
             session = start_login_session(db, organization_id, actor_id, item.account_id)
         except ImportValidationError as exc:
+            locks.force_release(item.account_id)
             item.state = "ATTENTION"
             item.last_error = "Account could not be opened for this batch"
-            job.queued_count = max(0, job.queued_count - 1)
-            job.attention_count += 1
+            item.paused_reason = str(exc)[:500]
+            item.completed_at = utcnow()
+            _bump_job(db, job, queued_count=-1, attention_count=1)
             db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.item_attention", target_type="login_job_item", target_id=item.id, result="attention", metadata_json={"job_id": job.id, "account_id": item.account_id, "reason": "profile_unavailable"}))
             continue
-        item.session_id = session["id"] if isinstance(session, dict) else session.id
+        locks.bind_session(item.account_id, token, session.id)
+        now = utcnow()
+        item.session_id = session.id
         item.state = "RUNNING"
         item.attempts += 1
-        job.queued_count = max(0, job.queued_count - 1)
-        job.running_count += 1
-    if job.queued_count == 0 and job.running_count == 0:
-        job.status = "COMPLETED"
-        job.completed_at = utcnow()
-    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.dispatched", target_type="login_job", target_id=job.id, result="success", metadata_json={"opened_count": len([item for item in queued if item.state == "RUNNING"]), "concurrency_limit": job.concurrency_limit}))
+        item.worker_id = worker_id
+        item.heartbeat_at = now
+        item.lock_key = token
+        item.last_error = None
+        item.paused_reason = None
+        item.completed_at = None
+        _bump_job(db, job, queued_count=-1, running_count=1)
+        db.add(JobLock(id=_new_id("joblock"), organization_id=organization_id, account_id=item.account_id, profile_id=session.profile_id, session_id=session.id, worker_id=worker_id, lock_key=token, acquired_at=now, heartbeat_at=now))
+        queue.add_active_profile(item.account_id)
+        queue.add_running(job.id, item.account_id)
+        started += 1
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.dispatched", target_type="login_job", target_id=job.id, result="success", metadata_json={"opened_count": started, "concurrency_limit": job.concurrency_limit}))
     db.commit()
     return get_login_job(db, organization_id, job.id)
 
 
-def resume_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+def dispatch_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
     job = db.scalar(select(LoginJob).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
     if not job:
         raise ImportValidationError("Login batch not found")
-    if job.status == "PAUSED":
-        update_login_job_state(db, organization_id, actor_id, job_id, "QUEUED")
-    update_login_job_state(db, organization_id, actor_id, job_id, "RUNNING")
-    return dispatch_login_job(db, organization_id, actor_id, job_id)
+    if job.status != "RUNNING":
+        raise ImportValidationError("Start the login batch before dispatching profiles")
+    enqueue_queued_items(db, job_id)
+    return dispatch_ready_items(db, organization_id, actor_id, job_id)
 
 
-def recover_stale_sessions(db: Session, organization_id: str, actor_id: str, stale_after_seconds: int = 900) -> int:
-    cutoff = utcnow().timestamp() - stale_after_seconds
-    sessions = db.scalars(select(BrowserSession).options(joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))).all()
-    recovered = 0
-    for session in sessions:
-        if session.last_event_at.timestamp() >= cutoff:
-            continue
-        close_local_browser(session.id)
-        session.state = "NEEDS_ATTENTION"
-        session.login_state = "STALE_WORKER"
-        session.failure_reason = "The session stopped reporting heartbeats"
-        session.last_event_at = utcnow()
-        session.profile.status = "RESERVED"
-        session.profile.lock_state = "UNLOCKED"
-        session.profile.active_session_id = None
-        session.profile.last_closed_at = utcnow()
-        _sync_job_item_for_session(db, session.id, session.state)
-        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="attention", metadata_json={"account_id": session.account_id, "stale_after_seconds": stale_after_seconds}))
-        recovered += 1
-    if recovered:
-        db.commit()
-    return recovered
+def _release_item_lease(db: Session, item: LoginJobItem) -> None:
+    """Drop the Redis lock, active-profile set, job running set, and mark the
+    durable job_locks row released."""
+    locks = _locks()
+    queue = _queue()
+    if item.lock_key:
+        locks.release(item.account_id, item.lock_key)
+    queue.remove_active_profile(item.account_id)
+    queue.remove_running(item.job_id, item.account_id)
+    if item.session_id:
+        lock_row = db.scalar(select(JobLock).where(JobLock.released == False, JobLock.account_id == item.account_id, JobLock.session_id == item.session_id))
+        if lock_row:
+            lock_row.released = True
+            lock_row.released_at = utcnow()
+            lock_row.reason = "session_finalized"
+            lock_row.heartbeat_at = None
+    item.lock_key = None
 
 
-def _sync_job_item_for_session(db: Session, session_id: str, session_state: str) -> None:
-    item = db.scalar(select(LoginJobItem).where(LoginJobItem.session_id == session_id))
-    if not item or item.state != "RUNNING":
-        return
+def _finalize_item(db: Session, item: LoginJobItem, new_state: str, error: str | None = None) -> LoginJob | None:
+    """Transition a RUNNING item to a terminal/attention state and free its lease."""
     job = db.get(LoginJob, item.job_id)
-    item.state = "SUCCEEDED" if session_state == "RUNNING" else "ATTENTION"
+    _release_item_lease(db, item)
+    item.state = new_state
+    item.last_error = (error or "")[:500] or None
+    item.heartbeat_at = None
+    item.worker_id = None
+    item.completed_at = utcnow()
+    if new_state == "SUCCEEDED":
+        item.paused_reason = None
     if job:
-        job.running_count = max(0, job.running_count - 1)
-        if item.state == "SUCCEEDED":
-            job.succeeded_count += 1
-        else:
-            job.attention_count += 1
+        deltas = {"running_count": -1}
+        if new_state == "SUCCEEDED":
+            deltas["succeeded_count"] = 1
+        elif new_state == "ATTENTION":
+            deltas["attention_count"] = 1
+        elif new_state == "FAILED":
+            deltas["failed_count"] = 1
+        _bump_job(db, job, **deltas)
         if job.queued_count == 0 and job.running_count == 0:
             job.status = "COMPLETED"
             job.completed_at = utcnow()
+    return job
+
+
+def _maybe_dispatch_next(db: Session, job: LoginJob | None) -> None:
+    """After a session releases a slot, the background worker immediately
+    starts the next queued account. When the worker is disabled, dispatch
+    stays manual so operators control the next wave via the API."""
+    if not get_settings().worker_enabled:
+        return
+    if not job or job.status != "RUNNING":
+        return
+    if job.queued_count <= 0 or job.running_count >= job.concurrency_limit:
+        return
+    try:
+        enqueue_queued_items(db, job.id)
+        dispatch_ready_items(db, job.organization_id, API_WORKER_ID, job.id)
+    except ImportValidationError:
+        db.rollback()
+
+
+def _sync_job_item_for_session(db: Session, session_id: str, session_state: str) -> LoginJob | None:
+    item = db.scalar(select(LoginJobItem).where(LoginJobItem.session_id == session_id))
+    if not item or item.state != "RUNNING":
+        return None
+    job = db.get(LoginJob, item.job_id)
+    # Pause the affected account whenever Google posed a challenge or the
+    # worker hit an unknown page; the profile stays reserved for a human.
+    if session_state == "RUNNING":
+        final_item_state = "SUCCEEDED"
+        error = None
+    elif session_state == "NEEDS_ATTENTION":
+        item.paused_reason = "Challenge or unknown page raised for operator attention"
+        return _finalize_item(db, item, "ATTENTION")
+    elif session_state == "CLOSED":
+        _release_item_lease(db, item)
+        item.state = "QUEUED"
+        item.session_id = None
+        item.worker_id = None
+        item.heartbeat_at = None
+        item.completed_at = None
+        item.paused_reason = "Session closed before authentication; queued for retry"
+        if job:
+            _bump_job(db, job, running_count=-1, queued_count=1)
+            job.status = "PAUSED"
+        _queue().requeue(item.job_id, item.id, item.account_id)
+        return job
+    else:
+        final_item_state = "ATTENTION"
+        error = "Session closed before authentication"
+    return _finalize_item(db, item, final_item_state, error=error)
 
 
 ACTIVE_SESSION_STATES = {"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}
@@ -426,9 +687,6 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.state = "NEEDS_ATTENTION"
         session.login_state = "VERIFICATION_REQUIRED"
         session.account.login_status = "VERIFICATION_REQUIRED"
-        # Keep the persisted reason controlled by the service. Never allow an
-        # event payload to become an audit/session log line that could contain
-        # imported credential material.
         session.failure_reason = "Google requested additional verification"
     elif event_type == "UNKNOWN_PAGE":
         session.state = "NEEDS_ATTENTION"
@@ -436,10 +694,12 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.failure_reason = "The worker encountered an unrecognized page"
     elif event_type == "HEARTBEAT":
         pass
+    job = None
     if event_type in {"LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE"}:
-        _sync_job_item_for_session(db, session.id, session.state)
+        job = _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"session.{event_type.lower()}", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id}))
     db.commit()
+    _maybe_dispatch_next(db, job)
     return get_session(db, organization_id, session.id)
 
 
@@ -460,9 +720,10 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
-    _sync_job_item_for_session(db, session.id, session.state)
+    job = _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
+    _maybe_dispatch_next(db, job)
     return get_session(db, organization_id, session.id)
 
 
@@ -476,6 +737,7 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     parsed = urlparse(url)
     metadata = {"account_id": session.account_id, "signal": signal.value, "host": parsed.hostname or "unknown", "path": parsed.path[:160]}
     if signal in {"CAPTCHA", "MFA_OR_SECURITY_CHECK"}:
+        session.failure_reason = "Google requested additional verification"
         updated = record_session_event(db, organization_id, actor_id, session_id, "VERIFICATION_REQUIRED")
         return signal.value, action.value, updated
     if signal == "UNKNOWN":
@@ -485,3 +747,130 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.page_observed", target_type="browser_session", target_id=session.id, result="success", metadata_json=metadata))
     db.commit()
     return signal.value, action.value, get_session(db, organization_id, session.id)
+
+
+def login_job_progress(db: Session, organization_id: str, job_id: str) -> dict | None:
+    """Fine-grained progress for a batch: per-item state plus job counters."""
+    job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    if not job:
+        return None
+    states: dict[str, int] = {}
+    items: list[dict] = []
+    for item in job.items:
+        states[item.state] = states.get(item.state, 0) + 1
+        items.append({"id": item.id, "account_id": item.account_id, "account_email": item.account.email, "session_id": item.session_id, "state": item.state, "attempts": item.attempts, "last_error": item.last_error, "paused_reason": item.paused_reason, "updated_at": item.updated_at, "completed_at": item.completed_at})
+    resolved = sum(count for state, count in states.items() if state in {"SUCCEEDED", "ATTENTION", "FAILED", "CANCELLED"})
+    total = job.total_count or 0
+    return {
+        "id": job.id,
+        "status": job.status,
+        "concurrency_limit": job.concurrency_limit,
+        "total_count": total,
+        "queued_count": job.queued_count,
+        "running_count": job.running_count,
+        "succeeded_count": job.succeeded_count,
+        "attention_count": job.attention_count,
+        "failed_count": job.failed_count,
+        "cancelled_count": states.get("CANCELLED", 0),
+        "progress_percent": round((resolved / total) * 100) if total else 0,
+        "states": states,
+        "items": items,
+    }
+
+
+def resume_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+    """Resume a paused batch: return to RUNNING and redispatch queued items."""
+    job = db.scalar(select(LoginJob).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    if not job:
+        raise ImportValidationError("Login batch not found")
+    if job.status != "PAUSED":
+        raise ImportValidationError(f"Cannot resume a {job.status.lower()} batch")
+    job.status = "RUNNING"
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.resumed", target_type="login_job", target_id=job.id, result="success", metadata_json={"concurrency_limit": job.concurrency_limit}))
+    db.commit()
+    return dispatch_login_job(db, organization_id, actor_id, job_id)
+
+
+def refresh_worker_heartbeats(db: Session, organization_id: str, worker_id: str) -> int:
+    """Refresh Redis lock TTLs and database heartbeat timestamps for this worker's leases."""
+    settings = get_settings()
+    locks = _locks()
+    now = utcnow()
+    items = db.scalars(select(LoginJobItem).where(LoginJobItem.organization_id == organization_id, LoginJobItem.state == "RUNNING", LoginJobItem.worker_id == worker_id)).all()
+    for item in items:
+        item.heartbeat_at = now
+        lock = db.scalar(select(JobLock).where(JobLock.released == False, JobLock.account_id == item.account_id, JobLock.worker_id == worker_id))
+        if item.lock_key:
+            locks.refresh(item.account_id, item.lock_key, settings.worker_lock_ttl * 1000)
+        if lock:
+            lock.heartbeat_at = now
+    db.commit()
+    return len(items)
+
+
+def recover_stale_locks(db: Session, organization_id: str) -> dict:
+    """Detect orphaned worker leases and either retry or fail their job items.
+
+    A lease is stale when its last heartbeat is older than the stale threshold.
+    Recovered items are re-queued when attempts remain, otherwise marked FAILED.
+    """
+    settings = get_settings()
+    queue = _queue()
+    threshold = utcnow() - timedelta(seconds=settings.worker_stale_seconds)
+    now = utcnow()
+
+    stale_rows = db.scalars(select(JobLock).where(JobLock.released == False, JobLock.heartbeat_at < threshold)).all()
+    for lock_row in stale_rows:
+        lock_row.released = True
+        lock_row.released_at = now
+        lock_row.reason = "stale_worker_recovered"
+        lock_row.heartbeat_at = None
+        _locks().force_release(lock_row.account_id)
+
+    recovered: dict[str, int] = {"requeued": 0, "failed": 0, "released": 0}
+    for lock_row in stale_rows:
+        recovered["released"] += 1
+
+    stale_items = db.scalars(select(LoginJobItem).where(LoginJobItem.organization_id == organization_id, LoginJobItem.state == "RUNNING", LoginJobItem.worker_id.is_not(None), LoginJobItem.heartbeat_at < threshold)).all()
+    for item in stale_items:
+        job = db.get(LoginJob, item.job_id)
+        if item.session_id:
+            session = db.scalar(select(BrowserSession).where(BrowserSession.organization_id == organization_id, BrowserSession.id == item.session_id))
+            if session and session.state in ACTIVE_SESSION_STATES:
+                close_local_browser(session.id)
+                session.state = "CLOSED"
+                session.closed_at = now
+                session.last_event_at = now
+                session.profile.status = "RESERVED"
+                session.profile.lock_state = "UNLOCKED"
+                session.profile.active_session_id = None
+                session.profile.last_closed_at = now
+                session.account.login_status = "NOT_STARTED"
+        _release_item_lease(db, item)
+        item.session_id = None
+        item.worker_id = None
+        item.heartbeat_at = None
+        item.attempts += 1
+        if item.attempts >= settings.worker_retry_limit:
+            item.state = "FAILED"
+            item.last_error = "Stale worker exceeded the retry limit"
+            item.completed_at = now
+            if job:
+                _bump_job(db, job, running_count=-1, failed_count=1)
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id="worker", action="login_job.item_failed", target_type="login_job_item", target_id=item.id, result="failed", metadata_json={"job_id": item.job_id, "account_id": item.account_id, "reason": "stale_worker_exhausted_retries"}))
+            recovered["failed"] += 1
+        else:
+            item.state = "QUEUED"
+            item.last_error = "Stale worker recovered; retrying"
+            item.completed_at = None
+            if job:
+                _bump_job(db, job, running_count=-1, queued_count=1)
+            queue.requeue(item.job_id, item.id, item.account_id)
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id="worker", action="login_job.item_requeued", target_type="login_job_item", target_id=item.id, result="retry", metadata_json={"job_id": item.job_id, "account_id": item.account_id, "reason": "stale_worker_recovered", "attempt": item.attempts}))
+            recovered["requeued"] += 1
+        if job and job.queued_count == 0 and job.running_count == 0:
+            job.status = "COMPLETED"
+            job.completed_at = now
+
+    db.commit()
+    return recovered

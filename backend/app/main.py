@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupResponse, ImportSummary, LoginJobCreate, LoginJobResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate
-from .service import ImportValidationError, account_response, add_account, close_session, create_login_job, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_sessions, observe_session_page, preview_import, recover_stale_sessions, record_session_event, resume_login_job, session_response, start_login_session, update_credentials, update_login_job_state
+from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate
+from .service import ImportValidationError, account_response, add_account, archive_account, close_session, create_login_job, create_operation_draft, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_login_session, update_account_metadata, update_credentials, update_login_job_state
+from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
 
@@ -33,7 +34,10 @@ def startup() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     startup()
+    if settings.worker_enabled:
+        start_login_worker()
     yield
+    stop_login_worker()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", description="Phase 1 account onboarding; no Gmail login automation", lifespan=lifespan)
@@ -47,7 +51,7 @@ def health() -> dict[str, str]:
 
 @app.get("/api/v1/groups", response_model=list[GroupResponse])
 def groups(db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.execute(select(AccountGroup, func.count(GmailAccount.id)).outerjoin(GmailAccount).where(AccountGroup.organization_id == settings.demo_org_id).group_by(AccountGroup.id).order_by(AccountGroup.name)).all()
+    rows = db.execute(select(AccountGroup, func.count(GmailAccount.id)).outerjoin(GmailAccount, (GmailAccount.group_id == AccountGroup.id) & (GmailAccount.lifecycle_status != "ARCHIVED")).where(AccountGroup.organization_id == settings.demo_org_id).group_by(AccountGroup.id).order_by(AccountGroup.name)).all()
     return [{"id": group.id, "name": group.name, "description": group.description, "capacity": group.capacity, "account_count": count, "ready_count": count, "issue_count": 0, "status": group.status} for group, count in rows]
 
 
@@ -82,6 +86,48 @@ def create_account(payload: AccountStructuredInput, db: Session = Depends(get_db
         return account_response(add_account(db, settings.demo_org_id, "admin_demo", payload))
     except ImportValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/api/v1/accounts/{account_id}", response_model=AccountResponse)
+def edit_account_metadata(account_id: str, payload: AccountMetadataUpdate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return update_account_metadata(db, settings.demo_org_id, "admin_demo", account_id, payload.proxy_label, payload.proxy_region)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/accounts/{account_id}/group-move", response_model=AccountResponse)
+def move_account(account_id: str, payload: GroupMoveRequest, db: Session = Depends(get_db)) -> dict:
+    try:
+        return move_account_group(db, settings.demo_org_id, "admin_demo", account_id, payload.destination_group_id)
+    except ImportValidationError as exc:
+        message = str(exc).lower()
+        raise HTTPException(status_code=404 if "not found" in message or "valid destination" in message else 409, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/accounts/{account_id}", response_model=AccountResponse)
+def delete_account(account_id: str, payload: AccountDeleteRequest, db: Session = Depends(get_db)) -> dict:
+    try:
+        return archive_account(db, settings.demo_org_id, "admin_demo", account_id, payload.confirmation_email)
+    except ImportValidationError as exc:
+        message = str(exc).lower()
+        raise HTTPException(status_code=404 if "not found" in message else 409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/accounts/{account_id}/operation-drafts", response_model=OperationDraftResponse, status_code=status.HTTP_201_CREATED)
+def save_operation_draft(account_id: str, payload: OperationDraftCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return create_operation_draft(db, settings.demo_org_id, "admin_demo", account_id, payload.operation_type, payload.configuration)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/accounts/{account_id}/operation-drafts", response_model=list[OperationDraftResponse])
+def operation_drafts(account_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    try:
+        return list_operation_drafts(db, settings.demo_org_id, account_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/accounts/bulk/preview", response_model=BulkPreviewResponse)
@@ -163,17 +209,20 @@ def dispatch_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
-@app.get("/api/v1/login-jobs/{job_id}/progress", response_model=LoginJobResponse)
-def login_job_progress(job_id: str, db: Session = Depends(get_db)) -> dict:
-    job = get_login_job(db, settings.demo_org_id, job_id)
-    if not job:
+@app.get("/api/v1/login-jobs/{job_id}/progress", response_model=LoginJobProgressResponse)
+def login_job_progress_endpoint(job_id: str, db: Session = Depends(get_db)) -> dict:
+    progress = login_job_progress(db, settings.demo_org_id, job_id)
+    if not progress:
         raise HTTPException(status_code=404, detail="Login batch not found")
-    return job
+    return progress
 
 
 @app.post("/api/v1/login-jobs/{job_id}/dispatch-next", response_model=LoginJobResponse)
-def dispatch_next_login_wave(job_id: str, db: Session = Depends(get_db)) -> dict:
-    return dispatch_bulk_login_job(job_id, db)
+def dispatch_next_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/resume", response_model=LoginJobResponse)
@@ -181,7 +230,7 @@ def resume_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     try:
         return resume_login_job(db, settings.demo_org_id, "admin_demo", job_id)
     except ImportValidationError as exc:
-        raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
+        raise HTTPException(status_code=409 if "resume" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/cancel", response_model=LoginJobResponse)
@@ -193,8 +242,8 @@ def cancel_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/api/v1/maintenance/recover-stale-sessions")
-def recover_stale_session_locks(stale_after_seconds: int = Query(default=900, ge=60, le=86400), db: Session = Depends(get_db)) -> dict[str, int]:
-    return {"recovered": recover_stale_sessions(db, settings.demo_org_id, "system", stale_after_seconds)}
+def recover_stale_session_locks(db: Session = Depends(get_db)) -> dict[str, int]:
+    return recover_stale_locks(db, settings.demo_org_id)
 
 
 @app.get("/api/v1/audit-events", response_model=list[AuditEventResponse])
