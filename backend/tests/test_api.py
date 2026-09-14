@@ -2,17 +2,21 @@ import os
 
 os.environ["DATABASE_URL"] = "sqlite:///./data/test_gmail_ops.db"
 os.environ["SECRET_KEY"] = "test-secret-key-without-credential-material"
+os.environ["REDIS_URL"] = "fakeredis://"
 
 from fastapi.testclient import TestClient
 
 from app.db import Base, engine
 from app.main import app
 from app.security import SecretCipher
+from app.worker import redis as worker_redis
 
 
 def setup_function() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    worker_redis.reset_redis()
+    worker_redis.flush_redis()
     with TestClient(app):
         pass
 
@@ -203,3 +207,57 @@ def test_login_job_queues_group_accounts_and_honors_concurrency() -> None:
         assert cancelled.json()["queued_count"] == 0
         assert "SUCCEEDED" in {item["state"] for item in cancelled.json()["items"]}
         assert "CANCELLED" in {item["state"] for item in cancelled.json()["items"]}
+
+
+def test_account_metadata_can_move_and_audit_without_exposing_secrets() -> None:
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        source_id, destination_id = groups[0]["id"], groups[1]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "admin-flow@example.com", "password": "hidden-password", "recovery": "hidden@example.com", "2fa": "hidden-totp", "group_id": source_id}).json()
+
+        edited = client.patch(f"/api/v1/accounts/{account['id']}", json={"proxy_label": "US-NY-0142", "proxy_region": "New York, US"})
+        assert edited.status_code == 200
+        assert edited.json()["proxy"] == {"id": None, "label": "US-NY-0142", "region": "New York, US", "status": "ASSIGNED"}
+        assert "hidden-password" not in edited.text
+
+        moved = client.post(f"/api/v1/accounts/{account['id']}/group-move", json={"destination_group_id": destination_id})
+        assert moved.status_code == 200
+        assert moved.json()["group_id"] == destination_id
+        audit = client.get("/api/v1/audit-events", params={"account_id": account["id"], "limit": 20}).json()
+        assert {event["action"] for event in audit} >= {"account.metadata_updated", "account.group_moved"}
+        assert "hidden-password" not in str(audit)
+
+
+def test_operation_drafts_are_versioned_and_reject_secret_fields() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "drafts@example.com", "password": "hidden-password", "recovery": "hidden@example.com", "2fa": "hidden-totp", "group_id": group_id}).json()
+        payload = {"operation_type": "labels", "configuration": {"labels": "Priority\nFollow-up"}}
+        first = client.post(f"/api/v1/accounts/{account['id']}/operation-drafts", json=payload)
+        second = client.post(f"/api/v1/accounts/{account['id']}/operation-drafts", json=payload)
+        assert first.status_code == 201
+        assert second.status_code == 201
+        assert first.json()["version"] == 1
+        assert second.json()["version"] == 2
+        listed = client.get(f"/api/v1/accounts/{account['id']}/operation-drafts")
+        assert listed.status_code == 200
+        assert [draft["version"] for draft in listed.json()] == [2, 1]
+        assert "hidden-password" not in listed.text
+        rejected = client.post(f"/api/v1/accounts/{account['id']}/operation-drafts", json={"operation_type": "mail", "configuration": {"password": "must-not-store"}})
+        assert rejected.status_code == 422
+        assert "must-not-store" not in rejected.text
+
+
+def test_delete_archives_account_closes_session_and_removes_it_from_registry() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "archive-me@example.com", "password": "hidden-password", "recovery": "hidden@example.com", "2fa": "hidden-totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        deleted = client.request("DELETE", f"/api/v1/accounts/{account['id']}", json={"confirmation_email": "archive-me@example.com"})
+        assert deleted.status_code == 200
+        assert deleted.json()["lifecycle_status"] == "ARCHIVED"
+        assert client.get("/api/v1/accounts", params={"q": "archive-me@example.com"}).json()["total"] == 0
+        assert client.get(f"/api/v1/sessions/{session['id']}").json()["state"] == "CLOSED"
+        audit = client.get("/api/v1/audit-events", params={"account_id": account["id"], "limit": 20}).json()
+        assert any(event["action"] == "account.archived" for event in audit)
+        assert "hidden-password" not in str(audit)
