@@ -687,6 +687,8 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
     if not account:
         raise ImportValidationError("Account not found")
+    if account.lifecycle_status == "ARCHIVED":
+        raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
     if profile.active_session_id:
         active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
@@ -783,6 +785,9 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
         return signal.value, action.value, updated
     if signal == "UNKNOWN":
         updated = record_session_event(db, organization_id, actor_id, session_id, "UNKNOWN_PAGE")
+        return signal.value, action.value, updated
+    if signal == "GMAIL_HOME" and session.login_state != "AUTHENTICATED":
+        updated = record_session_event(db, organization_id, actor_id, session_id, "LOGIN_COMPLETED")
         return signal.value, action.value, updated
     session.last_event_at = utcnow()
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.page_observed", target_type="browser_session", target_id=session.id, result="success", metadata_json=metadata))
