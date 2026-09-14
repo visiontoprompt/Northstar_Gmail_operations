@@ -78,21 +78,22 @@ Scope:
 
 - One durable browser profile per account.
 - One session lock per active account/profile.
-- Separate Chrome process and persistent user-data directory for each opened account.
-- Session lifecycle: `STARTING`, `LOGIN_REQUIRED`, `AUTHENTICATED`, `ATTENTION`, `CLOSED`, `CRASHED`, `LAUNCH_FAILED`.
+- A dedicated, fresh Chrome window per opened account, isolated from the SaaS console and from any earlier instance for that profile (leftover Chrome processes bound to the profile dir are terminated before launch; launch uses `--new-window --no-session-restore` with a dedicated user-data directory).
+- Session lifecycle: `LOGIN_REQUIRED → RUNNING → CLOSED`, with `NEEDS_ATTENTION` for challenge/unknown pages and `STARTING` reserved in the active-state set. Launch failures raise `BrowserLaunchError` **before** a session row is written, so a failed attempt never leaves a zombie session or a locked profile blocking retry.
 - Single-session open, close, resume, and safe session history.
-- Observation-first page classification for login form, Gmail mailbox, ordinary interstitial, CAPTCHA, MFA/security check, and unknown pages.
-- Human-gated challenge handling: pause, retain the profile reservation, notify the operator, and resume only after a recorded browser result.
-- Separate random CDP endpoint per browser process when observation is enabled.
+- Observation-first page classification (Playwright attached over a per-profile CDP endpoint) for login form, Gmail mailbox, ordinary interstitial, CAPTCHA, MFA/security check, and unknown pages.
+- Consent-only auto-advance: the observer clicks only ordinary consent interstitials (`accounts.*`/`consent.*`) when no visible email/password field is present. Nothing else is automated.
+- A valid mailbox observation marks the session `AUTHENTICATED`; a challenge or unknown page flips the session to a human-gated attention state, keeps the profile reservation, and stops the observer for that session.
+- Separate random CDP endpoint per browser process; `BROWSER_CDP_PORT` is kept only as a deprecated compatibility setting.
 
 Exit criteria:
 
-- The SaaS console and account Chrome session are separate browser environments.
+- The SaaS console and account Chrome session are separate browser environments. *(Holds locally.)*
 - A profile cannot be opened concurrently by two workers or employees.
 - A Gmail mailbox is marked authenticated only from a valid observed mailbox state or an explicit approved event.
-- Closing or crashing a session releases locks safely and preserves the profile reference and audit history.
+- Closing or crashing a session releases locks safely and preserves the profile reference and audit history. *(Close, cancel, and stale-recovery paths release locks and stop the observer; launch failures persist nothing.)*
 
-**Status: Partial.** Local Chrome launch, persistent profile metadata, batch hand-off, locks, session lifecycle, and safe observer behavior exist. Automated credential entry is not part of this repository’s safe observer boundary; Google challenges remain human-gated.
+**Status: Complete for the local single-node Phase 2 scope.** Dedicated fresh-window Chrome launch, persistent profile metadata, batch hand-off, locks, session lifecycle, launch-failure retry, visible end-to-end logging, and the safe observer boundary are implemented and tested. Automated credential entry is not part of the safe observer boundary; Google challenges remain human-gated. Proxy-bound isolation, multi-node profile storage, and employee assignment belong to later phases.
 
 ## Phase 3 — Provisioning pipeline and resumable jobs
 
@@ -115,7 +116,7 @@ Exit criteria:
 - A profile lock, job lease, session, and database state cannot disagree after recovery.
 - Operators can see queued, running, attention, failed, and completed work in the Account Factory.
 
-**Status: Partial.** Login queue, Redis-compatible locks, concurrency controls, recovery, and worker scaffolding exist. General provisioning modules and production worker deployment remain planned.
+**Status: Partial.** Login queue, Redis-compatible locks, concurrency controls, recovery, and worker scaffolding exist. Dispatch automatically requeues items whose browser launch failed so a later wave can retry them cleanly. General provisioning modules and production worker deployment remain planned.
 
 ## Phase 4 — Account preparation operations
 
