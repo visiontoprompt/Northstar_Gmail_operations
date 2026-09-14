@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, GroupCreate, GroupResponse, ImportSummary, SessionEventCreate
-from .service import ImportValidationError, account_response, add_account, close_session, get_account, get_session, import_accounts, list_accounts, list_sessions, preview_import, record_session_event, session_response, start_login_session
+from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, GroupCreate, GroupResponse, ImportSummary, PageObservationCreate, PageObservationResponse, SessionEventCreate
+from .service import ImportValidationError, account_response, add_account, close_session, get_account, get_session, import_accounts, list_accounts, list_sessions, observe_session_page, preview_import, record_session_event, session_response, start_login_session
 
 settings = get_settings()
 
@@ -144,3 +144,12 @@ def end_login_session(session_id: str, db: Session = Depends(get_db)) -> dict:
         return session_response(close_session(db, settings.demo_org_id, "admin_demo", session_id))
     except ImportValidationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/sessions/{session_id}/observations", response_model=PageObservationResponse)
+def session_page_observation(session_id: str, payload: PageObservationCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        signal, action, session = observe_session_page(db, settings.demo_org_id, "admin_demo", session_id, payload.url, payload.title, payload.text)
+        return {"signal": signal, "action": action, "session": session_response(session)}
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "closed" in str(exc) else 404, detail=str(exc)) from exc

@@ -118,3 +118,35 @@ def test_verification_event_is_visible_without_exposing_secrets() -> None:
         assert response.json()["state"] == "NEEDS_ATTENTION"
         assert response.json()["login_state"] == "VERIFICATION_REQUIRED"
         assert "secret" not in response.text
+
+
+def test_page_observation_classifies_normal_pages_and_pauses_on_challenges() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "observe@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+
+        normal = client.post(f"/api/v1/sessions/{session['id']}/observations", json={"url": "https://accounts.google.com/", "title": "Sign in - Google Accounts", "text": "Email or phone"})
+        assert normal.status_code == 200
+        assert normal.json()["signal"] == "LOGIN_FORM"
+        assert normal.json()["action"] == "SAFE_TO_OBSERVE"
+        assert normal.json()["session"]["state"] == "LOGIN_REQUIRED"
+
+        challenge = client.post(f"/api/v1/sessions/{session['id']}/observations", json={"url": "https://accounts.google.com/", "title": "Unusual traffic", "text": "Please complete the CAPTCHA secret-value"})
+        assert challenge.status_code == 200
+        assert challenge.json()["signal"] == "CAPTCHA"
+        assert challenge.json()["action"] == "WAIT_FOR_HUMAN"
+        assert challenge.json()["session"]["state"] == "NEEDS_ATTENTION"
+        assert "secret-value" not in challenge.text
+
+
+def test_unknown_page_is_stopped_for_operator_attention() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "unknown@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        response = client.post(f"/api/v1/sessions/{session['id']}/observations", json={"url": "https://example.invalid/unexpected", "title": "Unexpected page", "text": ""})
+        assert response.status_code == 200
+        assert response.json()["signal"] == "UNKNOWN"
+        assert response.json()["action"] == "NEEDS_ATTENTION"
+        assert response.json()["session"]["state"] == "NEEDS_ATTENTION"

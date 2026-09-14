@@ -9,6 +9,8 @@ from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, Bro
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser
+from .login_policy import PageObservation, classify_page
+from urllib.parse import urlparse
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -239,6 +241,10 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         # event payload to become an audit/session log line that could contain
         # imported credential material.
         session.failure_reason = "Google requested additional verification"
+    elif event_type == "UNKNOWN_PAGE":
+        session.state = "NEEDS_ATTENTION"
+        session.login_state = "UNKNOWN_PAGE"
+        session.failure_reason = "The worker encountered an unrecognized page"
     elif event_type == "HEARTBEAT":
         pass
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"session.{event_type.lower()}", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id}))
@@ -266,3 +272,24 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
     return get_session(db, organization_id, session.id)
+
+
+def observe_session_page(db: Session, organization_id: str, actor_id: str, session_id: str, url: str, title: str, text: str) -> tuple[str, str, BrowserSession]:
+    session = get_session(db, organization_id, session_id)
+    if not session:
+        raise ImportValidationError("Session not found")
+    if session.state not in ACTIVE_SESSION_STATES:
+        raise ImportValidationError("This session is already closed")
+    signal, action = classify_page(PageObservation(url=url, title=title, text=text))
+    parsed = urlparse(url)
+    metadata = {"account_id": session.account_id, "signal": signal.value, "host": parsed.hostname or "unknown", "path": parsed.path[:160]}
+    if signal in {"CAPTCHA", "MFA_OR_SECURITY_CHECK"}:
+        updated = record_session_event(db, organization_id, actor_id, session_id, "VERIFICATION_REQUIRED")
+        return signal.value, action.value, updated
+    if signal == "UNKNOWN":
+        updated = record_session_event(db, organization_id, actor_id, session_id, "UNKNOWN_PAGE")
+        return signal.value, action.value, updated
+    session.last_event_at = utcnow()
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.page_observed", target_type="browser_session", target_id=session.id, result="success", metadata_json=metadata))
+    db.commit()
+    return signal.value, action.value, get_session(db, organization_id, session.id)

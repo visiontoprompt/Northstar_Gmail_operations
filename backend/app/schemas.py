@@ -134,8 +134,14 @@ class AuditEventResponse(BaseModel):
 
 
 class SessionEventCreate(BaseModel):
-    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "HEARTBEAT"]
+    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "HEARTBEAT"]
     detail: str | None = Field(default=None, max_length=300)
+
+
+class PageObservationCreate(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=200)
+    text: str = Field(default="", max_length=5000)
 
 
 class BrowserSessionResponse(BaseModel):
@@ -154,3 +160,9 @@ class BrowserSessionResponse(BaseModel):
     last_event_at: datetime
     closed_at: datetime | None
     failure_reason: str | None
+
+
+class PageObservationResponse(BaseModel):
+    signal: str
+    action: str
+    session: BrowserSessionResponse

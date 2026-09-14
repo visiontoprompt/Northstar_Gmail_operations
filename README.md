@@ -57,6 +57,8 @@ The raw import line is accepted only at the API boundary, parsed in memory, encr
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 
+Login page handling is observation-first: normal Google interstitials can be classified, while CAPTCHA, MFA, and security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
+
 ## Verification
 
 ```bash
