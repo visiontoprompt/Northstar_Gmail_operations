@@ -1,6 +1,6 @@
 # Phase 1 API and hand-off
 
-The API is intentionally scoped to account onboarding. It creates operational records and encrypted credential references but never attempts a Gmail login.
+The API is intentionally scoped to account onboarding plus the controlled hand-off into the login queue. It creates operational records and encrypted credential references; it does not solve Google security challenges.
 
 ## Endpoints
 
@@ -13,6 +13,11 @@ The API is intentionally scoped to account onboarding. It creates operational re
 - `POST /api/v1/accounts/bulk/preview` — validate import lines without persistence.
 - `POST /api/v1/accounts/bulk/import` — validate, encrypt, persist, and audit rows.
 - `GET /api/v1/audit-events` — paginated operational audit events.
+- `PUT /api/v1/accounts/{id}/credentials` — create a new encrypted credential revision and require re-authentication.
+- `GET /api/v1/accounts/{id}/credential-revisions` — return masked revision metadata.
+- `POST /api/v1/login-jobs` — create a group-level login queue with explicit concurrency.
+- `GET /api/v1/login-jobs` and `GET /api/v1/login-jobs/{id}` — inspect queues and per-account progress.
+- `POST /api/v1/login-jobs/{id}/start`, `/dispatch`, `/pause`, and `/cancel` — control isolated profile dispatch.
 
 ## Phase 2 contract
 
@@ -24,4 +29,4 @@ The future worker path remains:
 API → Redis queue/lock → stateless Playwright worker → durable profile + dedicated proxy
 ```
 
-The first session hand-off boundary is documented in [phase-2-session.md](phase-2-session.md). It reserves a durable profile and records a human-controlled login session, but it does not automate Gmail authentication.
+The session and batch hand-off boundary is documented in [phase-2-session.md](phase-2-session.md). It reserves durable profiles and opens concurrency-limited isolated sessions; CAPTCHA/MFA/security challenges remain paused for operator attention.

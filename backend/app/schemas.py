@@ -123,6 +123,59 @@ class ImportSummary(BaseModel):
     account_ids: list[str]
 
 
+class CredentialUpdate(BaseModel):
+    password: str = Field(min_length=1, max_length=2048)
+    recovery: str = Field(min_length=1, max_length=320)
+    two_fa: str = Field(min_length=1, max_length=2048, alias="2fa")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CredentialRevisionResponse(BaseModel):
+    account_id: str
+    version: int
+    status: str
+    secret_status: str
+    recovery_masked: str
+    two_fa_configured: bool
+    created_at: datetime
+
+
+class LoginJobCreate(BaseModel):
+    group_id: str | None = None
+    account_ids: list[str] = Field(default_factory=list, max_length=300)
+    concurrency_limit: int = Field(default=4, ge=1, le=50)
+
+
+class LoginJobItemResponse(BaseModel):
+    id: str
+    account_id: str
+    account_email: str
+    session_id: str | None
+    state: str
+    attempts: int
+    last_error: str | None
+    updated_at: datetime
+
+
+class LoginJobResponse(BaseModel):
+    id: str
+    group_id: str | None
+    concurrency_limit: int
+    status: str
+    total_count: int
+    queued_count: int
+    running_count: int
+    succeeded_count: int
+    attention_count: int
+    failed_count: int
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    updated_at: datetime
+    items: list[LoginJobItemResponse] = []
+
+
 class AuditEventResponse(BaseModel):
     id: str
     action: str

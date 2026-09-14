@@ -150,3 +150,55 @@ def test_unknown_page_is_stopped_for_operator_attention() -> None:
         assert response.json()["signal"] == "UNKNOWN"
         assert response.json()["action"] == "NEEDS_ATTENTION"
         assert response.json()["session"]["state"] == "NEEDS_ATTENTION"
+
+
+def test_credential_update_creates_encrypted_revision_and_requires_reauth() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "rotate@example.com", "password": "old-secret", "recovery": "old@example.com", "2fa": "old-totp", "group_id": group_id}).json()
+        updated = client.put(f"/api/v1/accounts/{account['id']}/credentials", json={"password": "new-secret", "recovery": "new@example.com", "2fa": "new-totp"})
+        assert updated.status_code == 200
+        assert "new-secret" not in updated.text
+        assert "new@example.com" not in updated.text
+        assert updated.json()["login_status"] == "REQUIRED"
+        revisions = client.get(f"/api/v1/accounts/{account['id']}/credential-revisions")
+        assert revisions.status_code == 200
+        assert [row["version"] for row in revisions.json()] == [2, 1]
+        assert all(row["secret_status"] == "STORED_ENCRYPTED" for row in revisions.json())
+
+
+def test_login_job_queues_group_accounts_and_honors_concurrency() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        for index in range(3):
+            client.post("/api/v1/accounts/single", json={"email": f"batch-{index}@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id})
+        created = client.post("/api/v1/login-jobs", json={"group_id": group_id, "concurrency_limit": 2})
+        assert created.status_code == 201
+        job = created.json()
+        assert job["status"] == "QUEUED"
+        assert job["total_count"] == 3
+        assert job["queued_count"] == 3
+        assert job["concurrency_limit"] == 2
+        assert {item["state"] for item in job["items"]} == {"QUEUED"}
+        started = client.post(f"/api/v1/login-jobs/{job['id']}/start")
+        assert started.status_code == 200
+        assert started.json()["status"] == "RUNNING"
+        assert started.json()["running_count"] == 2
+        running_item = next(item for item in started.json()["items"] if item["state"] == "RUNNING")
+        completed = client.post(f"/api/v1/sessions/{running_item['session_id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        assert completed.status_code == 200
+        progress = client.get(f"/api/v1/login-jobs/{job['id']}").json()
+        assert progress["succeeded_count"] == 1
+        assert progress["running_count"] == 1
+        dispatched = client.post(f"/api/v1/login-jobs/{job['id']}/dispatch")
+        assert dispatched.status_code == 200
+        assert dispatched.json()["queued_count"] == 0
+        paused = client.post(f"/api/v1/login-jobs/{job['id']}/pause")
+        assert paused.status_code == 200
+        assert paused.json()["status"] == "PAUSED"
+        cancelled = client.post(f"/api/v1/login-jobs/{job['id']}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "CANCELLED"
+        assert cancelled.json()["queued_count"] == 0
+        assert "SUCCEEDED" in {item["state"] for item in cancelled.json()["items"]}
+        assert "CANCELLED" in {item["state"] for item in cancelled.json()["items"]}

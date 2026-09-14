@@ -10,9 +10,11 @@ This phase can:
 - keep credential material in an encrypted secrets table, separate from operational metadata;
 - reserve dedicated proxy and persistent browser-profile metadata for later provisioning;
 - open a durable, profile-backed human login hand-off and record its lifecycle;
+- queue a whole group for concurrency-controlled isolated profile dispatch;
+- version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
 
-The current session hand-off deliberately does not automate Gmail credential entry, browser stealth, CAPTCHA/MFA handling, or profile provisioning. It persists the profile reservation and session state so a later Playwright worker can attach safely. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for login.
+The current session hand-off deliberately does not solve or bypass Gmail CAPTCHA/MFA/security challenges, use browser stealth, or use Gmail API/OAuth. It persists profile reservations, credential revisions, and concurrency-controlled session queues so a reviewed browser worker can attach safely. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for login.
 
 ## Repository layout
 

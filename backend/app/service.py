@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, GmailAccount, ImportOperation, utcnow
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, LoginJob, LoginJobItem, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser
@@ -73,6 +73,10 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
+def _add_credential_revision(db: Session, organization_id: str, account_id: str, payload: dict[str, str], recovery_hint: str, two_fa_configured: bool, actor_id: str, version: int = 1) -> None:
+    db.add(CredentialRevision(id=_new_id("credrev"), organization_id=organization_id, account_id=account_id, version=version, secret_ref=f"secret://account/{account_id}/v{version}", encrypted_payload=SecretCipher().encrypt(payload), recovery_hint=recovery_hint, two_fa_configured=two_fa_configured, status="ACTIVE", created_by=actor_id))
+
+
 def add_account(db: Session, organization_id: str, actor_id: str, data: AccountStructuredInput) -> GmailAccount:
     group = db.scalar(select(AccountGroup).where(AccountGroup.id == data.group_id, AccountGroup.organization_id == organization_id))
     if not group:
@@ -87,6 +91,7 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt({"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}))
     db.add(account)
     db.add(secret)
+    _add_credential_revision(db, organization_id, account_id, {"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}, account.recovery_hint, account.two_fa_configured, actor_id)
     db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.imported", target_type="gmail_account", target_id=account_id, result="success", metadata_json={"group_id": group.id, "email_domain": email.split("@", 1)[1], "source": "single"}))
     db.commit()
@@ -112,6 +117,7 @@ def import_accounts(db: Session, organization_id: str, actor_id: str, group_id: 
         db.add(account)
         db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
         db.add(AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=cipher.encrypt({"password": line.password, "recovery": line.recovery, "2fa": line.two_fa})))
+        _add_credential_revision(db, organization_id, account_id, {"password": line.password, "recovery": line.recovery, "2fa": line.two_fa}, account.recovery_hint, account.two_fa_configured, actor_id)
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.imported", target_type="gmail_account", target_id=account_id, result="success", metadata_json={"group_id": group_id, "email_domain": line.email.split("@", 1)[1], "source": "bulk", "row_number": line.row_number}))
         imported_ids.append(account_id)
     db.commit()
@@ -141,6 +147,155 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
 
 def get_account(db: Session, organization_id: str, account_id: str) -> GmailAccount | None:
     return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+
+
+def update_credentials(db: Session, organization_id: str, actor_id: str, account_id: str, password: str, recovery: str, two_fa: str) -> dict:
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+    if not account:
+        raise ImportValidationError("Account not found")
+    latest = db.scalar(select(func.max(CredentialRevision.version)).where(CredentialRevision.account_id == account.id)) or 0
+    for revision in db.scalars(select(CredentialRevision).where(CredentialRevision.account_id == account.id, CredentialRevision.status == "ACTIVE")).all():
+        revision.status = "RETIRED"
+    encrypted_payload = SecretCipher().encrypt({"password": password, "recovery": recovery, "2fa": two_fa})
+    if account.secret:
+        account.secret.encrypted_payload = encrypted_payload
+        account.secret.key_version = "v1"
+    else:
+        account.secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary", encrypted_payload=encrypted_payload)
+    account.recovery_hint = mask_recovery(recovery)
+    account.two_fa_configured = bool(two_fa)
+    account.readiness_status = "READY_FOR_LOGIN"
+    account.login_status = "REQUIRED"
+    version = latest + 1
+    db.add(CredentialRevision(id=_new_id("credrev"), organization_id=organization_id, account_id=account.id, version=version, secret_ref=f"secret://account/{account.id}/v{version}", encrypted_payload=encrypted_payload, recovery_hint=account.recovery_hint, two_fa_configured=account.two_fa_configured, status="ACTIVE", created_by=actor_id))
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.credentials_updated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"version": version, "secret_status": "encrypted", "reauth_required": True}))
+    db.commit()
+    return account_response(get_account(db, organization_id, account.id))
+
+
+def credential_revisions(db: Session, organization_id: str, account_id: str) -> list[dict]:
+    if not db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id)):
+        raise ImportValidationError("Account not found")
+    rows = db.scalars(select(CredentialRevision).where(CredentialRevision.organization_id == organization_id, CredentialRevision.account_id == account_id).order_by(CredentialRevision.version.desc())).all()
+    return [{"account_id": row.account_id, "version": row.version, "status": row.status, "secret_status": "STORED_ENCRYPTED", "recovery_masked": row.recovery_hint, "two_fa_configured": row.two_fa_configured, "created_at": row.created_at} for row in rows]
+
+
+def _login_job_response(job: LoginJob, items: list[LoginJobItem] | None = None) -> dict:
+    rows = items if items is not None else list(job.items)
+    return {"id": job.id, "group_id": job.group_id, "concurrency_limit": job.concurrency_limit, "status": job.status, "total_count": job.total_count, "queued_count": job.queued_count, "running_count": job.running_count, "succeeded_count": job.succeeded_count, "attention_count": job.attention_count, "failed_count": job.failed_count, "created_at": job.created_at, "started_at": job.started_at, "completed_at": job.completed_at, "updated_at": job.updated_at, "items": [{"id": item.id, "account_id": item.account_id, "account_email": item.account.email, "session_id": item.session_id, "state": item.state, "attempts": item.attempts, "last_error": item.last_error, "updated_at": item.updated_at} for item in rows]}
+
+
+def create_login_job(db: Session, organization_id: str, actor_id: str, group_id: str | None, account_ids: list[str], concurrency_limit: int) -> dict:
+    if group_id and not db.scalar(select(AccountGroup.id).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id)):
+        raise ImportValidationError("Choose a valid destination group")
+    query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.readiness_status == "READY_FOR_LOGIN")
+    if group_id:
+        query = query.where(GmailAccount.group_id == group_id)
+    if account_ids:
+        query = query.where(GmailAccount.id.in_(list(dict.fromkeys(account_ids))))
+    accounts = db.scalars(query.order_by(GmailAccount.created_at)).all()
+    if not accounts:
+        raise ImportValidationError("No accounts are ready for a login batch")
+    if len(accounts) > 300:
+        raise ImportValidationError("A login batch is limited to 300 accounts")
+    job = LoginJob(id=_new_id("loginjob"), organization_id=organization_id, group_id=group_id, concurrency_limit=concurrency_limit, status="QUEUED", total_count=len(accounts), queued_count=len(accounts), created_by=actor_id)
+    db.add(job)
+    for account in accounts:
+        db.add(LoginJobItem(id=_new_id("loginitem"), job_id=job.id, organization_id=organization_id, account_id=account.id, state="QUEUED"))
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.created", target_type="login_job", target_id=job.id, result="success", metadata_json={"group_id": group_id, "account_count": len(accounts), "concurrency_limit": concurrency_limit, "mode": "isolated_profile_queue"}))
+    db.commit()
+    job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.id == job.id))
+    return _login_job_response(job)
+
+
+def list_login_jobs(db: Session, organization_id: str, limit: int = 25) -> list[dict]:
+    rows = db.scalars(select(LoginJob).where(LoginJob.organization_id == organization_id).order_by(LoginJob.created_at.desc()).limit(limit)).all()
+    return [_login_job_response(row, []) for row in rows]
+
+
+def get_login_job(db: Session, organization_id: str, job_id: str) -> dict | None:
+    job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    return _login_job_response(job) if job else None
+
+
+def update_login_job_state(db: Session, organization_id: str, actor_id: str, job_id: str, next_state: str) -> dict:
+    job = db.scalar(select(LoginJob).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    if not job:
+        raise ImportValidationError("Login batch not found")
+    transitions = {"QUEUED": {"PAUSED", "CANCELLED", "RUNNING"}, "RUNNING": {"PAUSED", "CANCELLED"}, "PAUSED": {"QUEUED", "CANCELLED"}}
+    if next_state not in transitions.get(job.status, set()):
+        raise ImportValidationError(f"Cannot move a {job.status.lower()} batch to {next_state.lower()}")
+    job.status = next_state
+    if next_state == "RUNNING" and not job.started_at:
+        job.started_at = utcnow()
+    if next_state == "CANCELLED":
+        for item in db.scalars(select(LoginJobItem).where(LoginJobItem.job_id == job.id, LoginJobItem.state.in_(["QUEUED", "RUNNING"]))).all():
+            if item.session_id:
+                session = get_session(db, organization_id, item.session_id)
+                if session and session.state in ACTIVE_SESSION_STATES:
+                    close_local_browser(session.id)
+                    now = utcnow()
+                    session.state = "CLOSED"
+                    session.closed_at = now
+                    session.last_event_at = now
+                    session.profile.status = "RESERVED"
+                    session.profile.lock_state = "UNLOCKED"
+                    session.profile.active_session_id = None
+                    session.profile.last_closed_at = now
+            item.state = "CANCELLED"
+        job.running_count = 0
+        job.queued_count = 0
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"login_job.{next_state.lower()}", target_type="login_job", target_id=job.id, result="success", metadata_json={"concurrency_limit": job.concurrency_limit}))
+    db.commit()
+    return get_login_job(db, organization_id, job.id)
+
+
+def dispatch_login_job(db: Session, organization_id: str, actor_id: str, job_id: str) -> dict:
+    job = db.scalar(select(LoginJob).options(joinedload(LoginJob.items).joinedload(LoginJobItem.account)).where(LoginJob.organization_id == organization_id, LoginJob.id == job_id))
+    if not job:
+        raise ImportValidationError("Login batch not found")
+    if job.status != "RUNNING":
+        raise ImportValidationError("Start the login batch before dispatching profiles")
+    slots = max(0, job.concurrency_limit - job.running_count)
+    queued = [item for item in job.items if item.state == "QUEUED"][:slots]
+    for item in queued:
+        try:
+            session = start_login_session(db, organization_id, actor_id, item.account_id)
+        except ImportValidationError as exc:
+            item.state = "ATTENTION"
+            item.last_error = "Account could not be opened for this batch"
+            job.queued_count = max(0, job.queued_count - 1)
+            job.attention_count += 1
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.item_attention", target_type="login_job_item", target_id=item.id, result="attention", metadata_json={"job_id": job.id, "account_id": item.account_id, "reason": "profile_unavailable"}))
+            continue
+        item.session_id = session["id"] if isinstance(session, dict) else session.id
+        item.state = "RUNNING"
+        item.attempts += 1
+        job.queued_count = max(0, job.queued_count - 1)
+        job.running_count += 1
+    if job.queued_count == 0 and job.running_count == 0:
+        job.status = "COMPLETED"
+        job.completed_at = utcnow()
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.dispatched", target_type="login_job", target_id=job.id, result="success", metadata_json={"opened_count": len([item for item in queued if item.state == "RUNNING"]), "concurrency_limit": job.concurrency_limit}))
+    db.commit()
+    return get_login_job(db, organization_id, job.id)
+
+
+def _sync_job_item_for_session(db: Session, session_id: str, session_state: str) -> None:
+    item = db.scalar(select(LoginJobItem).where(LoginJobItem.session_id == session_id))
+    if not item or item.state != "RUNNING":
+        return
+    job = db.get(LoginJob, item.job_id)
+    item.state = "SUCCEEDED" if session_state == "RUNNING" else "ATTENTION"
+    if job:
+        job.running_count = max(0, job.running_count - 1)
+        if item.state == "SUCCEEDED":
+            job.succeeded_count += 1
+        else:
+            job.attention_count += 1
+        if job.queued_count == 0 and job.running_count == 0:
+            job.status = "COMPLETED"
+            job.completed_at = utcnow()
 
 
 ACTIVE_SESSION_STATES = {"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}
@@ -247,6 +402,8 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.failure_reason = "The worker encountered an unrecognized page"
     elif event_type == "HEARTBEAT":
         pass
+    if event_type in {"LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE"}:
+        _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"session.{event_type.lower()}", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id}))
     db.commit()
     return get_session(db, organization_id, session.id)
@@ -269,6 +426,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
+    _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
     return get_session(db, organization_id, session.id)

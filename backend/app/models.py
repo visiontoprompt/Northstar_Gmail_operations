@@ -63,6 +63,7 @@ class GmailAccount(Base):
     secret: Mapped["AccountSecret"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")
     browser_profile: Mapped["BrowserProfile"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")
     sessions: Mapped[list["BrowserSession"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+    credential_revisions: Mapped[list["CredentialRevision"]] = relationship(back_populates="account", cascade="all, delete-orphan")
 
 
 class BrowserProfile(Base):
@@ -142,3 +143,61 @@ class ImportOperation(Base):
     invalid: Mapped[int] = mapped_column(Integer, nullable=False)
     account_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class CredentialRevision(Base):
+    __tablename__ = "credential_revisions"
+    __table_args__ = (UniqueConstraint("account_id", "version", name="uq_credential_revision_account_version"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    secret_ref: Mapped[str] = mapped_column(String(180), unique=True, nullable=False)
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    recovery_hint: Mapped[str] = mapped_column(String(320), nullable=False)
+    two_fa_configured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(96), default="admin_demo", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    account: Mapped[GmailAccount] = relationship(back_populates="credential_revisions")
+
+
+class LoginJob(Base):
+    __tablename__ = "login_jobs"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    group_id: Mapped[str | None] = mapped_column(ForeignKey("account_groups.id"), index=True)
+    concurrency_limit: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False, index=True)
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    queued_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    running_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    succeeded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    attention_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(96), default="admin_demo", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    items: Mapped[list["LoginJobItem"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+
+class LoginJobItem(Base):
+    __tablename__ = "login_job_items"
+    __table_args__ = (UniqueConstraint("job_id", "account_id", name="uq_login_job_account"),)
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("login_jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("browser_sessions.id"), index=True)
+    state: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    job: Mapped[LoginJob] = relationship(back_populates="items")
+    account: Mapped[GmailAccount] = relationship()

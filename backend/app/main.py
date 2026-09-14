@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, GroupCreate, GroupResponse, ImportSummary, PageObservationCreate, PageObservationResponse, SessionEventCreate
-from .service import ImportValidationError, account_response, add_account, close_session, get_account, get_session, import_accounts, list_accounts, list_sessions, observe_session_page, preview_import, record_session_event, session_response, start_login_session
+from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupResponse, ImportSummary, LoginJobCreate, LoginJobResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate
+from .service import ImportValidationError, account_response, add_account, close_session, create_login_job, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_sessions, observe_session_page, preview_import, record_session_event, session_response, start_login_session, update_credentials, update_login_job_state
 
 settings = get_settings()
 
@@ -99,6 +99,76 @@ def bulk_import(payload: BulkImportRequest, db: Session = Depends(get_db)) -> di
         return {"imported": imported, "duplicates": duplicates, "invalid": invalid, "account_ids": ids}
     except ImportValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/accounts/{account_id}/credentials", response_model=AccountResponse)
+def replace_account_credentials(account_id: str, payload: CredentialUpdate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return update_credentials(db, settings.demo_org_id, "admin_demo", account_id, payload.password, payload.recovery, payload.two_fa)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/accounts/{account_id}/credential-revisions", response_model=list[CredentialRevisionResponse])
+def account_credential_revisions(account_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    try:
+        return credential_revisions(db, settings.demo_org_id, account_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/login-jobs", response_model=LoginJobResponse, status_code=status.HTTP_201_CREATED)
+def create_bulk_login_job(payload: LoginJobCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return create_login_job(db, settings.demo_org_id, "admin_demo", payload.group_id, payload.account_ids, payload.concurrency_limit)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/login-jobs", response_model=list[LoginJobResponse])
+def login_jobs(limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
+    return list_login_jobs(db, settings.demo_org_id, limit)
+
+
+@app.get("/api/v1/login-jobs/{job_id}", response_model=LoginJobResponse)
+def login_job_detail(job_id: str, db: Session = Depends(get_db)) -> dict:
+    job = get_login_job(db, settings.demo_org_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Login batch not found")
+    return job
+
+
+@app.post("/api/v1/login-jobs/{job_id}/start", response_model=LoginJobResponse)
+def start_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "RUNNING")
+        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/login-jobs/{job_id}/pause", response_model=LoginJobResponse)
+def pause_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "PAUSED")
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/login-jobs/{job_id}/dispatch", response_model=LoginJobResponse)
+def dispatch_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/login-jobs/{job_id}/cancel", response_model=LoginJobResponse)
+def cancel_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "CANCELLED")
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/audit-events", response_model=list[AuditEventResponse])
