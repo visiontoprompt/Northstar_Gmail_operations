@@ -118,6 +118,24 @@ def test_observer_clicks_safe_consent():
     assert getattr(button, "clicked", False) is True
 
 
+def test_observer_clicks_workspace_speedbump_understand():
+    button = _FakeButton("I understand")
+    page = _FakePage("https://workspace.google.com/workspacetermsofservice", "Google Workspace", "Google Workspace terms of service before you continue", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, interval=0.05)
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is True
+
+
+def test_observer_skips_speedbump_on_unknown_host():
+    button = _FakeButton("I understand")
+    page = _FakePage("https://evil.example/login", "terms", "i understand before you continue", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, interval=0.05)
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is not True
+
+
 def test_observer_reports_captcha_to_session_but_keeps_watching():
     seen = []
     observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05)

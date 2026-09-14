@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "ok")
+_SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "ok", "i understand", "understand")
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
@@ -248,12 +248,21 @@ def _fill_sign_in_form(page: "Page", observer: "BrowserObserver", url: str) -> N
 
 def _click_submit(page: "Page", url: str) -> None:
     try:
-        for button in page.locator("button, [role=button]").all():
+        for button in page.locator("button, [role=button], input[type=submit]").all():
             label = (button.inner_text() or "").strip().lower()
             if label in _SUBMIT_LABELS or any(word in label for word in _SUBMIT_LABELS):
                 button.click(timeout=1500)
                 logger.info("advanced sign-in step on %s", url)
                 return
+    except Exception:  # noqa: BLE001
+        pass
+    # Fallback used by the Google flow when the step has no labelled button:
+    # the identifier/password field is focused after typing, so Enter submits.
+    if not hasattr(page, "keyboard"):
+        return
+    try:
+        page.keyboard.press("Enter")
+        logger.info("signed in step on %s with keyboard Enter", url)
     except Exception:  # noqa: BLE001
         return
 
@@ -271,8 +280,16 @@ def _visible_text(page: "Page") -> str:
 
 
 def _is_safe_interstitial(url: str, signal: str) -> bool:
-    host = (urlparse(url).hostname or "").lower().rstrip(".")
-    return signal == "ORDINARY_INTERSTITIAL" and host in {"accounts.google.com", "consent.google.com"}
+    if signal != "ORDINARY_INTERSTITIAL":
+        return False
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in {"accounts.google.com", "consent.google.com"}:
+        return True
+    # Google Workspace terms-of-service / signin speedbump pages.
+    if host == "workspace.google.com" and "termsofservice" in (parsed.path or "").lower():
+        return True
+    return False
 
 
 def _can_click_consent(page: "Page") -> bool:
@@ -280,7 +297,7 @@ def _can_click_consent(page: "Page") -> bool:
         if page.locator("input[type=password], input[type=email]").count():
             return False
         text = _visible_text(page)
-        return any(word in text.lower() for word in ("terms", "privacy", "consent", "welcome", "continue"))
+        return any(word in text.lower() for word in ("terms", "privacy", "consent", "welcome", "understand", "continue"))
     except Exception:  # noqa: BLE001
         return False
 
@@ -288,10 +305,16 @@ def _can_click_consent(page: "Page") -> bool:
 def _click_consent(page: "Page") -> None:
     try:
         for button in page.locator("button, [role=button], a").all():
-            label = (button.inner_text() or "").strip().lower()
-            if label in _SAFE_CONSENT_LABELS or any(word in label for word in ("i agree", "accept all")):
-                button.click(timeout=1500)
-                logger.info("advanced consent on %s", page.url)
-                return
+            try:
+                label = (button.inner_text() or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if label in _SAFE_CONSENT_LABELS or any(word in label for word in ("i agree", "accept all", "i understand", "understand")):
+                try:
+                    button.click(timeout=1500)
+                    logger.info("advanced consent on %s", page.url)
+                    return
+                except Exception:  # noqa: BLE001 - hidden/disabled button; keep scanning
+                    continue
     except Exception:  # noqa: BLE001
         return
