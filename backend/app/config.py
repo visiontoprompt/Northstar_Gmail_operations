@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     browser_launch_enabled: bool = False
     browser_executable: str = "google-chrome"
     profile_root: str = "data/browser-profiles"
+    redis_url: str = "redis://localhost:6379/0"
+    worker_enabled: bool = False
+    worker_poll_interval: float = 5.0
+    worker_heartbeat_ttl: int = 30
+    worker_heartbeat_interval: float = 10.0
+    worker_stale_seconds: int = 90
+    worker_lock_ttl: int = 120
+    worker_retry_limit: int = 3
+    worker_max_active_profiles: int = 50
+    worker_release_on_complete: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

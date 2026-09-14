@@ -64,6 +64,7 @@ class GmailAccount(Base):
     browser_profile: Mapped["BrowserProfile"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")
     sessions: Mapped[list["BrowserSession"]] = relationship(back_populates="account", cascade="all, delete-orphan")
     credential_revisions: Mapped[list["CredentialRevision"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+    operation_drafts: Mapped[list["OperationDraft"]] = relationship(back_populates="account", cascade="all, delete-orphan")
 
 
 class BrowserProfile(Base):
@@ -163,6 +164,25 @@ class CredentialRevision(Base):
     account: Mapped[GmailAccount] = relationship(back_populates="credential_revisions")
 
 
+class OperationDraft(Base):
+    """Versioned, non-secret plan for a future account operation."""
+
+    __tablename__ = "operation_drafts"
+    __table_args__ = (UniqueConstraint("account_id", "operation_type", "version", name="uq_operation_draft_account_type_version"),)
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    operation_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False, index=True)
+    configuration_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(96), default="admin_demo", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    account: Mapped[GmailAccount] = relationship(back_populates="operation_drafts")
+
+
 class LoginJob(Base):
     __tablename__ = "login_jobs"
 
@@ -197,7 +217,32 @@ class LoginJobItem(Base):
     state: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_error: Mapped[str | None] = mapped_column(String(500))
+    worker_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    lock_key: Mapped[str | None] = mapped_column(String(160))
+    paused_reason: Mapped[str | None] = mapped_column(String(500))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     job: Mapped[LoginJob] = relationship(back_populates="items")
+    account: Mapped[GmailAccount] = relationship()
+
+
+class JobLock(Base):
+    """Durable database lock for an account+profile lease held by a worker."""
+
+    __tablename__ = "job_locks"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("browser_profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("browser_sessions.id"), index=True)
+    worker_id: Mapped[str] = mapped_column(String(96), nullable=False)
+    lock_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    reason: Mapped[str | None] = mapped_column(String(120))
     account: Mapped[GmailAccount] = relationship()
