@@ -14,11 +14,11 @@ The account secret remains in the encrypted secret store. Session responses, aud
 
 1. Admin opens account detail and selects **Open login session**.
 2. The API locks the account’s profile and returns a `LOGIN_REQUIRED` session with a local session workspace URL.
-3. A future Playwright worker will use the returned session/profile boundary. For this increment, the app provides a local hand-off surface so the lifecycle can be tested without sending credentials to Google.
+3. When `BROWSER_LAUNCH_ENABLED=true` in local development, the API opens a separate Chrome process using `--user-data-dir` for that profile. The SaaS console remains in its original browser session. A future Playwright worker will own this runtime boundary in production.
 4. A trusted browser/runtime event can record `LOGIN_COMPLETED` or `VERIFICATION_REQUIRED`.
 5. Closing the session releases the profile lock but preserves its storage reference and session history.
 
-The application does not automate credential entry, bypass CAPTCHA/MFA, or use stealth/fingerprint manipulation. Google authentication remains human-controlled until the worker contract is implemented and reviewed.
+The application does not automate credential entry, bypass CAPTCHA/MFA, or use stealth/fingerprint manipulation. Google authentication remains human-controlled until the worker contract is implemented and reviewed. If the local launcher is disabled or unavailable, the session record remains valid as a worker hand-off without pretending that a browser opened.
 
 ## API
 

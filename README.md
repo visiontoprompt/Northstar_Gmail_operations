@@ -37,6 +37,8 @@ uvicorn app.main:app --reload --port 8000
 
 Copy `backend/.env.example` when setting up a local environment. In production, use a managed secret provider and replace the development SQLite default with PostgreSQL.
 
+For local browser-session testing only, set `BROWSER_LAUNCH_ENABLED=true`. Each account then opens in its own Chrome process and persistent user-data directory, separate from the browser window hosting the SaaS console. The app never passes imported passwords, recovery values, or 2FA secrets to Chrome.
+
 The development default uses SQLite at `./data/gmail_ops.db`. Set `DATABASE_URL` to PostgreSQL for a shared environment. The API creates the demo organization and starter groups on first boot in development.
 
 ### Frontend

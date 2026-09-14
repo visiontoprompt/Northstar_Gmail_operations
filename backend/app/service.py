@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, GmailAccount, ImportOperation, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
+from .runtime import close_local_browser, launch_local_browser
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -171,6 +172,7 @@ def session_response(session: BrowserSession) -> dict:
         "state": session.state,
         "login_state": session.login_state,
         "runtime_type": session.runtime_type,
+        "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
         "session_url": f"/session/{session.id}",
         "opened_at": session.opened_at,
         "last_event_at": session.last_event_at,
@@ -208,6 +210,12 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     db.add(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_HANDOFF"}))
     db.commit()
+    launched, process_id = launch_local_browser(profile.id, session.id)
+    if launched:
+        session.runtime_type = "LOCAL_CHROME"
+        session.metadata_json = {"boundary": "human_login", "browser_opened": True, "process_id": process_id}
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
+        db.commit()
     return get_session(db, organization_id, session.id)
 
 
@@ -244,6 +252,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
         raise ImportValidationError("Session not found")
     if session.state == "CLOSED":
         return session
+    close_local_browser(session.id)
     now = utcnow()
     session.state = "CLOSED"
     session.last_event_at = now

@@ -103,6 +103,7 @@ h1 { margin-top: 9px; font-family: var(--font-display); font-size: clamp(29px, 3
 .button.primary:hover:not(:disabled) { background: var(--color-primary-dark); }
 .button.secondary { color: var(--color-ink-soft); background: #fff; border: 1px solid var(--color-line-strong); }
 .button.secondary:hover:not(:disabled) { background: var(--color-surface-muted); border-color: #aabbb7; }
+.session-opened { color: var(--color-primary); background: #e9f6f1; border-color: #b9ded3; }
 .button.danger { color: var(--color-danger); background: var(--color-danger-soft); border: 1px solid #f0c4bf; }
 .button.danger:hover:not(:disabled) { background: #ffe4e0; border-color: #dfaaa3; }
 .button.small { min-height: 37px; padding: 0 12px; }

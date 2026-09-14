@@ -91,6 +91,7 @@ def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
         assert session["state"] == "LOGIN_REQUIRED"
         assert session["login_state"] == "REQUIRED"
         assert session["profile_status"] == "OPEN"
+        assert session["browser_opened"] is False
         assert "secret" not in opened.text
         conflict = client.post(f"/api/v1/accounts/{account['id']}/sessions")
         assert conflict.status_code == 409

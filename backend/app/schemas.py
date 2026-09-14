@@ -148,6 +148,7 @@ class BrowserSessionResponse(BaseModel):
     state: str
     login_state: str
     runtime_type: str
+    browser_opened: bool
     session_url: str
     opened_at: datetime
     last_event_at: datetime

@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     secret_key: str = "dev-only-change-me-before-production"
     cors_origins: str = "http://localhost:5173"
     demo_org_id: str = "org_demo"
+    browser_launch_enabled: bool = False
+    browser_executable: str = "google-chrome"
+    profile_root: str = "data/browser-profiles"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
