@@ -34,7 +34,10 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
     if any(marker in haystack for marker in ("2-step verification", "two-step verification", "security key", "verify it's you", "phone verification", "security check")):
         return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
     if host in {"mail.google.com", "inbox.google.com"}:
-        return PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE
+        mailbox_markers = ("inbox", "compose", "sent mail", "drafts", "primary")
+        if parsed.path.startswith("/mail/") and any(marker in haystack for marker in mailbox_markers):
+            return PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE
+        return PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION
     if host in {"accounts.google.com", "consent.google.com", "myaccount.google.com"}:
         if any(marker in haystack for marker in ("sign in", "email or phone", "enter your password")):
             return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE

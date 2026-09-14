@@ -53,6 +53,8 @@ def test_observer_connects_to_chrome_cdp(chrome_profile):
     observed = []
     observer = BrowserObserver("s1", "p1", chrome_profile, observe_session_page=lambda sid, url, title, text: observed.append((url, title)), interval=0.05)
     observer.start()
-    time.sleep(1.2)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not observed:
+        time.sleep(0.05)
     observer.stop()
     assert any(("about:blank" in url or url) for url, _ in observed)

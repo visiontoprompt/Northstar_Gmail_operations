@@ -1,8 +1,10 @@
 import uuid
+import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -42,6 +44,20 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="0.1.0", description="Phase 1 account onboarding; no Gmail login automation", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    """Require a bearer token for every non-health API request outside development."""
+    if request.method != "OPTIONS" and request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/health":
+        if settings.environment.lower() != "development" or settings.admin_api_token:
+            authorization = request.headers.get("authorization", "")
+            scheme, _, supplied = authorization.partition(" ")
+            if not settings.admin_api_token:
+                return JSONResponse(status_code=503, content={"detail": "API authentication is not configured"})
+            if scheme.lower() != "bearer" or not secrets.compare_digest(supplied, settings.admin_api_token):
+                return JSONResponse(status_code=401, headers={"WWW-Authenticate": "Bearer"}, content={"detail": "Authentication required"})
+    return await call_next(request)
 
 
 @app.get("/api/v1/health")
@@ -272,7 +288,8 @@ def open_login_session(account_id: str, db: Session = Depends(get_db)) -> dict:
     try:
         return session_response(start_login_session(db, settings.demo_org_id, "admin_demo", account_id))
     except ImportValidationError as exc:
-        raise HTTPException(status_code=409 if "already has" in str(exc) else 422, detail=str(exc)) from exc
+        message = str(exc).lower()
+        raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/sessions/{session_id}/events", response_model=BrowserSessionResponse)

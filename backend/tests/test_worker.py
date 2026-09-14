@@ -216,6 +216,26 @@ def test_challenge_pause_holds_profile_for_human() -> None:
         assert item["paused_reason"] is not None
 
 
+def test_observation_of_gmail_home_completes_login():
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = _make_accounts(client, group_id, 1)[0]
+        job = _job_for(client, group_id, [account], concurrency=1)
+        started = start_job(client, job["id"])
+        session_id = started["items"][0]["session_id"]
+
+        response = client.post(f"/api/v1/sessions/{session_id}/observations", json={"url": "https://mail.google.com/mail/u/0/#inbox", "title": "Inbox", "text": "Inbox Compose Sent Mail"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["signal"] == "GMAIL_HOME"
+        assert body["session"]["state"] == "RUNNING"
+        assert body["session"]["login_state"] == "AUTHENTICATED"
+        progress = login_job_progress_client(client, job["id"])
+        item = progress["items"][0]
+        assert item["state"] == "SUCCEEDED"
+        assert progress["states"].get("SUCCEEDED") == 1
+
+
 def login_job_progress_client(client: TestClient, job_id: str) -> dict:
     response = client.get(f"/api/v1/login-jobs/{job_id}/progress")
     assert response.status_code == 200

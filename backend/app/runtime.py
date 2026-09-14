@@ -23,6 +23,11 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         return False, None
     profile_path = (Path(settings.profile_root) / profile_id).resolve()
     profile_path.mkdir(parents=True, exist_ok=True)
+    active_port_file = profile_path / "DevToolsActivePort"
+    try:
+        active_port_file.unlink(missing_ok=True)
+    except OSError:
+        return False, None
 
     command = [
         executable,
@@ -35,8 +40,9 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         "https://accounts.google.com/",
     ]
     if settings.browser_observer_enabled:
-        port = settings.browser_cdp_port or 0
-        command.insert(1, f"--remote-debugging-port={port}")
+        # Chrome allocates a unique port per profile. A configured fixed port
+        # cannot safely support concurrent account sessions.
+        command.insert(1, "--remote-debugging-port=0")
     try:
         process = subprocess.Popen(
             command,
@@ -48,7 +54,7 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         return False, None
     _processes[session_id] = process
     if settings.browser_observer_enabled:
-        cdp_port = _wait_for_cdp_port(profile_path, settings.browser_cdp_port)
+        cdp_port = _wait_for_cdp_port(profile_path)
         if cdp_port:
             _cdp_ports[session_id] = cdp_port
         else:
@@ -56,10 +62,8 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
     return True, process.pid
 
 
-def _wait_for_cdp_port(profile_path: Path, requested_port: int, timeout: float = 10.0) -> int | None:
+def _wait_for_cdp_port(profile_path: Path, timeout: float = 10.0) -> int | None:
     """Chrome writes the chosen debugging port into 'DevToolsActivePort'."""
-    if requested_port:
-        return requested_port
     active = profile_path / "DevToolsActivePort"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

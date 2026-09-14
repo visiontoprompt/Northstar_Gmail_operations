@@ -71,6 +71,9 @@ or a random free port when `0`), and `BrowserObserver`
 - **Auto-advance is consent-only.** Only ordinary consent interstitials
   (`accounts.*`/`consent.*`) are clicked (`_click_consent`) when no visible
   email/password field is present. Nothing else is ever automated.
+- A `GMAIL_HOME` observation fires `LOGIN_COMPLETED` → the item becomes `SUCCEEDED`
+  and the queue advances to the next account automatically (that is the trigger
+  that drives the batch forward).
 - CAPTCHA, MFA/security-check, and unknown pages pause the batch for a human by
   flipping the session to `ATTENTION`; the observer stops for that session.
 - The observer never fills or submits credentials/recovery codes, never clears
@@ -79,5 +82,7 @@ or a random free port when `0`), and `BrowserObserver`
 - `playwright` (Python, `>=1.62`) is a runtime dependency; it connects over CDP, so
   no Playwright browser binaries are required — the worker's own Chrome is observed.
 
-`BROWSER_OBSERVER_ENABLED`, `BROWSER_CDP_PORT`, `BROWSER_OBSERVE_INTERVAL` configure
-the observer in `.env.example`.
+`BROWSER_OBSERVER_ENABLED`, `BROWSER_OBSERVE_INTERVAL`, and the deprecated
+`BROWSER_CDP_PORT` compatibility setting configure the observer in `.env.example`.
+The runtime always requests a random per-profile CDP port so concurrent sessions
+cannot share one debugging endpoint.

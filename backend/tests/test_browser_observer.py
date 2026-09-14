@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver
+from app.observer import BrowserObserver, _is_safe_interstitial
 
 
 class _FakeButton:
@@ -99,6 +99,38 @@ def test_observer_records_observations():
     with patch("app.observer.classify_page", return_value=(PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE)):
         observer._tick(_fake_browser([page]))
     assert seen == [("s1", "https://mail.google.com/", "Inbox", "you have mail")]
+
+
+def test_observer_deduplicates_unchanged_observations():
+    seen = []
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *args: seen.append(args), interval=0.05)
+    page = _FakePage("https://mail.google.com/", "Inbox", "you have mail")
+    with patch("app.observer.classify_page", return_value=(PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE)):
+        browser = _fake_browser([page])
+        observer._tick(browser)
+        observer._tick(browser)
+    assert len(seen) == 1
+
+
+def test_observer_requires_an_exact_google_host_for_consent():
+    assert _is_safe_interstitial("https://accounts.google.com/continue", "ORDINARY_INTERSTITIAL") is True
+    assert _is_safe_interstitial("https://evil.example/accounts.google.com/continue", "UNKNOWN") is False
+
+
+def test_login_policy_does_not_treat_gmail_root_as_authenticated():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://mail.google.com/", "Gmail", "Welcome to Gmail"))
+    assert signal is PageSignal.UNKNOWN
+    assert action is PageAction.NEEDS_ATTENTION
+
+
+def test_login_policy_requires_a_mailbox_route_and_marker():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://mail.google.com/mail/u/0/#inbox", "Inbox", "Inbox Compose Sent Mail"))
+    assert signal is PageSignal.GMAIL_HOME
+    assert action is PageAction.SAFE_TO_OBSERVE
 
 
 def test_observer_stop_joins_thread():

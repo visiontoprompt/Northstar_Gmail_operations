@@ -8,12 +8,13 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./data/gmail_ops.db"
     secret_key: str = "dev-only-change-me-before-production"
+    admin_api_token: str | None = None
     cors_origins: str = "http://localhost:5173"
     demo_org_id: str = "org_demo"
     browser_launch_enabled: bool = False
     browser_executable: str = "google-chrome"
     profile_root: str = "data/browser-profiles"
-    browser_observer_enabled: bool = False
+    browser_observer_enabled: bool = True
     browser_cdp_port: int = 0
     browser_observe_interval: float = 1.0
     redis_url: str = "redis://localhost:6379/0"
@@ -39,4 +40,6 @@ def get_settings() -> Settings:
     settings = Settings()
     if settings.environment.lower() == "production" and settings.secret_key.startswith("dev-only"):
         raise RuntimeError("SECRET_KEY must be configured outside development")
+    if settings.environment.lower() == "production" and not settings.admin_api_token:
+        raise RuntimeError("ADMIN_API_TOKEN must be configured outside development")
     return settings

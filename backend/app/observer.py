@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from .login_policy import PageAction, PageObservation, classify_page
 
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "ok")
-_BLOCKED_HOSTS = {"mail.google.com", "inbox.google.com"}
 
 
 class BrowserObserver:
@@ -40,6 +40,7 @@ class BrowserObserver:
         self._interval = interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_observation: tuple[str, str, str, str] | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -77,9 +78,11 @@ class BrowserObserver:
             title = page.title() or ""
             text = _visible_text(page)
             signal, action = classify_page(PageObservation(url=url, title=title, text=text))
-            if self._observe_session_page is not object:
+            observation_key = (url, title, signal.value, action.value)
+            if self._observe_session_page is not object and observation_key != self._last_observation:
                 try:
                     self._observe_session_page(self.session_id, url, title, text)
+                    self._last_observation = observation_key
                 except Exception:  # noqa: BLE001
                     self._stop.set()
                     return
@@ -99,8 +102,8 @@ def _visible_text(page: "Page") -> str:
 
 
 def _is_safe_interstitial(url: str, signal: str) -> bool:
-    host = (url or "").lower()
-    return "accounts.google.com" in host or "consent.google.com" in host or host not in _BLOCKED_HOSTS and signal == "ORDINARY_INTERSTITIAL"
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return signal == "ORDINARY_INTERSTITIAL" and host in {"accounts.google.com", "consent.google.com"}
 
 
 def _can_click_consent(page: "Page") -> bool:

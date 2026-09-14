@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, engine
 from app.main import app
+from app.main import settings
 from app.security import SecretCipher
 from app.worker import redis as worker_redis
 
@@ -19,6 +20,21 @@ def setup_function() -> None:
     worker_redis.flush_redis()
     with TestClient(app):
         pass
+
+
+def test_production_api_requires_bearer_token() -> None:
+    original_environment = settings.environment
+    original_token = settings.admin_api_token
+    settings.environment = "production"
+    settings.admin_api_token = "test-admin-token"
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/v1/health").status_code == 200
+            assert client.get("/api/v1/accounts").status_code == 401
+            assert client.get("/api/v1/accounts", headers={"Authorization": "Bearer test-admin-token"}).status_code == 200
+    finally:
+        settings.environment = original_environment
+        settings.admin_api_token = original_token
 
 
 def test_bulk_preview_masks_secret_material() -> None:
@@ -258,6 +274,9 @@ def test_delete_archives_account_closes_session_and_removes_it_from_registry() -
         assert deleted.json()["lifecycle_status"] == "ARCHIVED"
         assert client.get("/api/v1/accounts", params={"q": "archive-me@example.com"}).json()["total"] == 0
         assert client.get(f"/api/v1/sessions/{session['id']}").json()["state"] == "CLOSED"
+        blocked = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert blocked.status_code == 409
+        assert "archived" in blocked.json()["detail"].lower()
         audit = client.get("/api/v1/audit-events", params={"account_id": account["id"], "limit": 20}).json()
         assert any(event["action"] == "account.archived" for event in audit)
         assert "hidden-password" not in str(audit)

@@ -43,6 +43,8 @@ For local browser-session testing only, set `BROWSER_LAUNCH_ENABLED=true`. Each 
 
 The development default uses SQLite at `./data/gmail_ops.db`. Set `DATABASE_URL` to PostgreSQL for a shared environment. The API creates the demo organization and starter groups on first boot in development.
 
+Outside development, configure `ADMIN_API_TOKEN` and send it as `Authorization: Bearer <token>` on API requests. The local development bypass is intentional for the demo console only; production deployments must replace this bootstrap token with the organization's real identity provider and role-based authorization before exposing the service.
+
 ### Frontend
 
 ```bash
