@@ -34,6 +34,8 @@ export SECRET_KEY='replace-with-a-32-byte-base64-fernet-key'
 uvicorn app.main:app --reload --port 8000
 ```
 
+Copy `backend/.env.example` when setting up a local environment. In production, use a managed secret provider and replace the development SQLite default with PostgreSQL.
+
 The development default uses SQLite at `./data/gmail_ops.db`. Set `DATABASE_URL` to PostgreSQL for a shared environment. The API creates the demo organization and starter groups on first boot in development.
 
 ### Frontend

@@ -34,14 +34,12 @@ spacing:
   xl: "2rem"
 components:
   button:
-    radius: "0.75rem"
+    rounded: "0.75rem"
     height: "2.75rem"
   card:
-    radius: "1rem"
-    border: "1px solid #d9e1df"
-    shadow: "0 8px 24px rgba(17, 24, 32, 0.06)"
+    rounded: "1rem"
   field:
-    radius: "0.75rem"
+    rounded: "0.75rem"
     height: "2.75rem"
 ---
 
