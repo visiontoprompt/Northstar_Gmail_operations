@@ -1,0 +1,20 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["frontend/src"],
+  "locale": "en-US",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": {
+    "Select/Listbox": "native"
+  },
+  "requiredCommands": ["unit", "build", "premium"],
+  "commands": {
+    "unit": "cd backend && pytest",
+    "build": "cd frontend && npm run build",
+    "premium": "python3 /home/akmed/.codex/plugins/cache/openai-curated-remote/frontend-design-premium/1.4.0/skills/frontend-design-premium/scripts/audit_project.py . --mode strict"
+  },
+  "evidence": {
+    "crudFullFlow": "backend/tests/test_api.py",
+    "failurePaths": "backend/tests/test_api.py"
+  }
+}

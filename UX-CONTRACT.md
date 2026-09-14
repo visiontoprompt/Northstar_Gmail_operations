@@ -1,0 +1,52 @@
+# UX Contract — Phase 1 Account Onboarding
+
+This contract covers the Phase 1 admin product surface. Visual intent lives in [DESIGN.md](DESIGN.md). Business architecture evidence comes from the approved project conversation and the architecture reference supplied with it.
+
+## Canonical owners
+
+| Capability | Canonical owner | Source of truth | Allowed variants | Verification |
+|---|---|---|---|---|
+| Form | Shared form field patterns in `frontend/src/App.tsx` | UX-CONTRACT.md | create / import | Inline errors and API tests |
+| Select/Listbox | Native select | UX-CONTRACT.md + DESIGN.md | native | Keyboard and popup review |
+| Search | Shared debounced registry behavior | UX-CONTRACT.md | query / clear | 300ms debounce and stale-request test |
+| Table | Semantic account table | API list contract | page / responsive stacked records | Table semantics and API tests |
+| Toast | `ToastRegion` | UX-CONTRACT.md | success / error / info | Live-region interaction review |
+| CRUD | Account service + registry flow | API contract + UX-CONTRACT.md | return-to-list | Create/import integration tests |
+| Scrollbar | Global application stylesheet | DESIGN.md | standard / stable overflow | Computed style and visual review |
+
+## Account onboarding flow
+
+1. Admin opens the Account Registry and chooses a group in the header or page filter.
+2. `Add account` opens the single-account form. `Import accounts` opens the bulk preview/import form.
+3. The admin can enter `email:password:recovery:2fa` in a masked textarea. Raw lines are never shown after preview/import completion.
+4. Preview validates syntax and reports row-level errors, duplicates, and masked metadata only.
+5. Import is pessimistic and idempotency-aware at the service boundary: the server validates again, encrypts the secret payload, persists metadata and an audit event, and returns only safe summaries.
+6. Successful records are stored with `lifecycle_status=SETUP_REQUIRED` and `readiness_status=READY_FOR_LOGIN`. This does not mean Google authentication succeeded.
+7. The registry refreshes, keeps the selected group/search context, and announces `Account added` or an exact partial-import count.
+
+## State vocabulary
+
+Phase 1 owns only these honest states: `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALID`, and `ARCHIVED`. `HEALTHY`, `AUTHENTICATED`, `ACTIVE`, `RELOGIN_REQUIRED`, and Google/browser error states belong to later phases and must not be fabricated in this UI.
+
+## Validation and sensitive values
+
+- Email is normalized case-insensitively for deduplication.
+- Bulk rows require exactly four non-empty colon-separated fields.
+- Password, recovery, and 2FA values are masked by default and never appear in URLs, logs, browser storage, audit metadata, toast text, or response payloads.
+- The textarea is `resize: none`, has explicit help text, and clears after a successful bulk import.
+
+## Navigation, feedback, and recovery
+
+- Registry is the owning list. Successful create/import returns to it.
+- API validation failures stay in the form with inline corrections; network/server failures stay in the form with retry.
+- Search/filter changes reset the page to 1 and preserve state in URL parameters when the frontend is connected to a router.
+- Rows link to an account detail shell. Detail tabs are non-functional placeholders until their phase is implemented, but the overview clearly marks them as future work.
+- Archive is not exposed in Phase 1; no destructive action is needed in the onboarding surface.
+
+## Accessibility and responsive behavior
+
+Target WCAG 2.2 AA. Use semantic labels, visible focus, `aria-invalid`/`aria-describedby`, live-region status, keyboard-accessible modals, and a mobile stacked-record view rather than shrinking all table columns. Reduced motion removes entrance transforms.
+
+## Route titles
+
+The registry owns `Account registry — Gmail Operations`. The account detail shell owns `Account detail — Gmail Operations`.
