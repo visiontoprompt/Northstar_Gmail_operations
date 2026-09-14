@@ -22,6 +22,9 @@ sign-in form with the account's stored encrypted secret:
   `consent.google.com`, and only after `classify_page` reports `LOGIN_FORM`.
 - Each step is entered and submitted (Next/Continue/Sign in) and recorded as a
   `session.auto_login.*` audit event.
+- If the saved profile already remembers an account, Google shows its
+  "Choose an account" chooser; the observer clicks "Use another account" so the
+  identifier form appears, then proceeds with the same stored credentials.
 - Fields that are already filled are never overwritten, and each page URL is
   attempted once — a rejected password cannot be retried in a loop.
 - Recovery codes, 2FA secrets, and CAPTCHA/security-check answers are never

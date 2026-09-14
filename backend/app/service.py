@@ -765,12 +765,38 @@ def session_response(session: BrowserSession) -> dict:
         "runtime_type": session.runtime_type,
         "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
         "observer_attached": bool(session.metadata_json.get("observer_attached", False)),
+        "automation_hint": _session_automation_hint(session),
         "session_url": f"/session/{session.id}",
         "opened_at": session.opened_at,
         "last_event_at": session.last_event_at,
         "closed_at": session.closed_at,
         "failure_reason": session.failure_reason,
     }
+
+
+def _session_automation_hint(session: BrowserSession) -> str | None:
+    """Explain why the opened browser is or is not being signed in
+    automatically, so the UI never leaves the operator guessing."""
+    settings = get_settings()
+    if not settings.browser_launch_enabled:
+        return None
+    if not settings.browser_observer_enabled:
+        return "Launcher and observer are both required for automation (BROWSER_LAUNCH_ENABLED and BROWSER_OBSERVER_ENABLED must be true)."
+    if not bool(session.metadata_json.get("observer_attached")):
+        return "Browser open but the observer could not attach; check that playwright is installed and BROWSER_OBSERVER_ENABLED=true."
+    if not settings.browser_auto_login:
+        return "Auto sign-in is disabled (BROWSER_AUTO_LOGIN=false); sign in manually in the opened browser."
+    secret = session.account.secret if session.account else None
+    if secret is not None:
+        try:
+            payload = SecretCipher().decrypt(secret.encrypted_payload)
+        except Exception:  # noqa: BLE001
+            payload = {}
+    else:
+        payload = {}
+    if not (payload or {}).get("password"):
+        return "No stored password for this account; add it under Update credentials to enable auto sign-in."
+    return "Auto sign-in is running in the opened browser."
 
 
 def get_session(db: Session, organization_id: str, session_id: str) -> BrowserSession | None:

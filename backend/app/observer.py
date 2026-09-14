@@ -71,6 +71,7 @@ class BrowserObserver:
         self._credentials: tuple[str, str] | None = None
         self._credentials_tried = False
         self._auto_attempted_urls: set[str] = set()
+        self._chooser_clicked_urls: set[str] = set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -150,8 +151,11 @@ class BrowserObserver:
                 self._stop.set()
                 return
 
-        if signal.value == "LOGIN_FORM" and self._resolve_credentials is not None and _is_login_host(url) and url not in self._auto_attempted_urls:
-            _fill_sign_in_form(page, self, url)
+        if signal.value == "LOGIN_FORM" and _is_login_host(url):
+            if url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
+                self._chooser_clicked_urls.add(url)
+            if self._resolve_credentials is not None and url not in self._auto_attempted_urls:
+                _fill_sign_in_form(page, self, url)
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
@@ -244,6 +248,37 @@ def _fill_sign_in_form(page: "Page", observer: "BrowserObserver", url: str) -> N
     except Exception:  # noqa: BLE001
         observer._auto_attempted_urls.add(url)
         observer._emit("failed", f"interaction failed on {url}", result="failure")
+
+
+def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str) -> bool:
+    """The dedicated profile may already remember an account, so Google shows a
+    "Choose an account" page without any input field. Expand it by clicking
+    "Use another account"; the identifier form then appears on the same URL."""
+    if page.locator("input[type=email], input[name=identifier], input[type=password]").count():
+        return False
+    clicked = _click_element_with_text(page, ("use another account",))
+    if clicked:
+        observer._emit("chooser_expanded", url)
+    return clicked
+
+
+def _click_element_with_text(page: "Page", labels: tuple[str, ...]) -> bool:
+    wanted = tuple(label.strip().lower() for label in labels)
+    try:
+        for candidate in page.locator("button, [role=button], a, li").all():
+            try:
+                label = (candidate.inner_text() or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if any(w in label for w in wanted):
+                try:
+                    candidate.click(timeout=1500)
+                    return True
+                except Exception:  # noqa: BLE001 - hidden/disabled; keep scanning
+                    continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _click_submit(page: "Page", url: str) -> None:

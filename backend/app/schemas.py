@@ -281,6 +281,7 @@ class BrowserSessionResponse(BaseModel):
     runtime_type: str
     browser_opened: bool
     observer_attached: bool = False
+    automation_hint: str | None = None
     session_url: str
     opened_at: datetime
     last_event_at: datetime
