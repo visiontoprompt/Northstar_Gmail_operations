@@ -12,6 +12,7 @@ This contract covers the Phase 1 admin product surface. Visual intent lives in [
 | Table | Semantic account table | API list contract | page / responsive stacked records | Table semantics and API tests |
 | Toast | `ToastRegion` | UX-CONTRACT.md | success / error / info | Live-region interaction review |
 | CRUD | Account service + registry flow | API contract + UX-CONTRACT.md | return-to-list | Create/import integration tests |
+| Session hand-off | Account detail session action + session workspace | Browser session API | open / authenticated / verification required / closed | Session lifecycle API and browser smoke test |
 | Scrollbar | Global application stylesheet | DESIGN.md | standard / stable overflow | Computed style and visual review |
 
 ## Account onboarding flow
@@ -23,10 +24,11 @@ This contract covers the Phase 1 admin product surface. Visual intent lives in [
 5. Import is pessimistic and idempotency-aware at the service boundary: the server validates again, encrypts the secret payload, persists metadata and an audit event, and returns only safe summaries.
 6. Successful records are stored with `lifecycle_status=SETUP_REQUIRED` and `readiness_status=READY_FOR_LOGIN`. This does not mean Google authentication succeeded.
 7. The registry refreshes, keeps the selected group/search context, and announces `Account added` or an exact partial-import count.
+8. Account detail can open one profile-backed login session. The session workspace exposes the current hand-off state and explicit actions to record a human-completed login or a verification requirement, then close the session.
 
 ## State vocabulary
 
-Phase 1 owns only these honest states: `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALID`, and `ARCHIVED`. `HEALTHY`, `AUTHENTICATED`, `ACTIVE`, `RELOGIN_REQUIRED`, and Google/browser error states belong to later phases and must not be fabricated in this UI.
+Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALID`, and `ARCHIVED`. The session hand-off owns `LOGIN_REQUIRED`, `AUTHENTICATED`, `VERIFICATION_REQUIRED`, `NEEDS_ATTENTION`, and `CLOSED`; these are session/browser observations, not proof that a healthy Gmail worker is running.
 
 ## Validation and sensitive values
 

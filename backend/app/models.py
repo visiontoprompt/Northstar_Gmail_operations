@@ -61,6 +61,46 @@ class GmailAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     group: Mapped[AccountGroup] = relationship(back_populates="accounts")
     secret: Mapped["AccountSecret"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")
+    browser_profile: Mapped["BrowserProfile"] = relationship(back_populates="account", uselist=False, cascade="all, delete-orphan")
+    sessions: Mapped[list["BrowserSession"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+
+
+class BrowserProfile(Base):
+    __tablename__ = "browser_profiles"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), unique=True, nullable=False)
+    storage_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="RESERVED", nullable=False)
+    lock_state: Mapped[str] = mapped_column(String(32), default="UNLOCKED", nullable=False)
+    active_session_id: Mapped[str | None] = mapped_column(String(96))
+    last_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    account: Mapped[GmailAccount] = relationship(back_populates="browser_profile")
+    sessions: Mapped[list["BrowserSession"]] = relationship(back_populates="profile")
+
+
+class BrowserSession(Base):
+    __tablename__ = "browser_sessions"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("browser_profiles.id"), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(32), default="STARTING", nullable=False, index=True)
+    login_state: Mapped[str] = mapped_column(String(40), default="REQUIRED", nullable=False)
+    runtime_type: Mapped[str] = mapped_column(String(32), default="LOCAL_HANDOFF", nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    account: Mapped[GmailAccount] = relationship(back_populates="sessions")
+    profile: Mapped[BrowserProfile] = relationship(back_populates="sessions")
 
 
 class AccountSecret(Base):

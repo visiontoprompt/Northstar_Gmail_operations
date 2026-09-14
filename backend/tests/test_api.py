@@ -79,3 +79,41 @@ def test_bulk_import_idempotency_key_does_not_duplicate_accounts() -> None:
         second = client.post("/api/v1/accounts/bulk/import", json=payload).json()
         assert second == first
         assert client.get("/api/v1/accounts").json()["total"] == 1
+
+
+def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "session@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert opened.status_code == 201
+        session = opened.json()
+        assert session["state"] == "LOGIN_REQUIRED"
+        assert session["login_state"] == "REQUIRED"
+        assert session["profile_status"] == "OPEN"
+        assert "secret" not in opened.text
+        conflict = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        assert conflict.status_code == 409
+
+        completed = client.post(f"/api/v1/sessions/{session['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        assert completed.status_code == 200
+        assert completed.json()["state"] == "RUNNING"
+        assert completed.json()["login_state"] == "AUTHENTICATED"
+
+        closed = client.post(f"/api/v1/sessions/{session['id']}/close")
+        assert closed.status_code == 200
+        assert closed.json()["state"] == "CLOSED"
+        assert closed.json()["profile_status"] == "RESERVED"
+        assert client.get(f"/api/v1/sessions?account_id={account['id']}").json()[0]["id"] == session["id"]
+
+
+def test_verification_event_is_visible_without_exposing_secrets() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "verify@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        response = client.post(f"/api/v1/sessions/{session['id']}/events", json={"event_type": "VERIFICATION_REQUIRED", "detail": "Additional verification required"})
+        assert response.status_code == 200
+        assert response.json()["state"] == "NEEDS_ATTENTION"
+        assert response.json()["login_state"] == "VERIFICATION_REQUIRED"
+        assert "secret" not in response.text

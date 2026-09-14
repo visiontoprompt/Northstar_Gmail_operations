@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -130,3 +131,25 @@ class AuditEventResponse(BaseModel):
     result: str
     metadata: dict
     created_at: datetime
+
+
+class SessionEventCreate(BaseModel):
+    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "HEARTBEAT"]
+    detail: str | None = Field(default=None, max_length=300)
+
+
+class BrowserSessionResponse(BaseModel):
+    id: str
+    account_id: str
+    account_email: str
+    profile_id: str
+    profile_storage_reference: str
+    profile_status: str
+    state: str
+    login_state: str
+    runtime_type: str
+    session_url: str
+    opened_at: datetime
+    last_event_at: datetime
+    closed_at: datetime | None
+    failure_reason: str | None

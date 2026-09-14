@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from .models import AccountGroup, AccountSecret, AuditEvent, GmailAccount, ImportOperation
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, GmailAccount, ImportOperation, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 
@@ -84,6 +84,7 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt({"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}))
     db.add(account)
     db.add(secret)
+    db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.imported", target_type="gmail_account", target_id=account_id, result="success", metadata_json={"group_id": group.id, "email_domain": email.split("@", 1)[1], "source": "single"}))
     db.commit()
     db.refresh(account)
@@ -106,6 +107,7 @@ def import_accounts(db: Session, organization_id: str, actor_id: str, group_id: 
         account_id = _new_id("acct")
         account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group_id, email=line.email, normalized_email=line.email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(line.recovery), two_fa_configured=bool(line.two_fa), login_status="NOT_STARTED", gmail_status="NOT_CHECKED", proxy_status="UNASSIGNED", profile_id=f"profile_{uuid.uuid4().hex[:12]}", profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
         db.add(account)
+        db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
         db.add(AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=cipher.encrypt({"password": line.password, "recovery": line.recovery, "2fa": line.two_fa})))
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.imported", target_type="gmail_account", target_id=account_id, result="success", metadata_json={"group_id": group_id, "email_domain": line.email.split("@", 1)[1], "source": "bulk", "row_number": line.row_number}))
         imported_ids.append(account_id)
@@ -136,3 +138,122 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
 
 def get_account(db: Session, organization_id: str, account_id: str) -> GmailAccount | None:
     return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+
+
+ACTIVE_SESSION_STATES = {"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}
+
+
+def _ensure_browser_profile(db: Session, account: GmailAccount) -> BrowserProfile:
+    profile = db.scalar(select(BrowserProfile).where(BrowserProfile.account_id == account.id))
+    if profile:
+        return profile
+    profile = BrowserProfile(
+        id=account.profile_id or _new_id("profile"),
+        organization_id=account.organization_id,
+        account_id=account.id,
+        storage_reference=account.profile_storage_ref or f"profiles/{account.organization_id}/{account.id}",
+        status="RESERVED",
+        lock_state="UNLOCKED",
+    )
+    db.add(profile)
+    db.flush()
+    return profile
+
+
+def session_response(session: BrowserSession) -> dict:
+    return {
+        "id": session.id,
+        "account_id": session.account_id,
+        "account_email": session.account.email,
+        "profile_id": session.profile_id,
+        "profile_storage_reference": session.profile.storage_reference,
+        "profile_status": session.profile.status,
+        "state": session.state,
+        "login_state": session.login_state,
+        "runtime_type": session.runtime_type,
+        "session_url": f"/session/{session.id}",
+        "opened_at": session.opened_at,
+        "last_event_at": session.last_event_at,
+        "closed_at": session.closed_at,
+        "failure_reason": session.failure_reason,
+    }
+
+
+def get_session(db: Session, organization_id: str, session_id: str) -> BrowserSession | None:
+    return db.scalar(select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.id == session_id))
+
+
+def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25) -> list[dict]:
+    query = select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id).order_by(BrowserSession.created_at.desc()).limit(limit)
+    if account_id:
+        query = query.where(BrowserSession.account_id == account_id)
+    return [session_response(item) for item in db.scalars(query).unique().all()]
+
+
+def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str) -> BrowserSession:
+    account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    if not account:
+        raise ImportValidationError("Account not found")
+    profile = _ensure_browser_profile(db, account)
+    if profile.active_session_id:
+        active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
+        if active:
+            raise ImportValidationError("This account already has an open login session")
+    session = BrowserSession(id=_new_id("session"), organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_HANDOFF", metadata_json={"boundary": "human_login"})
+    profile.status = "OPEN"
+    profile.lock_state = "LOCKED"
+    profile.active_session_id = session.id
+    profile.last_opened_at = utcnow()
+    account.login_status = "REQUIRED"
+    db.add(session)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_HANDOFF"}))
+    db.commit()
+    return get_session(db, organization_id, session.id)
+
+
+def record_session_event(db: Session, organization_id: str, actor_id: str, session_id: str, event_type: str, detail: str | None = None) -> BrowserSession:
+    session = get_session(db, organization_id, session_id)
+    if not session:
+        raise ImportValidationError("Session not found")
+    if session.state not in ACTIVE_SESSION_STATES:
+        raise ImportValidationError("This session is already closed")
+    now = utcnow()
+    session.last_event_at = now
+    if event_type == "LOGIN_COMPLETED":
+        session.state = "RUNNING"
+        session.login_state = "AUTHENTICATED"
+        session.account.login_status = "AUTHENTICATED"
+    elif event_type == "VERIFICATION_REQUIRED":
+        session.state = "NEEDS_ATTENTION"
+        session.login_state = "VERIFICATION_REQUIRED"
+        session.account.login_status = "VERIFICATION_REQUIRED"
+        # Keep the persisted reason controlled by the service. Never allow an
+        # event payload to become an audit/session log line that could contain
+        # imported credential material.
+        session.failure_reason = "Google requested additional verification"
+    elif event_type == "HEARTBEAT":
+        pass
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"session.{event_type.lower()}", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id}))
+    db.commit()
+    return get_session(db, organization_id, session.id)
+
+
+def close_session(db: Session, organization_id: str, actor_id: str, session_id: str) -> BrowserSession:
+    session = get_session(db, organization_id, session_id)
+    if not session:
+        raise ImportValidationError("Session not found")
+    if session.state == "CLOSED":
+        return session
+    now = utcnow()
+    session.state = "CLOSED"
+    session.last_event_at = now
+    session.closed_at = now
+    session.profile.status = "RESERVED"
+    session.profile.lock_state = "UNLOCKED"
+    session.profile.active_session_id = None
+    session.profile.last_closed_at = now
+    if session.login_state == "REQUIRED":
+        session.account.login_status = "NOT_STARTED"
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
+    db.commit()
+    return get_session(db, organization_id, session.id)

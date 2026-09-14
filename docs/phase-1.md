@@ -24,4 +24,4 @@ The future worker path remains:
 API → Redis queue/lock → stateless Playwright worker → durable profile + dedicated proxy
 ```
 
-No worker, browser, queue, lock, or Gmail automation is included in Phase 1.
+The first session hand-off boundary is documented in [phase-2-session.md](phase-2-session.md). It reserves a durable profile and records a human-controlled login session, but it does not automate Gmail authentication.

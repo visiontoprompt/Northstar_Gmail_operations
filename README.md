@@ -9,9 +9,10 @@ This phase can:
 - validate and deduplicate accounts inside an organization;
 - keep credential material in an encrypted secrets table, separate from operational metadata;
 - reserve dedicated proxy and persistent browser-profile metadata for later provisioning;
+- open a durable, profile-backed human login hand-off and record its lifecycle;
 - expose searchable, filterable admin account views and an audit trail.
 
-This phase deliberately does not automate Gmail login, browser control, CAPTCHA/MFA handling, or profile provisioning. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for Phase 2.
+The current session hand-off deliberately does not automate Gmail credential entry, browser stealth, CAPTCHA/MFA handling, or profile provisioning. It persists the profile reservation and session state so a later Playwright worker can attach safely. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for login.
 
 ## Repository layout
 
@@ -51,6 +52,8 @@ The Vite proxy sends `/api` requests to `http://localhost:8000`.
 ## Security boundary
 
 The raw import line is accepted only at the API boundary, parsed in memory, encrypted before persistence, and never returned, logged, placed in an audit event, or written to browser storage. The UI only shows masked recovery metadata and a `Configured` marker for 2FA. Production deployments must provide a managed `SECRET_KEY`/KMS-backed key and PostgreSQL; the development key fallback is not suitable for production.
+
+Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 
 ## Verification
 

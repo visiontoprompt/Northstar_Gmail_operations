@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, GroupCreate, GroupResponse, ImportSummary
-from .service import ImportValidationError, account_response, add_account, get_account, import_accounts, list_accounts, preview_import
+from .schemas import AccountListResponse, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, GroupCreate, GroupResponse, ImportSummary, SessionEventCreate
+from .service import ImportValidationError, account_response, add_account, close_session, get_account, get_session, import_accounts, list_accounts, list_sessions, preview_import, record_session_event, session_response, start_login_session
 
 settings = get_settings()
 
@@ -107,3 +107,40 @@ def audit_events(account_id: str | None = None, limit: int = Query(default=25, g
     if account_id:
         query = query.where(AuditEvent.target_id == account_id)
     return [{"id": item.id, "action": item.action, "target_type": item.target_type, "target_id": item.target_id, "result": item.result, "metadata": item.metadata_json, "created_at": item.created_at} for item in db.scalars(query).all()]
+
+
+@app.get("/api/v1/sessions", response_model=list[BrowserSessionResponse])
+def sessions(account_id: str | None = None, limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
+    return list_sessions(db, settings.demo_org_id, account_id, limit)
+
+
+@app.get("/api/v1/sessions/{session_id}", response_model=BrowserSessionResponse)
+def session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
+    session = get_session(db, settings.demo_org_id, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_response(session)
+
+
+@app.post("/api/v1/accounts/{account_id}/sessions", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
+def open_login_session(account_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return session_response(start_login_session(db, settings.demo_org_id, "admin_demo", account_id))
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "already has" in str(exc) else 422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/sessions/{session_id}/events", response_model=BrowserSessionResponse)
+def session_event(session_id: str, payload: SessionEventCreate, db: Session = Depends(get_db)) -> dict:
+    try:
+        return session_response(record_session_event(db, settings.demo_org_id, "admin_demo", session_id, payload.event_type, payload.detail))
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=409 if "closed" in str(exc) else 422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/sessions/{session_id}/close", response_model=BrowserSessionResponse)
+def end_login_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return session_response(close_session(db, settings.demo_org_id, "admin_demo", session_id))
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
