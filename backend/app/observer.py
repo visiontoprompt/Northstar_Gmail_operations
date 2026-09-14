@@ -40,6 +40,7 @@ _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
+_CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], #password"
 
 
 class BrowserObserver:
@@ -165,13 +166,14 @@ class BrowserObserver:
 
         # The "Choose an account" page (remembered profile) carries no input
         # fields, so classify_page reports it as ORDINARY_INTERSTITIAL (the copy
-        # contains "continue"). Drive consent, the chooser, and auto-fill for any
-        # Google login host regardless of the signal, never off-host.
+        # contains "continue"). Drive consent, the chooser, and auto-fill from
+        # what the page actually has on a Google login host, never off-host.
         if host in _LOGIN_HOSTS:
-            if url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
+            if _has_credential_input(page):
+                if self._resolve_credentials is not None and url not in self._auto_attempted_urls:
+                    _fill_sign_in_form(page, self, url)
+            elif url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
                 self._chooser_clicked_urls.add(url)
-            if signal.value == "LOGIN_FORM" and self._resolve_credentials is not None and url not in self._auto_attempted_urls:
-                _fill_sign_in_form(page, self, url)
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
@@ -179,16 +181,16 @@ class BrowserObserver:
         state_key = (signal.value, url)
         if state_key in self._logged_states:
             return
-        if signal.value == "LOGIN_FORM":
-            logger.info("session %s: login form detected on %s", self.session_id, url)
-        elif signal.value == "UNKNOWN":
-            logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
-        elif signal.value == "CAPTCHA":
+        if signal.value == "CAPTCHA":
             logger.warning("session %s: anti-bot wall on %s; a human must pass it", self.session_id, url)
         elif signal.value == "MFA_OR_SECURITY_CHECK":
             logger.info("session %s: second-factor prompt on %s awaiting manual confirmation", self.session_id, url)
         elif signal.value == "GMAIL_HOME":
             logger.info("session %s: mailbox detected on %s", self.session_id, url)
+        elif host in _LOGIN_HOSTS and _has_credential_input(page):
+            logger.info("session %s: login form detected on %s; auto sign-in is entering the saved credentials", self.session_id, url)
+        elif signal.value == "UNKNOWN":
+            logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
         elif signal.value == "ORDINARY_INTERSTITIAL":
             logger.info("session %s: interstitial (consent/chooser) on %s", self.session_id, url)
         self._logged_states.add(state_key)
@@ -304,11 +306,21 @@ def _fill_sign_in_form(page: "Page", observer: "BrowserObserver", url: str) -> N
         observer._emit("failed", f"interaction failed on {url}", result="failure")
 
 
+def _has_credential_input(page: "Page") -> bool:
+    """The identifier/password inputs are the one deterministic signal on a
+    Google login page: placeholder text such as "Email or phone" is not exposed
+    to innerText, so text heuristics alone can misclassify the page."""
+    try:
+        return page.locator(_CREDENTIAL_FIELD_SELECTOR).count() > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str) -> bool:
     """The dedicated profile may already remember an account, so Google shows a
     "Choose an account" page without any input field. Expand it by clicking
     "Use another account"; the identifier form then appears on the same URL."""
-    if page.locator("input[type=email], input[name=identifier], input[type=password]").count():
+    if page.locator(_CREDENTIAL_FIELD_SELECTOR).count():
         return False
     clicked = _click_element_with_text(page, ("use another account",))
     if clicked:

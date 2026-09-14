@@ -237,6 +237,16 @@ def test_auto_login_reports_events():
     assert any(event == "identifier_filled" for _, event, _, _ in events)
 
 
+def test_auto_login_fills_identifier_even_when_classified_interstitial():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://accounts.google.com/v3/signin/identifier", "One Google Account", "Welcome back to Gmail. Continue to Gmail.", identifier="", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"))
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert page.cred_fields["email"].value == "alice@example.com"
+    assert getattr(button, "clicked", False) is True
+
+
 def test_observer_clicks_use_another_account_on_chooser():
     button = _FakeButton("Use another account")
     page = _FakePage("https://accounts.google.com/signin/v2/identifier", "choose an account", "Choose an account to continue", buttons=[button])
