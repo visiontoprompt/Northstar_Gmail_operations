@@ -14,12 +14,12 @@ class Settings(BaseSettings):
     browser_launch_enabled: bool = False
     browser_executable: str = "google-chrome"
     profile_root: str = "data/browser-profiles"
-    # The supported local mode is a standard isolated Chrome window with
-    # operator-controlled sign-in. CDP/credential automation is opt-in only
-    # for future approved worker environments.
+    # Local mode launches each account's saved profile as a normal Chrome window
+    # via Playwright's persistent context; the observer drives sign-in and the
+    # saved profile/cookies persist for future no-login sessions. These flags
+    # are opt-in: dev.sh enables them all automatically.
     browser_observer_enabled: bool = False
     browser_auto_login: bool = False
-    browser_cdp_port: int = 0
     browser_observe_interval: float = 1.0
     browser_observe_settle_seconds: float = 5.0
     redis_url: str = "redis://localhost:6379/0"

@@ -359,8 +359,13 @@ def test_login_policy_requires_a_mailbox_route_and_marker():
 
 
 def test_observer_stop_joins_thread():
-    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, interval=0.05, connect_timeout=0.1)
-    observer.start()
-    assert observer._thread is not None and observer._thread.is_alive()
-    observer.stop()
+    def _block_until_stopped(_pw, _observer):
+        _observer._stop.wait(10)
+        return MagicMock()
+
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, interval=0.05)
+    with patch("app.observer._launch_profile_context", side_effect=_block_until_stopped), patch("app.observer._open_start_page", return_value=None):
+        observer.start()
+        assert observer._thread is not None and observer._thread.is_alive()
+        observer.stop()
     assert not observer._thread.is_alive()

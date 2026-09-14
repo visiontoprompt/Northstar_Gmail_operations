@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from logging import getLogger
+from pathlib import Path
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
@@ -14,7 +15,7 @@ from .db import SessionLocal
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
-from .runtime import browser_debug_port, close_local_browser, launch_local_browser, local_browser_is_alive
+from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, resolve_browser_executable
 from .observer import BrowserObserver
 from .login_policy import PageObservation, classify_page
 from .worker.locks import RedisLocks, account_lock_key
@@ -438,17 +439,15 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
         _record_observer_status(session_id, organization_id, actor_id, False, "BROWSER_OBSERVER_ENABLED is false")
         return False
-    cdp_port = browser_debug_port(session_id)
-    if not cdp_port:
-        logger.warning("session %s: browser window opened but no CDP endpoint was detected; automation cannot attach (check BROWSER_OBSERVER_ENABLED and playwright)", session_id)
-        _record_observer_status(session_id, organization_id, actor_id, False, "no CDP endpoint detected")
-        return False
-    # The observer drives the same CDP endpoint the runtime already opened;
-    # no browser-side changes are introduced here.
+    # The observer launches the account's own saved profile as a normal Chrome
+    # window through Playwright's persistent context: the command line carries
+    # no --remote-debugging-port / --enable-automation flags for Google to see.
     observer = BrowserObserver(
         session_id,
         profile_id,
-        cdp_port,
+        0,
+        profile_dir=str((Path(settings.profile_root) / profile_id).resolve()),
+        executable=resolve_browser_executable(),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
@@ -459,7 +458,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
     _observers[session_id] = observer
     observer.start()
     _record_observer_status(session_id, organization_id, actor_id, True)
-    logger.info("AUTOMATION ACTIVE: observer attached to session %s on CDP port %s", session_id, cdp_port)
+    logger.info("AUTOMATION ACTIVE: observer launching the isolated browser for session %s", session_id)
     return True
 
 

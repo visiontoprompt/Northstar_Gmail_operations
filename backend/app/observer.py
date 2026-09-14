@@ -1,6 +1,8 @@
-"""Playwright observer attached to a worker-open Chrome via CDP.
+"""Playwright observer that launches and drives the account's own browser.
 
-The observer is a consent-only automation that may drive the sign-in form:
+The observer launches the Chromium-family binary with a persistent user-data
+dir (the saved account profile), navigates it to Google sign-in, and drives the
+flow:
 
 - reads the current page state (URL, title, visible text) and classifies it with
   login_policy.classify_page;
@@ -9,16 +11,25 @@ The observer is a consent-only automation that may drive the sign-in form:
 - when BROWSER_AUTO_LOGIN is enabled and the account has a stored encrypted
   secret, types the identifier and password into Google's own sign-in form
   (accounts.google.com / consent.google.com only) and submits each step;
+- when a 2FA secret is stored, generates the TOTP and enters it;
 - reports CAPTCHA / MFA / security / unknown pages by calling
   observe_session_page, which pauses the session for a human;
 - keeps watching after a page pauses, so the mailbox is detected as soon as the
   human clears a challenge and Gmail loads.
 
+Launching via Playwright's persistent context keeps Chrome's own command line
+free of --remote-debugging-port / --enable-automation, which is what makes
+Google answer "this browser or app may not be secure" instead of loading the
+form. The saved profile (cookies/state) stays on disk in the profile dir and is
+reused by later sessions, so an account that has signed in once can be opened
+again without re-authentication.
+
 It never solves CAPTCHAs, never submits recovery or 2FA codes, only types into
 Google's own login host, never touches already-filled fields, and attempts each
 page once so a rejected password cannot be retried in a loop. Every fill and
-submit is recorded as an audit event. Fingerprint/stealth signals are never
-manipulated and cookies are never cleared.
+submit is recorded as an audit event. No fingerprint/stealth signal beyond
+disabling Chrome's own automation infobar is manipulated and cookies are never
+cleared.
 """
 
 from __future__ import annotations
@@ -27,14 +38,17 @@ import logging
 import threading
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from .config import get_settings
 from .login_policy import PageAction, PageObservation, classify_page
+from .runtime import resolve_browser_executable
 from .security import generate_totp
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Browser, Page
+    from playwright.sync_api import Browser, BrowserContext, Page
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +66,10 @@ class BrowserObserver:
         session_id: str,
         profile_id: str,
         cdp_port: int,
+        profile_dir: str | None = None,
+        executable: str | None = None,
+        headless: bool = False,
+        start_url: str | None = None,
         observe_session_page=object,
         resolve_credentials=None,
         resolve_otp_secret=None,
@@ -62,7 +80,11 @@ class BrowserObserver:
     ) -> None:
         self.session_id = session_id
         self.profile_id = profile_id
-        self.cdp_port = cdp_port
+        self.cdp_port = cdp_port  # kept for backward compatibility; unused
+        self.profile_dir = profile_dir
+        self.executable = executable
+        self.headless = headless
+        self.start_url = start_url or "https://accounts.google.com/"
         self._observe_session_page = observe_session_page
         self._resolve_credentials = resolve_credentials
         self._resolve_otp_secret = resolve_otp_secret
@@ -114,37 +136,39 @@ class BrowserObserver:
             logger.warning("playwright not installed; session %s is human hand-off", self.session_id)
             return
         with sync_playwright() as pw:
-            browser = _connect_with_retry(pw, self.cdp_port, self.session_id, self._connect_timeout, self._stop)
-            if browser is None:
+            context = _launch_profile_context(pw, self)
+            if context is None:
+                self._emit("failed", "could not launch the isolated browser", result="failure")
                 return
-            logger.info("AUTOMATION ACTIVE: observer attached to session %s on CDP port %s", self.session_id, self.cdp_port)
-            context_count = len(browser.contexts)
-            page_count = sum(len(context.pages) for context in browser.contexts)
-            logger.info("observer sees %d context(s) with %d page target(s) for session %s", context_count, page_count, self.session_id)
-            for context in browser.contexts:
-                for page in context.pages:
-                    try:
-                        target_url = page.url or "<blank>"
-                    except Exception:  # noqa: BLE001 - report-only
-                        target_url = "<unreadable>"
-                    logger.info("session %s: page target %s", self.session_id, target_url)
             try:
-                while not self._stop.is_set():
-                    try:
-                        self._tick(browser)
-                    except Exception:  # noqa: BLE001 - a bad page must not kill the observer
-                        logger.exception("observer tick failed for session %s", self.session_id)
-                    self._stop.wait(self._interval)
+                page = context.pages[0] if context.pages else context.new_page()
+                _open_start_page(page, self.start_url)
+                page_count = len(context.pages)
+                logger.info("AUTOMATION ACTIVE: observer launched the isolated browser for session %s (%d page target(s))", self.session_id, page_count)
+                try:
+                    for target in context.pages:
+                        logger.info("session %s: page target %s", self.session_id, _open_page_url(target))
+                except Exception:  # noqa: BLE001 - report-only
+                    logger.warning("session %s: page targets unreadable", self.session_id)
+                try:
+                    while not self._stop.is_set():
+                        try:
+                            self._tick(context)
+                        except Exception:  # noqa: BLE001 - a bad page must not kill the observer
+                            logger.exception("observer tick failed for session %s", self.session_id)
+                        self._stop.wait(self._interval)
+                finally:
+                    logger.info("observer closing the isolated browser for session %s", self.session_id)
             finally:
-                # This Browser is attached to a Chrome process owned by
-                # runtime.py. Calling browser.close() over CDP closes the
-                # remote Chrome and breaks the user's dedicated session.
-                # Exiting sync_playwright below disconnects the observer;
-                # runtime.close_local_browser remains the only owner that
-                # may terminate the Chrome process.
-                logger.debug("observer disconnecting from session %s", self.session_id)
+                try:
+                    # Closing the persistent context terminates the browser but
+                    # keeps the user-data dir on disk, so the account's saved
+                    # cookies/profile persist for the next no-login session.
+                    context.close()
+                except Exception:  # noqa: BLE001
+                    logger.debug("observer context close failed for session %s", self.session_id, exc_info=True)
 
-    def _tick(self, browser: "Browser") -> None:
+    def _tick(self, browser: "Browser | BrowserContext") -> None:
         page = _active_page(browser)
         if page is None:
             if not self._reported_no_page:
@@ -211,20 +235,68 @@ class BrowserObserver:
         self._logged_states.add(state_key)
 
 
-def _connect_with_retry(pw, cdp_port: int, session_id: str, timeout: float, stop: threading.Event):
-    """Chrome may not have finished opening its debugging endpoint when the
-    observer thread starts; keep retrying for the attach window."""
-    deadline = time.monotonic() + timeout
-    last_error: Exception | None = None
-    while time.monotonic() < deadline and not stop.is_set():
-        try:
-            logger.info("observer connecting to CDP on port %s for session %s", cdp_port, session_id)
-            return pw.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            time.sleep(0.5)
-    logger.warning("observer could not attach to session %s within %.0fs: %s", session_id, timeout, last_error)
-    return None
+def _launch_profile_context(pw, observer: "BrowserObserver"):
+    """Launch the account's own saved profile as a normal-looking Chrome window.
+
+    Using Playwright's persistent context keeps the command line free of
+    --remote-debugging-port and --enable-automation, which Chrome otherwise
+    shows to Google and which make sign-in answer "this browser or app may not
+    be secure". The profile dir is the same folder the app always used, so any
+    cookies saved by an earlier sign-in survive and are reused later.
+    """
+    profile_dir = observer.profile_dir
+    if not profile_dir:
+        profile_dir = str((Path(get_settings().profile_root) / observer.profile_id).resolve())
+    profile_path = Path(profile_dir)
+    try:
+        profile_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("observer could not create profile dir %s for session %s", profile_dir, observer.session_id)
+        return None
+    executable = observer.executable or resolve_browser_executable()
+    if not executable:
+        logger.warning("no browser executable found for session %s (set BROWSER_EXECUTABLE or install Chrome/Chromium)", observer.session_id)
+        return None
+    active_port_file = profile_path / "DevToolsActivePort"
+    try:
+        active_port_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    logger.info("session %s: launching the saved profile with %s", observer.session_id, executable)
+    launch_kwargs = {}
+    if not observer.headless:
+        launch_kwargs["no_viewport"] = True
+    try:
+        return pw.chromium.launch_persistent_context(
+            user_data_dir=str(profile_path),
+            executable_path=executable,
+            headless=observer.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--start-maximized",
+            ],
+            ignore_default_args=["--enable-automation"],
+            **launch_kwargs,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("observer failed to launch the browser for session %s", observer.session_id)
+        return None
+
+
+def _open_start_page(page: "Page", start_url: str) -> None:
+    """Make the fresh window land on Google sign-in unless it already has a
+    usable target (e.g. a profile that already progressed to the form)."""
+    try:
+        current = page.url or ""
+    except Exception:  # noqa: BLE001
+        current = ""
+    try:
+        if not current or current.startswith(_BLANK_URL_PREFIXES) or (urlparse(current).hostname or "") not in _LOGIN_HOSTS:
+            page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:  # noqa: BLE001 - a load failure must not kill the observer
+        logger.warning("observer could not open %s; the session page may still settle", start_url, exc_info=True)
 
 
 def _open_page_url(page: "Page") -> str:
@@ -245,10 +317,11 @@ def _page_rank(url: str) -> int:
     return 1
 
 
-def _active_page(browser: "Browser") -> "Page | None":
-    candidates: list["Page"] = []
-    for context in browser.contexts:
-        candidates.extend(context.pages)
+def _active_page(owner: "Browser | BrowserContext") -> "Page | None":
+    if hasattr(owner, "contexts"):
+        candidates = [page for context in owner.contexts for page in context.pages]
+    else:
+        candidates = list(getattr(owner, "pages", None) or [])
     if not candidates:
         return None
     # Prefer the sign-in tab: a remembered profile can leave a blank/first-run
