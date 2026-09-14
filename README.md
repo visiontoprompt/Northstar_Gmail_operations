@@ -14,6 +14,8 @@ This phase can:
 - version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
 
+The complete product direction and delivery sequence are defined in [ROADMAP.md](ROADMAP.md). The system topology, domain ownership, state model, and module boundaries are defined in [docs/architecture.md](docs/architecture.md).
+
 The current session hand-off deliberately does not solve or bypass Gmail CAPTCHA/MFA/security challenges, use browser stealth, or use Gmail API/OAuth. It persists profile reservations, credential revisions, and concurrency-controlled session queues so a reviewed browser worker can attach safely. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for login.
 
 ## Repository layout
