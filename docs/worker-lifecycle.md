@@ -58,3 +58,26 @@ marks the item back to `QUEUED`, and pauses the batch for operator review.
 `WORKER_HEARTBEAT_INTERVAL`, `WORKER_STALE_SECONDS`, `WORKER_LOCK_TTL`,
 `WORKER_RETRY_LIMIT`, `WORKER_MAX_ACTIVE_PROFILES`, `WORKER_RELEASE_ON_COMPLETE`.
 Tests run against `fakeredis://` with a short poll interval (0.1 s).
+
+## Browser observer
+
+When `BROWSER_LAUNCH_ENABLED` and `BROWSER_OBSERVER_ENABLED` are both true, the
+launched Chrome opens with `--remote-debugging-port` (`BROWSER_CDP_PORT`,
+or a random free port when `0`), and `BrowserObserver`
+(`app/observer.py`) connects over CDP with Playwright.
+
+- Each poll reads URL/title/visible text, classifies it with `classify_page`, and
+  records it via `observe_session_page`.
+- **Auto-advance is consent-only.** Only ordinary consent interstitials
+  (`accounts.*`/`consent.*`) are clicked (`_click_consent`) when no visible
+  email/password field is present. Nothing else is ever automated.
+- CAPTCHA, MFA/security-check, and unknown pages pause the batch for a human by
+  flipping the session to `ATTENTION`; the observer stops for that session.
+- The observer never fills or submits credentials/recovery codes, never clears
+  cookies, and never manipulates stealth signals. It is a daemon thread per
+  session, torn down on close/cancel/stale-recovery via `_stop_observer`.
+- `playwright` (Python, `>=1.62`) is a runtime dependency; it connects over CDP, so
+  no Playwright browser binaries are required — the worker's own Chrome is observed.
+
+`BROWSER_OBSERVER_ENABLED`, `BROWSER_CDP_PORT`, `BROWSER_OBSERVE_INTERVAL` configure
+the observer in `.env.example`.

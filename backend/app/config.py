@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     browser_launch_enabled: bool = False
     browser_executable: str = "google-chrome"
     profile_root: str = "data/browser-profiles"
+    browser_observer_enabled: bool = False
+    browser_cdp_port: int = 0
+    browser_observe_interval: float = 1.0
     redis_url: str = "redis://localhost:6379/0"
     worker_enabled: bool = False
     worker_poll_interval: float = 5.0

@@ -9,10 +9,12 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
 from .config import get_settings
+from .db import SessionLocal
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
-from .runtime import close_local_browser, launch_local_browser
+from .runtime import browser_debug_port, close_local_browser, launch_local_browser
+from .observer import BrowserObserver
 from .login_policy import PageObservation, classify_page
 from .worker.locks import RedisLocks, account_lock_key
 from .worker.queue import RedisQueue
@@ -222,6 +224,7 @@ def archive_account(db: Session, organization_id: str, actor_id: str, account_id
     active_sessions = db.scalars(select(BrowserSession).where(BrowserSession.organization_id == organization_id, BrowserSession.account_id == account.id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))).all()
     for session in active_sessions:
         close_local_browser(session.id)
+        _stop_observer(session.id)
         session.state = "CLOSED"
         session.closed_at = now
         session.last_event_at = now
@@ -386,6 +389,7 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
                 session = get_session(db, organization_id, item.session_id)
                 if session and session.state in ACTIVE_SESSION_STATES:
                     close_local_browser(session.id)
+                    _stop_observer(session.id)
                     now = utcnow()
                     session.state = "CLOSED"
                     session.closed_at = now
@@ -414,6 +418,41 @@ def _queue() -> RedisQueue:
 
 def _locks() -> RedisLocks:
     return RedisLocks()
+
+
+_observers: dict[str, BrowserObserver] = {}
+
+
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str) -> None:
+    settings = get_settings()
+    if not settings.browser_observer_enabled:
+        return
+    cdp_port = browser_debug_port(session_id)
+    if not cdp_port:
+        return
+    observer = BrowserObserver(
+        session_id,
+        profile_id,
+        cdp_port,
+        observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
+        interval=settings.browser_observe_interval,
+    )
+    _observers[session_id] = observer
+    observer.start()
+
+
+def _stop_observer(session_id: str) -> None:
+    observer = _observers.pop(session_id, None)
+    if observer:
+        observer.stop()
+
+
+def _observe_in_own_session(organization_id: str, actor_id: str, session_id: str, url: str, title: str, text: str) -> None:
+    db = SessionLocal()
+    try:
+        observe_session_page(db, organization_id, actor_id, session_id, url, title, text)
+    finally:
+        db.close()
 
 
 def enqueue_queued_items(db: Session, job_id: str) -> int:
@@ -668,6 +707,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         session.metadata_json = {"boundary": "human_login", "browser_opened": True, "process_id": process_id}
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
         db.commit()
+        _start_observer(session.id, profile.id, organization_id, actor_id)
     return get_session(db, organization_id, session.id)
 
 
@@ -710,6 +750,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     if session.state == "CLOSED":
         return session
     close_local_browser(session.id)
+    _stop_observer(session.id)
     now = utcnow()
     session.state = "CLOSED"
     session.last_event_at = now
@@ -838,6 +879,7 @@ def recover_stale_locks(db: Session, organization_id: str) -> dict:
             session = db.scalar(select(BrowserSession).where(BrowserSession.organization_id == organization_id, BrowserSession.id == item.session_id))
             if session and session.state in ACTIVE_SESSION_STATES:
                 close_local_browser(session.id)
+                _stop_observer(session.id)
                 session.state = "CLOSED"
                 session.closed_at = now
                 session.last_event_at = now
