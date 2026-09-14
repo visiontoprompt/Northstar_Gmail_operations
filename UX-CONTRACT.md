@@ -11,7 +11,7 @@ This contract covers the Phase 1 admin product surface. Visual intent lives in [
 | Search | Shared debounced registry behavior | UX-CONTRACT.md | query / clear | 300ms debounce and stale-request test |
 | Table | Semantic account table | API list contract | page / responsive stacked records | Table semantics and API tests |
 | Toast | `ToastRegion` | UX-CONTRACT.md | success / error / info | Live-region interaction review |
-| CRUD | Account service + registry flow | API contract + UX-CONTRACT.md | return-to-list | Create/import integration tests |
+| CRUD | Account service + registry flow | API contract + UX-CONTRACT.md | create / import / edit / move / delete shell | Inline errors, destructive confirmation, and API tests |
 | Session hand-off | Account detail session action + session workspace | Browser session API | open / authenticated / verification required / closed | Session lifecycle API and browser smoke test |
 | Scrollbar | Global application stylesheet | DESIGN.md | standard / stable overflow | Computed style and visual review |
 
@@ -43,7 +43,9 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
 - API validation failures stay in the form with inline corrections; network/server failures stay in the form with retry.
 - Search/filter changes reset the page to 1 and preserve state in URL parameters when the frontend is connected to a router.
 - Rows link to an account detail shell. Detail tabs are non-functional placeholders until their phase is implemented, but the overview clearly marks them as future work.
-- Archive is not exposed in Phase 1; no destructive action is needed in the onboarding surface.
+- Account detail exposes edit metadata, move group, and delete interaction shells. These controls are frontend-only until their server contracts exist; they must not show optimistic success or mutate the registry locally.
+- Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer must state that no external action occurs until a reviewed connector is connected.
+- Archive is not exposed in Phase 1. Delete remains a guarded, backend-confirmed action because it affects account, secret, session, and profile records.
 
 ## Accessibility and responsive behavior
 
