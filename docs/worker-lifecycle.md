@@ -66,9 +66,10 @@ launched Chrome opens with `--remote-debugging-port` (a random free port when
 `0`), and `BrowserObserver`
 (`app/observer.py`) connects over CDP with Playwright.
 
-The local one-command launcher deliberately sets `BROWSER_OBSERVER_ENABLED=false`
-so Google authentication happens in a standard Chrome surface. Enable CDP only
-for an explicitly approved post-login diagnostic workflow.
+The local one-command launcher deliberately sets both `BROWSER_OBSERVER_ENABLED=false`
+and `BROWSER_AUTO_LOGIN=false`, so Google authentication happens manually in a
+standard Chrome surface. CDP/observer automation is deferred to an explicitly
+approved worker environment and is not part of the supported local mode.
 
 - Each poll reads URL/title/visible text, classifies it with `classify_page`, and
   records it via `observe_session_page`.

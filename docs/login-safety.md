@@ -11,9 +11,23 @@ The login worker boundary is observation-first. It may classify normal Google pa
 - `MFA_OR_SECURITY_CHECK` — same pause-and-keep-watching behavior.
 - `UNKNOWN` — a page is only judged after a settle window (`BROWSER_OBSERVE_SETTLE_SECONDS`, default 5) so a still-loading page can never fail a fresh session; a page that stays unknown is sent to attention rather than guessed.
 
-## Automatic credential entry
+## Supported sign-in mode
 
-When `BROWSER_AUTO_LOGIN` is enabled (default) the observer drives Google's own
+The supported local sign-in mode is manual sign-in in the isolated standard
+Chrome window. `BROWSER_OBSERVER_ENABLED=false` and `BROWSER_AUTO_LOGIN=false`
+are the defaults, and `dev.sh` enforces them. This avoids presenting Google
+with an attached debugging/automation session while preserving the dedicated
+profile for later work.
+
+The account's encrypted secret remains stored for the account record, but it is
+never typed into the browser by the local launcher. After the operator signs in
+and Google visibly confirms access, record `LOGIN_COMPLETED` in the session and
+the profile remains available for later approved operations.
+
+## Deferred observer capability
+
+The repository retains an observer implementation for a future, explicitly
+approved worker environment. When enabled there, it can drive Google's own
 sign-in form with the account's stored encrypted secret:
 
 - The identifier (email) and password come only from the account's encrypted
@@ -31,7 +45,9 @@ sign-in form with the account's stored encrypted secret:
   entered automatically; those pages pause for a human. The observer keeps
   watching so the mailbox is detected once the human clears the challenge.
 
-Setting `BROWSER_AUTO_LOGIN=false` restores observation-only behavior.
+`dev.sh` does not enable this capability. It is not part of the supported local
+mode, and it must not be used to bypass CAPTCHA, MFA, or Google's security
+checks.
 
 `POST /api/v1/sessions/{id}/observations` accepts a page observation from a future worker. The API stores only the signal, host, and bounded path in the audit event; it does not persist page text, query strings, fragments, or credential material.
 

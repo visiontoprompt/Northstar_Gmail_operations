@@ -74,6 +74,7 @@ if [[ "$backend_ready" != true ]]; then
     # Keep authentication in a standard Chrome surface. Observation/CDP is
     # opt-in for a later post-login diagnostic workflow.
     export BROWSER_OBSERVER_ENABLED=false
+    export BROWSER_AUTO_LOGIN=false
     exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
   ) &
   backend_pid=$!
