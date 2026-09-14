@@ -443,12 +443,15 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         logger.warning("session %s: browser window opened but no CDP endpoint was detected; automation cannot attach (check BROWSER_OBSERVER_ENABLED and playwright)", session_id)
         _record_observer_status(session_id, organization_id, actor_id, False, "no CDP endpoint detected")
         return False
+    # The observer drives the same CDP endpoint the runtime already opened;
+    # no browser-side changes are introduced here.
     observer = BrowserObserver(
         session_id,
         profile_id,
         cdp_port,
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
+        resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
         report_event=_report_observer_event,
         interval=settings.browser_observe_interval,
         settle_seconds=settings.browser_observe_settle_seconds,
@@ -505,6 +508,39 @@ def _resolve_login_credentials(session_id: str) -> tuple[str, str] | None:
         return None
     finally:
         db.close()
+
+
+def _resolve_login_otp_secret(session_id: str) -> str | None:
+    """Return the account's stored Authenticator (TOTP) secret so the observer
+    can generate one-time codes, or None when auto-login is off or nothing is
+    stored. The secret is typed by the observer into Google's own code field."""
+    if not get_settings().browser_auto_login:
+        return None
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session or not session.account or not session.account.secret:
+            return None
+        payload = SecretCipher().decrypt(session.account.secret.encrypted_payload)
+        secret = (payload or {}).get("2fa", "").strip()
+        return secret or None
+    except Exception:  # noqa: BLE001 - never break a session over missing secrets
+        logger.exception("could not resolve OTP secret for session %s", session_id)
+        return None
+    finally:
+        db.close()
+
+
+def _account_has_totp_secret(db: Session, session: BrowserSession) -> bool:
+    """Whether the session's account vault holds a TOTP secret, meaning the
+    observer can generate codes instead of pausing for the operator."""
+    try:
+        if not session.account or not session.account.secret:
+            return False
+        payload = SecretCipher().decrypt(session.account.secret.encrypted_payload)
+        return bool((payload or {}).get("2fa", "").strip())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _report_observer_event(session_id: str, event: str, detail: str = "", result: str = "success") -> None:
@@ -915,10 +951,13 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     parsed = urlparse(url)
     metadata = {"account_id": session.account_id, "signal": signal.value, "host": parsed.hostname or "unknown", "path": parsed.path[:160]}
     if signal in {"CAPTCHA", "MFA_OR_SECURITY_CHECK"}:
-        session.failure_reason = "Google requested additional verification"
-        logger.warning("session %s: challenge detected on %s -> NEEDS_ATTENTION", session_id, url)
-        updated = record_session_event(db, organization_id, actor_id, session_id, "VERIFICATION_REQUIRED")
-        return signal.value, action.value, updated
+        if signal == "MFA_OR_SECURITY_CHECK" and _account_has_totp_secret(db, session):
+            logger.info("session %s: MFA step on %s; auto sign-in will enter the TOTP", session_id, url)
+        else:
+            session.failure_reason = "Google requested additional verification"
+            logger.warning("session %s: challenge detected on %s -> NEEDS_ATTENTION", session_id, url)
+            updated = record_session_event(db, organization_id, actor_id, session_id, "VERIFICATION_REQUIRED")
+            return signal.value, action.value, updated
     if signal == "UNKNOWN":
         logger.warning("session %s: unknown page %s -> NEEDS_ATTENTION", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "UNKNOWN_PAGE")

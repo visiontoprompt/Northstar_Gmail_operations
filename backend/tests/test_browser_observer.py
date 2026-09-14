@@ -22,7 +22,7 @@ class _FakeField:
 
 
 class _FakePage:
-    def __init__(self, url: str, title: str = "", text: str = "", inputs: int = 0, buttons: list | None = None, identifier: str | None = None, password: str | None = None):
+    def __init__(self, url: str, title: str = "", text: str = "", inputs: int = 0, buttons: list | None = None, identifier: str | None = None, password: str | None = None, otp: str | None = None):
         self.url = url
         self._title = title
         self._text = text
@@ -34,6 +34,8 @@ class _FakePage:
             self.cred_fields["email"] = _FakeField(identifier)
         if password is not None:
             self.cred_fields["password"] = _FakeField(password)
+        if otp is not None:
+            self.cred_fields["otp"] = _FakeField(otp)
 
     def title(self) -> str:
         return self._title
@@ -54,6 +56,8 @@ class _FakePage:
             return _FakeLocator([self.cred_fields["password"]] if "password" in self.cred_fields else [])
         if "email" in low or "identifier" in low:
             return _FakeLocator([self.cred_fields["email"]] if "email" in self.cred_fields else [])
+        if "totppin" in low or "inputmode" in low or "one-time-code" in low:
+            return _FakeLocator([self.cred_fields["otp"]] if "otp" in self.cred_fields else [])
         if "input" in low:
             return _FakeLocator([], count=self._inputs)
         return _FakeLocator([])
@@ -259,6 +263,36 @@ def test_auto_login_fills_identifier_even_when_classified_interstitial():
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["email"].value == "alice@example.com"
     assert getattr(button, "clicked", False) is True
+
+
+def test_auto_login_fills_otp_from_stored_secret():
+    events = []
+    button = _FakeButton("Next")
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Enter the code from the Google Authenticator app", otp="", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP", report_event=lambda sid, event, detail, result: events.append(event))
+    with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
+        observer._tick(_fake_browser([page]))
+    assert page.cred_fields["otp"].value.isdigit() and len(page.cred_fields["otp"].value) == 6
+    assert "otp_filled" in events
+    assert getattr(button, "clicked", False) is True
+
+
+def test_auto_login_skips_otp_without_stored_secret():
+    events = []
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Google Authenticator", otp="")
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_otp_secret=lambda sid: None, report_event=lambda sid, event, detail, result: events.append(event))
+    with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
+        observer._tick(_fake_browser([page]))
+    assert page.cred_fields["otp"].value == ""
+    assert "skipped" in events
+
+
+def test_login_policy_classifies_google_code_entry_as_mfa():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/totp/1", "Enter code", "Enter the code from the Google Authenticator app"))
+    assert signal is PageSignal.MFA_OR_SECURITY_CHECK
+    assert action is PageAction.WAIT_FOR_HUMAN
 
 
 def test_observer_clicks_use_another_account_on_chooser():

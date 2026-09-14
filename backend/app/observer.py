@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from .login_policy import PageAction, PageObservation, classify_page
+from .security import generate_totp
 
 if TYPE_CHECKING:
     from playwright.sync_api import Browser, Page
@@ -42,6 +43,7 @@ _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
 _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], #password"
+_OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, #totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
 
 
 class BrowserObserver:
@@ -52,6 +54,7 @@ class BrowserObserver:
         cdp_port: int,
         observe_session_page=object,
         resolve_credentials=None,
+        resolve_otp_secret=None,
         report_event=None,
         interval: float = 1.0,
         settle_seconds: float = 5.0,
@@ -62,6 +65,7 @@ class BrowserObserver:
         self.cdp_port = cdp_port
         self._observe_session_page = observe_session_page
         self._resolve_credentials = resolve_credentials
+        self._resolve_otp_secret = resolve_otp_secret
         self._report_event = report_event
         self._interval = interval
         self._settle_seconds = settle_seconds
@@ -72,10 +76,14 @@ class BrowserObserver:
         self._unknown_since: float | None = None
         self._credentials: tuple[str, str] | None = None
         self._credentials_tried = False
+        self._otp_secret: str | None = None
+        self._otp_secret_tried = False
         self._auto_attempted_urls: set[str] = set()
         self._chooser_clicked_urls: set[str] = set()
         self._submitted_urls: set[str] = set()
         self._fill_failed_urls: dict[str, int] = defaultdict(int)
+        self._otp_attempted_urls: set[str] = set()
+        self._otp_failed_urls: dict[str, int] = defaultdict(int)
         self._reported_no_page = False
         self._logged_states: set[tuple[str, str]] = set()
 
@@ -177,6 +185,8 @@ class BrowserObserver:
                     _fill_sign_in_form(page, self, url)
             elif url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
                 self._chooser_clicked_urls.add(url)
+            if _has_otp_input(page) and self._resolve_otp_secret is not None and url not in self._otp_attempted_urls:
+                _fill_otp_code(page, self, url)
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
@@ -186,8 +196,10 @@ class BrowserObserver:
             return
         if signal.value == "CAPTCHA":
             logger.warning("session %s: anti-bot wall on %s; a human must pass it", self.session_id, url)
-        elif signal.value == "MFA_OR_SECURITY_CHECK":
+        elif signal.value == "MFA_OR_SECURITY_CHECK" and not (host in _LOGIN_HOSTS and _has_otp_input(page)):
             logger.info("session %s: second-factor prompt on %s awaiting manual confirmation", self.session_id, url)
+        elif host in _LOGIN_HOSTS and _has_otp_input(page):
+            logger.info("session %s: one-time code step on %s; auto sign-in is entering the TOTP", self.session_id, url)
         elif signal.value == "GMAIL_HOME":
             logger.info("session %s: mailbox detected on %s", self.session_id, url)
         elif host in _LOGIN_HOSTS and _has_credential_input(page):
@@ -330,6 +342,57 @@ def _has_credential_input(page: "Page") -> bool:
         return page.locator(_CREDENTIAL_FIELD_SELECTOR).count() > 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _has_otp_input(page: "Page") -> bool:
+    try:
+        return page.locator(_OTP_FIELD_SELECTOR).count() > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _resolve_otp_secret(observer: "BrowserObserver") -> str | None:
+    if not observer._otp_secret_tried:
+        observer._otp_secret_tried = True
+        if observer._resolve_otp_secret is not None:
+            try:
+                observer._otp_secret = observer._resolve_otp_secret(observer.session_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("OTP secret resolution failed for session %s", observer.session_id)
+    return observer._otp_secret
+
+
+def _fill_otp_code(page: "Page", observer: "BrowserObserver", url: str) -> None:
+    """Generate a TOTP from the stored Authenticator secret and enter it into
+    Google's code field. A transient failure is retried on the next tick; a
+    persistent one is reported and the step is paused for the operator."""
+    secret = _resolve_otp_secret(observer)
+    if not secret:
+        observer._otp_attempted_urls.add(url)
+        observer._emit("skipped", "no stored 2FA secret for account")
+        return
+    failures = observer._otp_failed_urls.get(url, 0)
+    try:
+        code = generate_totp(secret)
+    except Exception as exc:  # noqa: BLE001
+        observer._otp_attempted_urls.add(url)
+        observer._emit("failed", f"could not generate TOTP on {url}: {exc}", result="failure")
+        return
+    try:
+        otp_field = page.locator(_OTP_FIELD_SELECTOR)
+        if otp_field.count() and not otp_field.first.input_value(timeout=1000):
+            otp_field.first.fill(code, timeout=2000)
+            observer._emit("otp_filled", url)
+            _click_submit(page, url)
+            observer._otp_attempted_urls.add(url)
+        elif otp_field.count():
+            observer._otp_attempted_urls.add(url)
+    except Exception as exc:  # noqa: BLE001
+        observer._otp_failed_urls[url] = failures + 1
+        logger.exception("OTP entry failed for session %s on %s (will retry)", observer.session_id, url)
+        if failures + 1 >= 3:
+            observer._otp_attempted_urls.add(url)
+            observer._emit("failed", f"persistent OTP entry failure on {url}: {exc}", result="failure")
 
 
 def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str) -> bool:
