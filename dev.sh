@@ -68,13 +68,13 @@ fi
 if [[ "$backend_ready" != true ]]; then
   (
     cd "$BACKEND_DIR"
-    # Local development always opens the dedicated account Chrome window.
-    # Production workers must supply these settings through their deployment.
+    # Local development always opens the dedicated account browser window and
+    # runs the full login automation (observer + auto sign-in with stored
+    # credentials and generated TOTP). Production workers must supply these
+    # settings through their deployment.
     export BROWSER_LAUNCH_ENABLED=true
-    # Keep authentication in a standard Chrome surface. Observation/CDP is
-    # opt-in for a later post-login diagnostic workflow.
-    export BROWSER_OBSERVER_ENABLED=false
-    export BROWSER_AUTO_LOGIN=false
+    export BROWSER_OBSERVER_ENABLED=true
+    export BROWSER_AUTO_LOGIN=true
     exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
   ) &
   backend_pid=$!
