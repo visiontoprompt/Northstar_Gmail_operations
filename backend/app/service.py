@@ -448,6 +448,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         profile_id,
         cdp_port,
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
+        resolve_credentials=lambda sid: _resolve_login_credentials(sid),
+        report_event=_report_observer_event,
         interval=settings.browser_observe_interval,
         settle_seconds=settings.browser_observe_settle_seconds,
     )
@@ -479,6 +481,43 @@ def _stop_observer(session_id: str) -> None:
     observer = _observers.pop(session_id, None)
     if observer:
         observer.stop()
+
+
+def _resolve_login_credentials(session_id: str) -> tuple[str, str] | None:
+    """Return (identifier, password) decrypted from the account vault for the
+    session's account, or None when auto-login is disabled or nothing is stored.
+    The observer types these only into Google's own sign-in host."""
+    if not get_settings().browser_auto_login:
+        return None
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session or not session.account or not session.account.secret:
+            return None
+        payload = SecretCipher().decrypt(session.account.secret.encrypted_payload)
+        password = (payload or {}).get("password", "")
+        identifier = (session.account.email or "").strip().lower()
+        if not identifier or not password:
+            return None
+        return identifier, password
+    except Exception:  # noqa: BLE001 - never break a session over missing secrets
+        logger.exception("could not resolve login credentials for session %s", session_id)
+        return None
+    finally:
+        db.close()
+
+
+def _report_observer_event(session_id: str, event: str, detail: str = "", result: str = "success") -> None:
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session:
+            return
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action=f"session.auto_login.{event}", target_type="browser_session", target_id=session.id, result=result, metadata_json={"detail": detail[:300], "account_id": session.account_id}))
+        db.commit()
+        logger.info("session %s: auto-login %s %s", session_id, event, result)
+    finally:
+        db.close()
 
 
 def _recover_stale_session(db: Session, organization_id: str, actor_id: str, session: BrowserSession) -> None:

@@ -82,8 +82,9 @@ Scope:
 - Session lifecycle: `LOGIN_REQUIRED → RUNNING → CLOSED`, with `NEEDS_ATTENTION` for challenge/unknown pages and `STARTING` reserved in the active-state set. Launch failures raise `BrowserLaunchError` **before** a session row is written, so a failed attempt never leaves a zombie session or a locked profile blocking retry.
 - Single-session open, close, resume, and safe session history.
 - Observation-first page classification (Playwright attached over a per-profile CDP endpoint) for login form, Gmail mailbox, ordinary interstitial, CAPTCHA, MFA/security check, and unknown pages.
-- Consent-only auto-advance: the observer clicks only ordinary consent interstitials (`accounts.*`/`consent.*`) when no visible email/password field is present. Nothing else is automated.
-- A valid mailbox observation marks the session `AUTHENTICATED`; a challenge or unknown page flips the session to a human-gated attention state, keeps the profile reservation, and stops the observer for that session.
+- Consent-only auto-advance: the observer clicks only ordinary consent interstitials (`accounts.*`/`consent.*`) when no visible email/password field is present.
+- Optional automated credential entry (`BROWSER_AUTO_LOGIN`, default on): the observer types the account's stored encrypted email and password into Google's own login host (`accounts.google.com`/`consent.google.com`) after a `LOGIN_FORM` classification, skipping already-filled fields and attempting each page once. Recovery/2FA codes and CAPTCHA/security answers are never entered; those pages remain human-gated.
+- A valid mailbox observation marks the session `AUTHENTICATED`; a challenge or unknown page flips the session to a human-gated attention state and keeps the profile reservation. The observer keeps watching after a challenge so the mailbox is still detected once a human clears it.
 - Separate random CDP endpoint per browser process; `BROWSER_CDP_PORT` is kept only as a deprecated compatibility setting.
 
 Exit criteria:
@@ -93,7 +94,7 @@ Exit criteria:
 - A Gmail mailbox is marked authenticated only from a valid observed mailbox state or an explicit approved event.
 - Closing or crashing a session releases locks safely and preserves the profile reference and audit history. *(Close, cancel, and stale-recovery paths release locks and stop the observer; launch failures persist nothing.)*
 
-**Status: Complete for the local single-node Phase 2 scope.** Dedicated fresh-window Chrome launch, persistent profile metadata, batch hand-off, locks, session lifecycle, launch-failure retry, visible end-to-end logging, and the safe observer boundary are implemented and tested. Automated credential entry is not part of the safe observer boundary; Google challenges remain human-gated. Proxy-bound isolation, multi-node profile storage, and employee assignment belong to later phases.
+**Status: Complete for the local single-node Phase 2 scope.** Dedicated fresh-window Chrome launch, persistent profile metadata, batch hand-off, locks, session lifecycle, launch-failure retry, visible end-to-end logging, and the safe observer boundary are implemented and tested. Auto-driven sign-in (stored email/password entered into Google's own login host) is implemented behind `BROWSER_AUTO_LOGIN`; Google challenges (CAPTCHA, MFA, security checks) remain human-gated. Proxy-bound isolation, multi-node profile storage, and employee assignment belong to later phases.
 
 ## Phase 3 — Provisioning pipeline and resumable jobs
 

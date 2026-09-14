@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     browser_executable: str = "google-chrome"
     profile_root: str = "data/browser-profiles"
     browser_observer_enabled: bool = True
+    browser_auto_login: bool = True
     browser_cdp_port: int = 0
     browser_observe_interval: float = 1.0
     browser_observe_settle_seconds: float = 5.0
