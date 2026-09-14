@@ -241,7 +241,7 @@ def test_observer_clicks_use_another_account_on_chooser():
     button = _FakeButton("Use another account")
     page = _FakePage("https://accounts.google.com/signin/v2/identifier", "choose an account", "Choose an account to continue", buttons=[button])
     observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), report_event=lambda *a: None)
-    with patch("app.observer.classify_page", return_value=(PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE)):
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
         observer._tick(_fake_browser([page]))
     assert getattr(button, "clicked", False) is True
     assert "https://accounts.google.com/signin/v2/identifier" in observer._chooser_clicked_urls

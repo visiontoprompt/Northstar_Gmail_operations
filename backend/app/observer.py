@@ -72,6 +72,8 @@ class BrowserObserver:
         self._credentials_tried = False
         self._auto_attempted_urls: set[str] = set()
         self._chooser_clicked_urls: set[str] = set()
+        self._reported_no_page = False
+        self._logged_states: set[tuple[str, str]] = set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -104,6 +106,16 @@ class BrowserObserver:
             if browser is None:
                 return
             logger.info("AUTOMATION ACTIVE: observer attached to session %s on CDP port %s", self.session_id, self.cdp_port)
+            context_count = len(browser.contexts)
+            page_count = sum(len(context.pages) for context in browser.contexts)
+            logger.info("observer sees %d context(s) with %d page target(s) for session %s", context_count, page_count, self.session_id)
+            for context in browser.contexts:
+                for page in context.pages:
+                    try:
+                        target_url = page.url or "<blank>"
+                    except Exception:  # noqa: BLE001 - report-only
+                        target_url = "<unreadable>"
+                    logger.info("session %s: page target %s", self.session_id, target_url)
             try:
                 while not self._stop.is_set():
                     try:
@@ -123,11 +135,15 @@ class BrowserObserver:
     def _tick(self, browser: "Browser") -> None:
         page = _active_page(browser)
         if page is None:
+            if not self._reported_no_page:
+                logger.warning("observer found no open page for session %s; pausing for the browser window", self.session_id)
+                self._reported_no_page = True
             return
         url = page.url or ""
         title = page.title() or ""
         text = _visible_text(page)
         signal, action = classify_page(PageObservation(url=url, title=title, text=text))
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
 
         if signal.value == "UNKNOWN":
             if not _page_has_settled(self, url, text):
@@ -143,22 +159,39 @@ class BrowserObserver:
             try:
                 self._observe_session_page(self.session_id, url, title, text)
                 self._last_observation = observation_key
-                if signal.value == "LOGIN_FORM":
-                    logger.info("session %s: login form detected on %s; awaiting manual sign-in in the opened window", self.session_id, url)
-                elif signal.value == "UNKNOWN":
-                    logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
             except Exception:  # noqa: BLE001
                 self._stop.set()
                 return
 
-        if signal.value == "LOGIN_FORM" and _is_login_host(url):
+        # The "Choose an account" page (remembered profile) carries no input
+        # fields, so classify_page reports it as ORDINARY_INTERSTITIAL (the copy
+        # contains "continue"). Drive consent, the chooser, and auto-fill for any
+        # Google login host regardless of the signal, never off-host.
+        if host in _LOGIN_HOSTS:
             if url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
                 self._chooser_clicked_urls.add(url)
-            if self._resolve_credentials is not None and url not in self._auto_attempted_urls:
+            if signal.value == "LOGIN_FORM" and self._resolve_credentials is not None and url not in self._auto_attempted_urls:
                 _fill_sign_in_form(page, self, url)
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
+
+        state_key = (signal.value, url)
+        if state_key in self._logged_states:
+            return
+        if signal.value == "LOGIN_FORM":
+            logger.info("session %s: login form detected on %s", self.session_id, url)
+        elif signal.value == "UNKNOWN":
+            logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
+        elif signal.value == "CAPTCHA":
+            logger.warning("session %s: anti-bot wall on %s; a human must pass it", self.session_id, url)
+        elif signal.value == "MFA_OR_SECURITY_CHECK":
+            logger.info("session %s: second-factor prompt on %s awaiting manual confirmation", self.session_id, url)
+        elif signal.value == "GMAIL_HOME":
+            logger.info("session %s: mailbox detected on %s", self.session_id, url)
+        elif signal.value == "ORDINARY_INTERSTITIAL":
+            logger.info("session %s: interstitial (consent/chooser) on %s", self.session_id, url)
+        self._logged_states.add(state_key)
 
 
 def _connect_with_retry(pw, cdp_port: int, session_id: str, timeout: float, stop: threading.Event):
@@ -177,16 +210,37 @@ def _connect_with_retry(pw, cdp_port: int, session_id: str, timeout: float, stop
     return None
 
 
+def _open_page_url(page: "Page") -> str:
+    try:
+        return page.url or ""
+    except Exception:  # noqa: BLE001 - a destroyed tab must not abort the observer
+        return ""
+
+
+def _page_rank(url: str) -> int:
+    if not url:
+        return 3
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if host in _LOGIN_HOSTS:
+        return 0
+    if host == "mail.google.com" or url.startswith(_BLANK_URL_PREFIXES):
+        return 2
+    return 1
+
+
 def _active_page(browser: "Browser") -> "Page | None":
+    candidates: list["Page"] = []
     for context in browser.contexts:
-        for page in context.pages:
-            url = page.url or ""
-            if url and not url.startswith(_BLANK_URL_PREFIXES):
-                return page
-    for context in browser.contexts:
-        if context.pages:
-            return context.pages[0]
-    return None
+        candidates.extend(context.pages)
+    if not candidates:
+        return None
+    # Prefer the sign-in tab: a remembered profile can leave a blank/first-run
+    # window in another tab, and the automation must latch onto accounts.google.
+    ranked = sorted(candidates, key=lambda page: _page_rank(_open_page_url(page)))
+    for page in ranked:
+        if _open_page_url(page):
+            return page
+    return ranked[0]
 
 
 def _page_has_settled(observer: "BrowserObserver", url: str, text: str) -> bool:
@@ -300,11 +354,6 @@ def _click_submit(page: "Page", url: str) -> None:
         logger.info("signed in step on %s with keyboard Enter", url)
     except Exception:  # noqa: BLE001
         return
-
-
-def _is_login_host(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower().rstrip(".")
-    return host in _LOGIN_HOSTS
 
 
 def _visible_text(page: "Page") -> str:
