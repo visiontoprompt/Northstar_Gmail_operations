@@ -17,9 +17,11 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
     """
     settings = get_settings()
     if not settings.browser_launch_enabled:
+        logger.warning("browser launch skipped for session %s: BROWSER_LAUNCH_ENABLED is false", session_id)
         return False, None
     executable = shutil.which(settings.browser_executable)
     if not executable:
+        logger.warning("browser launch failed for session %s: executable %r not found on PATH (set BROWSER_EXECUTABLE)", session_id, settings.browser_executable)
         return False, None
     profile_path = (Path(settings.profile_root) / profile_id).resolve()
     profile_path.mkdir(parents=True, exist_ok=True)

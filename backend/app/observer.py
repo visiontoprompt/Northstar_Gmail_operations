@@ -62,6 +62,7 @@ class BrowserObserver:
             return
         try:
             with sync_playwright() as pw:
+                logger.info("observer connecting to CDP on port %s for session %s", self.cdp_port, self.session_id)
                 browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
                 try:
                     while not self._stop.is_set():

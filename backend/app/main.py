@@ -1,5 +1,6 @@
 import uuid
 import secrets
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -16,6 +17,12 @@ from .service import ImportValidationError, account_response, add_account, archi
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
+
+logger = logging.getLogger("gmail_ops")
+
+
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True)
 
 
 def startup() -> None:
@@ -35,7 +42,17 @@ def startup() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    configure_logging()
     startup()
+    logger.info(
+        "startup complete: environment=%s worker=%s browser_launch=%s observer=%s observer_interval=%.1fs redis=%s",
+        settings.environment,
+        settings.worker_enabled,
+        settings.browser_launch_enabled,
+        settings.browser_observer_enabled,
+        settings.browser_observe_interval,
+        settings.redis_url,
+    )
     if settings.worker_enabled:
         start_login_worker()
     yield

@@ -4,6 +4,7 @@ import socket
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
+from logging import getLogger
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
@@ -19,6 +20,8 @@ from .login_policy import PageObservation, classify_page
 from .worker.locks import RedisLocks, account_lock_key
 from .worker.queue import RedisQueue
 from urllib.parse import urlparse
+
+logger = getLogger(__name__)
 
 WORKER_PREFIX = "worker-"
 API_WORKER_ID = "orchestrator-api"
@@ -377,6 +380,7 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
     if next_state not in transitions.get(job.status, set()):
         raise ImportValidationError(f"Cannot move a {job.status.lower()} batch to {next_state.lower()}")
     job.status = next_state
+    logger.info("login job %s -> %s by %s", job.id, next_state, actor_id)
     if next_state == "RUNNING" and not job.started_at:
         job.started_at = utcnow()
     if next_state == "PAUSED":
@@ -423,13 +427,15 @@ def _locks() -> RedisLocks:
 _observers: dict[str, BrowserObserver] = {}
 
 
-def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str) -> None:
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str) -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
-        return
+        logger.info("observer disabled by config for session %s", session_id)
+        return False
     cdp_port = browser_debug_port(session_id)
     if not cdp_port:
-        return
+        logger.warning("no CDP endpoint available for session %s; observer will not start", session_id)
+        return False
     observer = BrowserObserver(
         session_id,
         profile_id,
@@ -439,6 +445,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
     )
     _observers[session_id] = observer
     observer.start()
+    logger.info("observer started for session %s on CDP port %s", session_id, cdp_port)
+    return True
 
 
 def _stop_observer(session_id: str) -> None:
@@ -525,6 +533,7 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
         started += 1
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.dispatched", target_type="login_job", target_id=job.id, result="success", metadata_json={"opened_count": started, "concurrency_limit": job.concurrency_limit}))
     db.commit()
+    logger.info("login job %s: dispatched %s session(s) (concurrency_limit=%s, queued_left=%s, running=%s)", job.id, started, job.concurrency_limit, job.queued_count, job.running_count)
     return get_login_job(db, organization_id, job.id)
 
 
@@ -580,6 +589,7 @@ def _finalize_item(db: Session, item: LoginJobItem, new_state: str, error: str |
         if job.queued_count == 0 and job.running_count == 0:
             job.status = "COMPLETED"
             job.completed_at = utcnow()
+    logger.info("login item %s -> %s (account=%s, job=%s)", item.id, new_state, item.account_id, item.job_id)
     return job
 
 
@@ -704,12 +714,16 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_HANDOFF"}))
     db.commit()
     launched, process_id = launch_local_browser(profile.id, session.id)
+    logger.info("session %s: browser launch result=%s process_id=%s (browser_launch_enabled=%s, observer_enabled=%s)", session.id, launched, process_id, get_settings().browser_launch_enabled, get_settings().browser_observer_enabled)
     if launched:
         session.runtime_type = "LOCAL_CHROME"
         session.metadata_json = {"boundary": "human_login", "browser_opened": True, "process_id": process_id}
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
         db.commit()
-        _start_observer(session.id, profile.id, organization_id, actor_id)
+        observer_started = _start_observer(session.id, profile.id, organization_id, actor_id)
+        logger.info("session %s: observer started=%s", session.id, observer_started)
+    else:
+        logger.warning("session %s: browser was NOT launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)", session.id)
     return get_session(db, organization_id, session.id)
 
 
@@ -749,6 +763,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session = get_session(db, organization_id, session_id)
     if not session:
         raise ImportValidationError("Session not found")
+    logger.info("session %s: closing (state=%s)", session_id, session.state)
     if session.state == "CLOSED":
         return session
     close_local_browser(session.id)
@@ -781,12 +796,15 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     metadata = {"account_id": session.account_id, "signal": signal.value, "host": parsed.hostname or "unknown", "path": parsed.path[:160]}
     if signal in {"CAPTCHA", "MFA_OR_SECURITY_CHECK"}:
         session.failure_reason = "Google requested additional verification"
+        logger.warning("session %s: challenge detected on %s -> NEEDS_ATTENTION", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "VERIFICATION_REQUIRED")
         return signal.value, action.value, updated
     if signal == "UNKNOWN":
+        logger.warning("session %s: unknown page %s -> NEEDS_ATTENTION", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "UNKNOWN_PAGE")
         return signal.value, action.value, updated
     if signal == "GMAIL_HOME" and session.login_state != "AUTHENTICATED":
+        logger.info("session %s: Gmail reached on %s -> login completed", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "LOGIN_COMPLETED")
         return signal.value, action.value, updated
     session.last_event_at = utcnow()
