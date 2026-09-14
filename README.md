@@ -26,6 +26,16 @@ docs/          Phase notes and API boundary documentation
 
 ## Local development
 
+### Start both services with one command
+
+From the repository root:
+
+```bash
+./dev.sh
+```
+
+This starts the backend on port 8000 and the frontend on port 5173. Keep the terminal open; press Ctrl+C to stop both services together.
+
 ### Backend
 
 ```bash
