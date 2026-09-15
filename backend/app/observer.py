@@ -107,6 +107,10 @@ class BrowserObserver:
         self._contacts_open_clicked = False
         self._contacts_tick_count = 0
         self._contacts_upload_tick = 0
+        self._markers_verified = False
+        self._labels_verified = False
+        self._labels_markers_tick_count = 0
+        self._labels_markers_completion_ticks = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_observation: tuple[str, str, str, str] | None = None
@@ -249,6 +253,8 @@ class BrowserObserver:
 
         if self.purpose == "contacts" and not self._contacts_imported:
             _handle_contacts_tick(self, page, host, signal)
+        if self.purpose == "labels_markers":
+            _handle_labels_markers_tick(self, page, host)
 
         state_key = (signal.value, url)
         if state_key in self._logged_states:
@@ -710,6 +716,33 @@ _CONTACTS_FINAL_IMPORT_SELECTOR = (
     "uW2Fw-Sx9Kwc-OWXEXe-FNFY6c > div.uW2Fw-wzTsW > div > div.uW2Fw-T0kwCb > div:nth-child(2) > button"
 )
 
+_GMAIL_MARKERS_SETTINGS_URL = "https://mail.google.com/mail/u/0/?tab=rm&ogbl#settings/inbox"
+_GMAIL_LABELS_SETTINGS_URL = "https://mail.google.com/mail/u/0/#settings/labels"
+_GMAIL_MARKER_SECTION_LABELS = (
+    "importance markers",
+    "marqueurs d'importance",
+    "marqueurs d’importance",
+    "marcadores de importancia",
+)
+_GMAIL_SHOW_MARKER_LABELS = (
+    "show markers",
+    "afficher les marqueurs",
+    "mostrar marcadores",
+)
+_GMAIL_NO_MARKER_LABELS = ("no markers", "aucun marqueur", "sin marcadores")
+_GMAIL_SYSTEM_LABEL_SECTION_LABELS = (
+    "system labels",
+    "libellés système",
+    "etiquetas del sistema",
+)
+_GMAIL_SHOW_LABELS = ("show", "afficher", "mostrar")
+_GMAIL_HIDE_LABELS = ("hide", "masquer", "ocultar")
+_GMAIL_SAVE_LABELS = (
+    "save changes",
+    "enregistrer les modifications",
+    "guardar cambios",
+)
+
 
 def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, signal) -> None:
     """Drive the Google Contacts import inside a contacts-purpose session.
@@ -762,6 +795,153 @@ def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, 
         observer._contacts_imported = True
         observer._emit("contacts.imported", f"Google Contacts import completed for {observer.contacts_csv_path or 'uploaded file'}")
         observer._stop.set()
+
+
+def _handle_labels_markers_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:
+    """Enable importance markers and show Gmail's Spam system label.
+
+    Gmail settings are rendered as dynamic tables and vary by locale. The
+    observer uses the visible section/option text and the semantic row
+    relationship instead of brittle coordinates. Changes are saved before
+    moving to the next settings page, and success is reported only after both
+    settings are verified in the authenticated profile.
+    """
+    observer._labels_markers_tick_count = getattr(observer, "_labels_markers_tick_count", 0) + 1
+    if observer._labels_markers_tick_count > 120:
+        observer._emit("labels_markers.failed", "Gmail settings did not reach a verified completion state", result="failure")
+        observer._stop.set()
+        return
+    if host != "mail.google.com":
+        return
+    url = page.url or ""
+    fragment = urlparse(url).fragment.lower()
+    if not getattr(observer, "_markers_verified", False):
+        if "settings/inbox" not in fragment:
+            _navigate_settings(page, _GMAIL_MARKERS_SETTINGS_URL)
+            return
+        marker_state = _set_importance_markers(page)
+        if marker_state in {"clicked", "already"}:
+            observer._markers_verified = True
+            observer._emit("labels_markers.markers_enabled", "verified Importance markers: Show markers")
+            _gmail_click_save_changes(page)
+        return
+    if not getattr(observer, "_labels_verified", False):
+        if "settings/labels" not in fragment:
+            _navigate_settings(page, _GMAIL_LABELS_SETTINGS_URL)
+            return
+        label_state = _show_spam_system_label(page)
+        if label_state in {"clicked", "already"}:
+            observer._labels_verified = True
+            observer._emit("labels_markers.spam_shown", "verified Spam is visible in System labels")
+            _gmail_click_save_changes(page)
+        return
+    if getattr(observer, "_labels_markers_completion_ticks", 0) < 2:
+        observer._labels_markers_completion_ticks = getattr(observer, "_labels_markers_completion_ticks", 0) + 1
+        return
+    observer._emit("labels_markers.completed", "Gmail Importance markers enabled and Spam shown")
+    observer._stop.set()
+
+
+def _navigate_settings(page: "Page", url: str) -> None:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:  # noqa: BLE001 - the next observer tick retries navigation
+        logger.debug("Gmail settings navigation is still loading", exc_info=True)
+
+
+def _set_importance_markers(page: "Page") -> str | None:
+    """Select the localized Show markers radio, or confirm it is selected."""
+    try:
+        result = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const sectionTerms = config.section;
+                const showTerms = config.show;
+                const noTerms = config.no;
+                const radioNodes = [...document.querySelectorAll('input[type="radio"], [role="radio"]')];
+                for (const node of radioNodes) {
+                    const option = node.closest('label, tr, [role="radio"], [role="row"]') || node.parentElement;
+                    const optionText = normalize(option?.innerText || node.getAttribute('aria-label'));
+                    if (!showTerms.some(term => optionText.includes(term))) continue;
+                    const scope = option?.closest('tr, [role="row"], [role="group"]') || option?.parentElement;
+                    const scopeText = normalize(scope?.innerText || optionText);
+                    if (!sectionTerms.some(term => scopeText.includes(term)) && !sectionTerms.some(term => document.body.innerText.toLowerCase().includes(term))) continue;
+                    if (noTerms.some(term => optionText.includes(term))) continue;
+                    const checked = node.checked === true || node.getAttribute('aria-checked') === 'true';
+                    if (checked) return 'already';
+                    node.click();
+                    return 'clicked';
+                }
+                return null;
+            }""",
+            {"section": _GMAIL_MARKER_SECTION_LABELS, "show": _GMAIL_SHOW_MARKER_LABELS, "no": _GMAIL_NO_MARKER_LABELS},
+        )
+        return result if result in {"clicked", "already"} else None
+    except Exception:  # noqa: BLE001 - fallback scans visible controls below
+        return _gmail_click_option_text(page, _GMAIL_SHOW_MARKER_LABELS, _GMAIL_NO_MARKER_LABELS)
+
+
+def _show_spam_system_label(page: "Page") -> str | None:
+    """Show Spam in the System labels row in any supported locale."""
+    try:
+        result = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const showTerms = config.show;
+                const hideTerms = config.hide;
+                const spamNodes = [...document.querySelectorAll('td, [role="cell"], span, div')].filter(node => normalize(node.innerText || node.textContent) === 'spam');
+                for (const spam of spamNodes) {
+                    const row = spam.closest('tr, [role="row"]');
+                    if (!row) continue;
+                    const controls = [...row.querySelectorAll('a, button, [role="button"], [role="link"]')];
+                    const show = controls.find(control => showTerms.includes(normalize(control.innerText || control.getAttribute('aria-label'))));
+                    if (show) { show.click(); return 'clicked'; }
+                    if (controls.some(control => hideTerms.includes(normalize(control.innerText || control.getAttribute('aria-label'))))) return 'already';
+                }
+                return null;
+            }""",
+            {"show": _GMAIL_SHOW_LABELS, "hide": _GMAIL_HIDE_LABELS},
+        )
+        return result if result in {"clicked", "already"} else None
+    except Exception:  # noqa: BLE001 - fallback scans visible row controls below
+        return _gmail_click_spam_row_fallback(page)
+
+
+def _gmail_click_option_text(page: "Page", wanted: tuple[str, ...], excluded: tuple[str, ...] = ()) -> str | None:
+    try:
+        for candidate in page.locator('label, [role="radio"], input[type="radio"]').all():
+            text = (candidate.inner_text() or candidate.get_attribute("aria-label") or "").strip().lower()
+            if any(term in text for term in wanted) and not any(term in text for term in excluded):
+                candidate.click(timeout=1500)
+                return "clicked"
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _gmail_click_spam_row_fallback(page: "Page") -> str | None:
+    try:
+        for row in page.locator('tr, [role="row"]').all():
+            row_text = (row.inner_text() or "").strip().lower()
+            if re.search(r"\bspam\b", row_text):
+                controls = row.locator('a, button, [role="button"], [role="link"]').all()
+                for control in controls:
+                    text = (control.inner_text() or control.get_attribute("aria-label") or "").strip().lower()
+                    if text in _GMAIL_SHOW_LABELS:
+                        control.click(timeout=1500)
+                        return "clicked"
+                    if text in _GMAIL_HIDE_LABELS:
+                        return "already"
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _gmail_click_save_changes(page: "Page") -> bool:
+    try:
+        return _contacts_click_label(page, _GMAIL_SAVE_LABELS)
+    except Exception:  # noqa: BLE001 - settings may auto-save in some builds
+        return False
 
 
 def _contacts_advance_file_flow(observer: "BrowserObserver", page: "Page") -> None:

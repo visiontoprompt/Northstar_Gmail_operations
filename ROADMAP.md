@@ -144,7 +144,7 @@ Exit criteria:
 - Bulk execution honors group and global concurrency limits.
 - External security challenges stop the affected item for human attention.
 
-**Status: Planned.** The current UI and API contain non-executing operation drafts only.
+**Status: Partial.** The registry `Labels & Markers` action now executes the approved Gmail settings operation for authenticated saved profiles, with localized verification, audit events, and automatic session close. The remaining Phase 4 modules continue to use preparation-only drafts until their workers are implemented.
 
 ## Phase 5 — Employees, access, and assignment
 

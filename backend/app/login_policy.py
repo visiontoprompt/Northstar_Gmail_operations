@@ -14,6 +14,7 @@ class PageSignal(StrEnum):
     CONTACTS_HOME = "CONTACTS_HOME"
     CONTACTS_IMPORT_DIALOG = "CONTACTS_IMPORT_DIALOG"
     CONTACTS_IMPORT_DONE = "CONTACTS_IMPORT_DONE"
+    GMAIL_SETTINGS = "GMAIL_SETTINGS"
     UNKNOWN = "UNKNOWN"
 
 
@@ -68,6 +69,9 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
     )):
         return PageSignal.ACCOUNT_NOT_FOUND, PageAction.NEEDS_ATTENTION
     if host in {"mail.google.com", "inbox.google.com"}:
+        fragment = parsed.fragment.lower()
+        if "settings/" in fragment or "/settings/" in parsed.path.lower():
+            return PageSignal.GMAIL_SETTINGS, PageAction.SAFE_TO_OBSERVE
         mailbox_markers = ("inbox", "compose", "sent mail", "drafts", "primary")
         if parsed.path.startswith("/mail/") and any(marker in haystack for marker in mailbox_markers):
             return PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE

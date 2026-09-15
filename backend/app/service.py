@@ -520,7 +520,15 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         0,
         profile_dir=str((Path(settings.profile_root) / profile_id).resolve()),
         executable=resolve_browser_executable(),
-        start_url="https://contacts.google.com/" if purpose == "contacts" else ("https://mail.google.com/" if purpose == "reuse" else None),
+        start_url=(
+            "https://contacts.google.com/"
+            if purpose == "contacts"
+            else "https://mail.google.com/mail/u/0/?tab=rm&ogbl#settings/inbox"
+            if purpose == "labels_markers"
+            else "https://mail.google.com/"
+            if purpose == "reuse"
+            else None
+        ),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
@@ -654,18 +662,21 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
         session = db.get(BrowserSession, session_id)
         if not session:
             return
-        if event in {"contacts.failed", "contacts.imported"} and session.state in ACTIVE_SESSION_STATES:
+        if event in {"contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed"} and session.state in ACTIVE_SESSION_STATES:
             # The observer owns the browser-close operation and will release
             # the process in its finally block. Finalize the durable session
             # here so a timeout cannot leave the UI showing a dead RUNNING
             # session or hold the profile lock indefinitely.
             now = utcnow()
             session.state = "CLOSED"
-            session.login_state = "CONTACTS_IMPORTED" if event == "contacts.imported" else session.login_state
+            if event == "contacts.imported":
+                session.login_state = "CONTACTS_IMPORTED"
+            elif event == "labels_markers.completed":
+                session.login_state = "LABELS_MARKERS_COMPLETED"
             session.closed_at = now
             session.last_event_at = now
-            session.failure_reason = None if event == "contacts.imported" else (detail[:300] or "Contacts import failed before completion")
-            if event == "contacts.imported":
+            session.failure_reason = None if event in {"contacts.imported", "labels_markers.completed"} else (detail[:300] or "Operation failed before completion")
+            if event in {"contacts.imported", "labels_markers.completed"}:
                 session.account.login_status = "AUTHENTICATED"
                 session.account.profile_status = "SAVED"
             session.profile.status = "RESERVED"
@@ -674,11 +685,22 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
             session.profile.last_closed_at = now
             metadata = dict(session.metadata_json or {})
             metadata["browser_opened"] = False
-            metadata["terminal_result"] = "CONTACTS_IMPORTED" if event == "contacts.imported" else "CONTACTS_IMPORT_FAILED"
+            metadata["terminal_result"] = {
+                "contacts.imported": "CONTACTS_IMPORTED",
+                "contacts.failed": "CONTACTS_IMPORT_FAILED",
+                "labels_markers.completed": "LABELS_MARKERS_COMPLETED",
+                "labels_markers.failed": "LABELS_MARKERS_FAILED",
+            }[event]
             session.metadata_json = metadata
         db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action=f"session.auto_login.{event}", target_type="browser_session", target_id=session.id, result=result, metadata_json={"detail": detail[:300], "account_id": session.account_id}))
-        if event in {"contacts.failed", "contacts.imported"}:
-            db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="failure" if event == "contacts.failed" else "success", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": "CONTACTS_IMPORTED" if event == "contacts.imported" else "CONTACTS_IMPORT_FAILED"}))
+        if event in {"contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed"}:
+            terminal_result = {
+                "contacts.imported": "CONTACTS_IMPORTED",
+                "contacts.failed": "CONTACTS_IMPORT_FAILED",
+                "labels_markers.completed": "LABELS_MARKERS_COMPLETED",
+                "labels_markers.failed": "LABELS_MARKERS_FAILED",
+            }[event]
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="success" if event in {"contacts.imported", "labels_markers.completed"} else "failure", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": terminal_result}))
         db.commit()
         logger.info("session %s: auto-login %s %s", session_id, event, result)
     finally:
@@ -999,6 +1021,7 @@ def session_response(session: BrowserSession) -> dict:
         "profile_authenticated_at": session.profile.authenticated_at,
         "state": session.state,
         "login_state": session.login_state,
+        "purpose": (session.metadata_json or {}).get("purpose", "login"),
         "runtime_type": session.runtime_type,
         "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
         "observer_attached": bool(session.metadata_json.get("observer_attached", False)),
@@ -1054,9 +1077,9 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
-    if purpose not in {"login", "reuse", "contacts"}:
-        raise ImportValidationError("Session purpose must be 'login', 'reuse', or 'contacts'")
-    if purpose in {"reuse", "contacts"} and profile.authenticated_at is None:
+    if purpose not in {"login", "reuse", "contacts", "labels_markers"}:
+        raise ImportValidationError("Session purpose must be 'login', 'reuse', 'contacts', or 'labels_markers'")
+    if purpose in {"reuse", "contacts", "labels_markers"} and profile.authenticated_at is None:
         raise ImportValidationError("No authenticated profile saved for this account — complete a login session first so the profile gets saved")
     if purpose == "contacts" and not contacts_csv_path:
         raise ImportValidationError("A contacts CSV file is required for a contacts session")
@@ -1075,7 +1098,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         # Nothing is persisted for this attempt, so the account/profile stay
         # clean and a later attempt can retry without a zombie session blocking it.
         raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
-    existing_auth = purpose in {"reuse", "contacts"}
+    existing_auth = purpose in {"reuse", "contacts", "labels_markers"}
     session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path})
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
@@ -1185,6 +1208,11 @@ def start_contacts_import(db: Session, organization_id: str, actor_id: str, acco
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="contact_import.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account_id, "contact_file_id": contact_file.id if contact_file else None, "contact_count": email_count}))
     db.commit()
     return get_session(db, organization_id, session.id), contact_file, email_count
+
+
+def start_labels_markers_operation(db: Session, organization_id: str, actor_id: str, account_id: str) -> BrowserSession:
+    """Start the authenticated-profile Gmail settings operation."""
+    return start_login_session(db, organization_id, actor_id, account_id, purpose="labels_markers")
 
 
 def record_session_event(db: Session, organization_id: str, actor_id: str, session_id: str, event_type: str, detail: str | None = None) -> BrowserSession:

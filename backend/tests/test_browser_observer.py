@@ -388,6 +388,14 @@ def test_login_policy_classifies_french_contacts_completion_to_close_session():
     assert action is PageAction.SAFE_TO_OBSERVE
 
 
+def test_login_policy_classifies_gmail_settings_as_safe_to_observe():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://mail.google.com/mail/u/0/?tab=rm&ogbl#settings/inbox", "Settings", "Importance markers"))
+    assert signal is PageSignal.GMAIL_SETTINGS
+    assert action is PageAction.SAFE_TO_OBSERVE
+
+
 def test_contacts_import_result_route_is_completion_after_confirm():
     observer = BrowserObserver("s1", "p1", 9222, purpose="contacts")
     observer._contacts_confirm_clicked = True

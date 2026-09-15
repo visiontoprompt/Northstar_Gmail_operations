@@ -249,7 +249,7 @@ class LoginJobProgressResponse(BaseModel):
 
 
 class SessionStartRequest(BaseModel):
-    purpose: Literal["login", "reuse", "contacts"] = "login"
+    purpose: Literal["login", "reuse", "contacts", "labels_markers"] = "login"
 
 
 class AuditEventResponse(BaseModel):
@@ -315,6 +315,7 @@ class BrowserSessionResponse(BaseModel):
     profile_authenticated_at: datetime | None = None
     state: str
     login_state: str
+    purpose: str = "login"
     runtime_type: str
     browser_opened: bool
     observer_attached: bool = False

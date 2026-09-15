@@ -12,7 +12,8 @@ Open an account from the registry to access:
 - Login: opens the existing isolated profile-backed session flow. Automated credential entry, verification solving, and security bypass are outside this frontend milestone.
 - Credentials: opens the existing encrypted credential-revision flow.
 - Contacts: the registry action opens the reusable Contact File Library. An administrator uploads a CSV, VCF, or TXT asset once, selects a ready file, and starts the import for one account, selected accounts, or the current group. The backend stores the asset outside account metadata and opens the account's isolated profile at `https://contacts.google.com/` for the observer-driven upload.
-- Browser security, markers & labels, Google apps, send & reply, add-ons, and Google Alerts: each opens a workflow designer and saves a versioned, non-secret operation draft. Saving a draft does not execute the Google action.
+- Browser security, Google apps, send & reply, add-ons, and Google Alerts: each opens a workflow designer and saves a versioned, non-secret operation draft. Saving a draft does not execute the Google action.
+- Labels & Markers: starts an authenticated saved-profile session, enables the localized Gmail Importance markers “Show markers” option, opens the Spam row under System labels, selects its localized “Show” action, verifies both settings, records the result, and closes the isolated browser session.
 
 ## Server contracts now implemented
 
@@ -24,6 +25,7 @@ These endpoints now back the UI. Production authentication/authorization should 
 | Move group | `POST /api/v1/accounts/{account_id}/group-move` | Validate destination capacity, lock the account, update group membership transactionally, write an audit event, return the updated summary. |
 | Delete account | `DELETE /api/v1/accounts/{account_id}` | Require server-side confirmation, revoke/close owned sessions, apply the project retention policy to profile and secret records, write an audit event, and return no secrets. |
 | Save operation draft | `POST /api/v1/accounts/{account_id}/operation-drafts` | Validate a typed non-secret operation payload, version the draft, and return status plus audit-safe metadata only. |
+| Execute Labels & Markers | `POST /api/v1/accounts/{account_id}/labels-markers` | Require a saved authenticated profile, open Gmail settings in the isolated profile, apply and verify both settings, audit the outcome, and close the session. |
 | List operation drafts | `GET /api/v1/accounts/{account_id}/operation-drafts` | Return typed draft summaries and lifecycle state; never return passwords, recovery values, 2FA secrets, session cookies, or browser profile contents. |
 | Upload contact file | `POST /api/v1/contact-files` | Validate a CSV/VCF/TXT asset, store it under the organization contact library, return metadata and a contact count, and never return file contents. |
 | List contact files | `GET /api/v1/contact-files` | Return reusable file metadata only. |

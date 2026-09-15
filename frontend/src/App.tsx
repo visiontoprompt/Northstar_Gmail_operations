@@ -41,7 +41,7 @@ import { isOpenSessionState } from "./session-contract";
 
 type Group = { id: string; name: string; description: string | null; capacity: number; account_count: number; ready_count: number; issue_count: number; status: string };
 type Account = { id: string; email: string; group_id: string; group_name: string; lifecycle_status: string; readiness_status: string; login_status: string; gmail_status: string; secret_status: string; recovery_masked: string; two_fa_configured: boolean; proxy: { id: string | null; label: string | null; region: string | null; status: string }; profile: { id: string | null; storage_reference: string | null; status: string }; created_at: string; updated_at: string };
-type Session = { id: string; account_id: string; account_email: string; profile_id: string; profile_storage_reference: string; profile_status: string; profile_saved?: boolean; profile_authenticated_at?: string | null; state: string; login_state: string; runtime_type: string; browser_opened: boolean; observer_attached: boolean; automation_hint: string | null; session_url: string; opened_at: string; last_event_at: string; closed_at: string | null; failure_reason: string | null };
+type Session = { id: string; account_id: string; account_email: string; profile_id: string; profile_storage_reference: string; profile_status: string; profile_saved?: boolean; profile_authenticated_at?: string | null; state: string; login_state: string; purpose?: string; runtime_type: string; browser_opened: boolean; observer_attached: boolean; automation_hint: string | null; session_url: string; opened_at: string; last_event_at: string; closed_at: string | null; failure_reason: string | null };
 type AuditEvent = { id: string; action: string; target_type: string; target_id: string; result: string; metadata: Record<string, unknown>; created_at: string };
 type ContactFile = { id: string; original_filename: string; media_type: string; size_bytes: number; contact_count: number; status: string; last_used_at: string | null; created_at: string; updated_at: string };
 type Preview = { total_rows: number; valid_rows: number; duplicate_rows: number; invalid_rows: number; rows: { row_number: number; email?: string | null; recovery_masked?: string | null; two_fa_configured: boolean; valid: boolean; duplicate: boolean; error?: string | null }[] };
@@ -84,6 +84,7 @@ function App() {
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [actionScope, setActionScope] = useState<ActionScope>("selected");
   const [activeOperation, setActiveOperation] = useState<{ kind: OperationKind; accounts: Account[] } | null>(null);
+  const [labelsMarkersTargets, setLabelsMarkersTargets] = useState<Account[] | null>(null);
   const [contactTargets, setContactTargets] = useState<Account[] | null>(null);
   const [activeAdminAction, setActiveAdminAction] = useState<{ kind: "edit" | "move" | "delete"; accounts: Account[] } | null>(null);
   const [credentialAccount, setCredentialAccount] = useState<Account | null>(null);
@@ -165,6 +166,16 @@ function App() {
         setContactTargets(targets);
         return;
       }
+      if (kind === "labels") {
+        if (targets.length === 1) {
+          const session = await api<Session>(`/api/v1/accounts/${targets[0].id}/labels-markers`, { method: "POST" });
+          setActiveSession(session);
+          reload();
+        } else {
+          setLabelsMarkersTargets(targets);
+        }
+        return;
+      }
       if (["edit", "move", "delete"].includes(kind)) { setActiveAdminAction({ kind: kind as "edit" | "move" | "delete", accounts: targets }); return; }
       setActiveOperation({ kind: kind as OperationKind, accounts: targets });
     } catch (requestError) { notify("error", (requestError as Error).message); }
@@ -224,6 +235,7 @@ function App() {
       {isBatchOpen && <LoginBatchModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} accountIds={batchAccountIds} onClose={() => { setBatchOpen(false); setBatchAccountIds([]); }} onStarted={(job) => { setBatchOpen(false); setBatchAccountIds([]); setActiveJob(job); notify("success", `${job.running_count} profile sessions opened`); reload(); }} onError={(message) => notify("error", message)} />}
       {activeOperation && <BulkOperationDesigner accounts={activeOperation.accounts} kind={activeOperation.kind} onClose={() => setActiveOperation(null)} onSaved={(message) => { setActiveOperation(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {contactTargets && <ContactsImportModal accounts={contactTargets} onClose={() => setContactTargets(null)} onStarted={(session) => setActiveSession(session)} onPrepared={(message) => { setContactTargets(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
+      {labelsMarkersTargets && <LabelsMarkersBatchModal accounts={labelsMarkersTargets} onClose={() => setLabelsMarkersTargets(null)} onFinished={(message) => { notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeAdminAction && <BulkAdminDesigner accounts={activeAdminAction.accounts} groups={groups} kind={activeAdminAction.kind} onClose={() => setActiveAdminAction(null)} onSaved={(message) => { setActiveAdminAction(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeJob && <LoginJobWorkspace job={activeJob} onUpdate={(job) => { setActiveJob(job); reload(); }} onClose={() => { setActiveJob(null); reload(); }} onError={(message) => notify("error", message)} />}
       <ToastRegion toasts={toasts} />
@@ -243,7 +255,7 @@ const registryActions: { kind: RegistryAction; label: string; shortLabel: string
   { kind: "credentials", label: "Credentials", shortLabel: "Credentials", icon: <KeyRound size={15} /> },
   { kind: "contacts", label: "Contacts", shortLabel: "Contacts", icon: <AddressBook size={15} /> },
   { kind: "security", label: "Browser security", shortLabel: "Security", icon: <ShieldCheck size={15} /> },
-  { kind: "labels", label: "Markers & labels", shortLabel: "Labels", icon: <Tags size={15} /> },
+  { kind: "labels", label: "Labels & Markers", shortLabel: "Labels & Markers", icon: <Tags size={15} /> },
   { kind: "apps", label: "Google apps", shortLabel: "Apps", icon: <Boxes size={15} /> },
   { kind: "mail", label: "Send & reply", shortLabel: "Mail", icon: <Mail size={15} /> },
   { kind: "addons", label: "Add-ons", shortLabel: "Add-ons", icon: <SlidersHorizontal size={15} /> },
@@ -483,6 +495,65 @@ function ContactsImportModal({ accounts, onClose, onPrepared, onError, onStarted
       </section>
     </div>
   );
+}
+
+function LabelsMarkersBatchModal({ accounts, onClose, onFinished, onError }: { accounts: Account[]; onClose: () => void; onFinished: (message: string) => void; onError: (message: string) => void }) {
+  type RunState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  const [states, setStates] = useState<Record<string, RunState>>(() => Object.fromEntries(accounts.map((account) => [account.id, "QUEUED"] as const)));
+  const [failureEmails, setFailureEmails] = useState<string[]>([]);
+  const [finished, setFinished] = useState(false);
+  const completionNotified = useRef(false);
+  const completionNoticeSent = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let cursor = 0;
+    const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    const runAccount = async () => {
+      while (!cancelled) {
+        const account = accounts[cursor++];
+        if (!account) return;
+        setStates((current) => ({ ...current, [account.id]: "RUNNING" }));
+        try {
+          const started = await api<Session>(`/api/v1/accounts/${account.id}/labels-markers`, { method: "POST" });
+          let current = started;
+          for (let attempt = 0; attempt < 120 && !cancelled && current.state !== "CLOSED"; attempt += 1) {
+            await wait(1000);
+            current = await api<Session>(`/api/v1/sessions/${started.id}`);
+          }
+          if (current.login_state === "LABELS_MARKERS_COMPLETED") {
+            setStates((state) => ({ ...state, [account.id]: "COMPLETED" }));
+          } else {
+            setStates((state) => ({ ...state, [account.id]: "FAILED" }));
+            setFailureEmails((emails) => [...emails, account.email]);
+          }
+        } catch {
+          setStates((state) => ({ ...state, [account.id]: "FAILED" }));
+          setFailureEmails((emails) => [...emails, account.email]);
+        }
+      }
+    };
+    const run = async () => {
+      await Promise.all(Array.from({ length: Math.min(4, accounts.length) }, () => runAccount()));
+      if (cancelled || completionNotified.current) return;
+      completionNotified.current = true;
+      setFinished(true);
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [accounts]);
+
+  const completedCount = Object.values(states).filter((state) => state === "COMPLETED").length;
+  const failedCount = Object.values(states).filter((state) => state === "FAILED").length;
+  useEffect(() => {
+    if (!finished || completionNoticeSent.current) return;
+    completionNoticeSent.current = true;
+    const message = failedCount ? `Labels & Markers completed for ${completedCount} accounts · ${failedCount} require review.` : `Labels & Markers completed for ${completedCount} accounts.`;
+    onFinished(message);
+    if (failedCount === accounts.length) onError("No Labels & Markers operations completed. Review the account statuses and retry.");
+  }, [finished, failedCount, completedCount, accounts.length, onFinished, onError]);
+
+  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal="true" aria-labelledby="labels-markers-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LABELS & MARKERS</div><h2 id="labels-markers-title">Enable Gmail labels & markers</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Labels & Markers progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Tags size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each authenticated profile opens Gmail settings, enables Importance markers, shows Spam under System labels, verifies both changes, and closes its browser session.</span></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
 }
 
 function OperationDesigner({ account, kind, onClose, onSaved, onError }: { account: Account; kind: OperationKind; onClose: () => void; onSaved: (message: string) => void; onError: (message: string) => void }) {

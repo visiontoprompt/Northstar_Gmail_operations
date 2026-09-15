@@ -468,7 +468,7 @@ tbody tr:hover { background: #fbfdfc; }
 .scope-dot { width: 7px; height: 7px; background: #b4c0bc; border-radius: 50%; }
 .scope-dot.active { background: var(--color-primary); box-shadow: 0 0 0 3px rgba(15,118,110,.1); }
 .registry-action-grid { display: grid; grid-template-columns: repeat(12, minmax(72px, 1fr)); gap: 7px; }
-.registry-action { display: flex; min-height: 52px; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 6px 5px; color: #60736c; background: #fff; border: 1px solid #dfeae6; border-radius: 8px; font-size: 9px; font-weight: 600; white-space: nowrap; }
+.registry-action { display: flex; min-height: 52px; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 6px 5px; color: #60736c; background: #fff; border: 1px solid #dfeae6; border-radius: 8px; font-size: 9px; font-weight: 600; line-height: 1.15; text-align: center; white-space: normal; }
 .registry-action:hover:not(:disabled) { color: var(--color-primary); background: #f0faf6; border-color: #a9d1c4; transform: translateY(-1px); }
 .registry-action:disabled { color: #aab7b2; background: #f7faf9; }
 .registry-action-icon { display: grid; width: 24px; height: 24px; place-items: center; color: var(--color-primary); background: #e8f4f1; border-radius: 6px; }

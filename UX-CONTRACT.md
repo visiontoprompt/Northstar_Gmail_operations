@@ -43,7 +43,8 @@ the account detail modal.
   uploaded once, selected from the library, and then sent through the
   authenticated account profile to `contacts.google.com`.
 - Non-login operations save one audited plan per account until their execution
-  worker is available.
+  worker is available. `Labels & Markers` is the approved exception: it runs
+  immediately through the saved authenticated profile boundary.
 - Credential revision remains limited to exactly one selected account because
   credential values are account-specific and security-sensitive.
 - Archive is confirmed with an explicit bulk confirmation and each server-side
@@ -72,7 +73,7 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
   format, contact count, size, and usage time without returning file contents;
   imports reference the selected asset by ID.
 - Account detail exposes server-backed edit metadata, move group, and guarded archive controls. The API validates, audits, and reloads the registry after success.
-- Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer saves a versioned, non-secret plan; no external action occurs when a plan is saved.
+- Account detail exposes preparation-only operation designers for contacts, browser security, Google apps, send and reply, add-ons, and Google Alerts. `Labels & Markers` runs the approved Gmail settings operation through the saved authenticated profile; it enables Importance markers, shows Spam under System labels, verifies both changes, audits the result, and closes the session.
 - Profile-backed operation sessions poll their server state while the workspace is open. When an automated operation reaches a terminal result, the browser is closed, the profile lock is released, and the session workspace closes after the latest state is refreshed. Failed operations remain visible in session history and audit events.
 - Archive is exposed only through the guarded Delete action because it affects account, secret, session, and profile records.
 
