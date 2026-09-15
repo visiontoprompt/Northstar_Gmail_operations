@@ -73,6 +73,12 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             return PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE
         return PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION
     if host in {"accounts.google.com", "consent.google.com", "myaccount.google.com"}:
+        # Google sometimes renders the TOTP challenge with little or no
+        # accessible text while the URL still identifies the challenge.
+        # Recognize the route before generic interstitial markers (such as
+        # "privacy") can misclassify it and close an otherwise valid login.
+        if host == "accounts.google.com" and any(marker in parsed.path.lower() for marker in ("/challenge/totp", "/challenge/otp")):
+            return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
         if any(marker in haystack for marker in ("sign in", "email or phone", "enter your password")):
             return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE
         if host == "myaccount.google.com" and any(marker in haystack for marker in (

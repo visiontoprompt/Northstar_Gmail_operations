@@ -295,6 +295,14 @@ def test_login_policy_classifies_google_code_entry_as_mfa():
     assert action is PageAction.WAIT_FOR_HUMAN
 
 
+def test_login_policy_classifies_text_sparse_totp_route_as_mfa():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/totp", "Google", "Privacy policy"))
+    assert signal is PageSignal.MFA_OR_SECURITY_CHECK
+    assert action is PageAction.WAIT_FOR_HUMAN
+
+
 def test_observer_clicks_use_another_account_on_chooser():
     button = _FakeButton("Use another account")
     page = _FakePage("https://accounts.google.com/signin/v2/identifier", "choose an account", "Choose an account to continue", buttons=[button])
