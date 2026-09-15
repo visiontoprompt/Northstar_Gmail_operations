@@ -391,8 +391,9 @@ function ProxyManagementModal({ kind, proxies, onClose, onDone, onError }: { kin
       if (kind === "edit") await api(`/api/v1/proxies/${proxy.id}`, { method: "PATCH", body: JSON.stringify({ ...(connection.trim() ? { proxy: connection.trim() } : {}), label: label.trim() || null, region: region.trim() || null }) });
       if (kind === "assign") {
         const currentIds = proxy.account_refs.map((reference) => reference.id);
-        if (currentIds.length) await api(`/api/v1/proxies/${proxy.id}/assignments`, { method: "DELETE", body: JSON.stringify({ account_ids: currentIds }) });
         await api("/api/v1/proxies/assignments", { method: "POST", body: JSON.stringify({ proxy_id: proxy.id, account_ids: accountIds, label: label.trim() || null, region: region.trim() || null }) });
+        const removedIds = currentIds.filter((id) => !accountIds.includes(id));
+        if (removedIds.length) await api(`/api/v1/proxies/${proxy.id}/assignments`, { method: "DELETE", body: JSON.stringify({ account_ids: removedIds }) });
       }
       if (kind === "remove") await Promise.all(proxies.map((item) => api(`/api/v1/proxies/${item.id}`, { method: "DELETE", body: JSON.stringify({ confirmation: "REMOVE" }) })));
       onDone();

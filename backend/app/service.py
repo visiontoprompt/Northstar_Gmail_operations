@@ -167,6 +167,7 @@ def _reactivate_account(db: Session, organization_id: str, actor_id: str, accoun
     payload: dict = {"password": password, "recovery": recovery, "2fa": two_fa}
     if proxy:
         payload["proxy"] = proxy.encrypted_payload()
+        _upsert_proxy_inventory(db, organization_id, proxy, account.proxy_label, account.proxy_region)
     secret = account.secret
     if secret is None:
         secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary")
@@ -212,6 +213,8 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt(secret_payload))
     db.add(account)
     db.add(secret)
+    if proxy:
+        _upsert_proxy_inventory(db, organization_id, proxy, account.proxy_label, account.proxy_region)
     _add_credential_revision(db, organization_id, account_id, {"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}, account.recovery_hint, account.two_fa_configured, actor_id)
     db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.imported", target_type="gmail_account", target_id=account_id, result="success", metadata_json={"group_id": group.id, "email_domain": email.split("@", 1)[1], "source": "single"}))
@@ -318,6 +321,7 @@ def update_account_metadata(db: Session, organization_id: str, actor_id: str, ac
     account.proxy_status = "ASSIGNED" if proxy or proxy_label or proxy_region else "UNASSIGNED"
     if proxy:
         payload["proxy"] = proxy.encrypted_payload()
+        _upsert_proxy_inventory(db, organization_id, proxy, account.proxy_label, account.proxy_region)
     elif proxy_value is not _UNSET:
         payload.pop("proxy", None)
     if account.secret:
@@ -720,18 +724,28 @@ def _resolve_login_otp_secret(session_id: str) -> str | None:
 
 
 def _resolve_proxy_options(session_id: str) -> dict[str, str] | None:
-    """Decrypt an account proxy only for the isolated browser launch."""
+    """Decrypt an account proxy only for the isolated browser launch.
+
+    An assigned proxy is a hard network boundary. If its encrypted material
+    cannot be read, do not silently fall back to the machine's direct route.
+    The observer treats the raised error as a failed launch and closes the
+    session without opening a misleading blank/direct browser.
+    """
     db = SessionLocal()
     try:
         session = db.get(BrowserSession, session_id)
         if not session or not session.account or not session.account.secret:
+            if session and session.account and session.account.proxy_id:
+                raise ImportValidationError("The assigned proxy connection is unavailable")
             return None
         payload = SecretCipher().decrypt(session.account.secret.encrypted_payload) or {}
         proxy = proxy_from_payload((payload or {}).get("proxy")) if isinstance(payload, dict) else None
+        if session.account.proxy_id and not proxy:
+            raise ImportValidationError("The assigned proxy connection is unavailable")
         return proxy.playwright_options() if proxy else None
-    except Exception:  # noqa: BLE001 - an absent/bad proxy falls back to direct access
+    except Exception:  # noqa: BLE001 - preserve the hard proxy boundary
         logger.exception("could not resolve proxy options for session %s", session_id)
-        return None
+        raise
     finally:
         db.close()
 
@@ -754,7 +768,7 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
         session = db.get(BrowserSession, session_id)
         if not session:
             return
-        terminal_events = {"contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed", "security.failed", "security.completed"}
+        terminal_events = {"login.failed", "reuse.failed", "contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed", "security.failed", "security.completed"}
         if event in terminal_events and session.state in ACTIVE_SESSION_STATES:
             # The observer owns the browser-close operation and will release
             # the process in its finally block. Finalize the durable session
@@ -770,12 +784,19 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 session.login_state = "SECURITY_COMPLETED"
             elif event == "security.failed":
                 session.login_state = "SECURITY_FAILED"
+            elif event == "login.failed":
+                session.login_state = "FAILED"
+            elif event == "reuse.failed":
+                session.login_state = "FAILED"
             session.closed_at = now
             session.last_event_at = now
             session.failure_reason = None if event in {"contacts.imported", "labels_markers.completed", "security.completed"} else (detail[:300] or "Operation failed before completion")
             if event in {"contacts.imported", "labels_markers.completed", "security.completed"}:
                 session.account.login_status = "AUTHENTICATED"
                 session.account.profile_status = "SAVED"
+            elif event == "login.failed" and session.profile.authenticated_at is None:
+                session.account.login_status = "NOT_STARTED"
+                session.account.profile_status = "RESERVED"
             session.profile.status = "RESERVED"
             session.profile.lock_state = "UNLOCKED"
             session.profile.active_session_id = None
@@ -789,6 +810,8 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 "labels_markers.failed": "LABELS_MARKERS_FAILED",
                 "security.completed": "SECURITY_COMPLETED",
                 "security.failed": "SECURITY_FAILED",
+                "login.failed": "LOGIN_FAILED",
+                "reuse.failed": "REOPEN_FAILED",
             }[event]
             session.metadata_json = metadata
         db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action=f"session.auto_login.{event}", target_type="browser_session", target_id=session.id, result=result, metadata_json={"detail": detail[:300], "account_id": session.account_id}))
@@ -800,6 +823,8 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 "labels_markers.failed": "LABELS_MARKERS_FAILED",
                 "security.completed": "SECURITY_COMPLETED",
                 "security.failed": "SECURITY_FAILED",
+                "login.failed": "LOGIN_FAILED",
+                "reuse.failed": "REOPEN_FAILED",
             }[event]
             db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="success" if event in {"contacts.imported", "labels_markers.completed", "security.completed"} else "failure", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": terminal_result}))
         db.commit()
@@ -1290,17 +1315,30 @@ def _proxy_inventory_item(observation: ProxyInventory | None) -> dict:
 
 
 def list_proxies(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None, group_id: str | None = None) -> list[dict]:
-    """Build a safe proxy inventory from account-scoped assignments."""
+    """Build a safe proxy inventory, including currently unassigned records."""
     account_query = select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)
     if group_id:
         account_query = account_query.where(GmailAccount.group_id == group_id)
     accounts = db.scalars(account_query).all()
     observations = {item.id: item for item in db.scalars(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id)).all()}
     grouped: dict[str, dict] = {}
+    for observation in observations.values():
+        grouped[observation.id] = {
+            "id": observation.id,
+            "label": observation.label,
+            "region": observation.region,
+            "status": "UNASSIGNED",
+            "account_count": 0,
+            "authenticated_count": 0,
+            "account_emails": [],
+            "account_refs": [],
+            **_proxy_inventory_item(observation),
+        }
     for account in accounts:
         if not account.proxy_id:
             continue
         item = grouped.setdefault(account.proxy_id, {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status, "account_count": 0, "authenticated_count": 0, "account_emails": [], "account_refs": [], **_proxy_inventory_item(observations.get(account.proxy_id))})
+        item["status"] = account.proxy_status
         item["account_count"] += 1
         item["authenticated_count"] += int(account.login_status == "AUTHENTICATED" or bool(account.browser_profile and account.browser_profile.authenticated_at))
         item["account_emails"].append(account.email)
@@ -1321,7 +1359,35 @@ def _proxy_account(db: Session, organization_id: str, proxy_id: str) -> GmailAcc
     return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email))
 
 
+def _proxy_inventory_record(db: Session, organization_id: str, proxy_id: str) -> ProxyInventory | None:
+    return db.scalar(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id, ProxyInventory.id == proxy_id))
+
+
+def _upsert_proxy_inventory(db: Session, organization_id: str, proxy, label: str | None = None, region: str | None = None) -> ProxyInventory:
+    observation = _proxy_inventory_record(db, organization_id, proxy.proxy_id)
+    if observation is None:
+        observation = ProxyInventory(id=proxy.proxy_id, organization_id=organization_id)
+        db.add(observation)
+    observation.encrypted_payload = SecretCipher().encrypt(proxy.encrypted_payload())
+    if label is not None:
+        observation.label = label
+    elif observation.label is None:
+        observation.label = proxy.display_endpoint
+    if region is not None:
+        observation.region = region
+    return observation
+
+
 def _proxy_config_for_id(db: Session, organization_id: str, proxy_id: str):
+    observation = _proxy_inventory_record(db, organization_id, proxy_id)
+    if observation and observation.encrypted_payload:
+        try:
+            payload = SecretCipher().decrypt(observation.encrypted_payload)
+        except Exception as exc:  # noqa: BLE001
+            raise ImportValidationError("The encrypted proxy connection could not be opened") from exc
+        proxy = proxy_from_payload(payload)
+        if proxy:
+            return proxy, None
     account = _proxy_account(db, organization_id, proxy_id)
     if not account:
         raise ImportValidationError("Proxy assignment not found")
@@ -1344,11 +1410,20 @@ def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, acco
         if not proxy_id:
             raise ImportValidationError("Enter a proxy connection or choose an existing proxy")
         proxy, source_account = _proxy_config_for_id(db, organization_id, proxy_id)
+    observation = _upsert_proxy_inventory(
+        db,
+        organization_id,
+        proxy,
+        (label.strip() if isinstance(label, str) and label.strip() else None) if label is not _UNSET else None,
+        (region.strip() if isinstance(region, str) and region.strip() else None) if region is not _UNSET else None,
+    )
     accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id.in_(account_ids), GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()).all()
     if len(accounts) != len(set(account_ids)):
         raise ImportValidationError("One or more selected accounts could not be found")
-    safe_label = (label.strip() if label and label.strip() else None) if label is not _UNSET else (source_account.proxy_label if source_account else proxy.display_endpoint)
-    safe_region = (region.strip() if region and region.strip() else None) if region is not _UNSET else (source_account.proxy_region if source_account else None)
+    safe_label = (label.strip() if label and label.strip() else None) if label is not _UNSET else (source_account.proxy_label if source_account else observation.label or proxy.display_endpoint)
+    safe_region = (region.strip() if region and region.strip() else None) if region is not _UNSET else (source_account.proxy_region if source_account else observation.region)
+    observation.label = safe_label
+    observation.region = safe_region
     for account in accounts:
         payload = _safe_secret_payload(account)
         payload["proxy"] = proxy.encrypted_payload()
@@ -1366,6 +1441,8 @@ def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, acco
 
 
 def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, proxy_id: str, account_ids: list[str] | None = None) -> int:
+    if _proxy_inventory_record(db, organization_id, proxy_id) is None and db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id)) is None:
+        raise ImportValidationError("Proxy assignment not found")
     query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()
     if account_ids:
         query = query.where(GmailAccount.id.in_(account_ids))
@@ -1386,13 +1463,33 @@ def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, p
 
 def update_proxy(db: Session, organization_id: str, actor_id: str, proxy_id: str, proxy_value: str | None | object = _UNSET, label: str | None | object = _UNSET, region: str | None | object = _UNSET) -> dict:
     current_accounts = db.scalars(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)).all()
-    if not current_accounts:
+    observation = _proxy_inventory_record(db, organization_id, proxy_id)
+    if not current_accounts and not observation:
         raise ImportValidationError("Proxy assignment not found")
     if proxy_value is None:
         remove_proxy_assignments(db, organization_id, actor_id, proxy_id)
         return {"proxy_id": proxy_id, "updated_count": 0, "account_ids": []}
     if proxy_value is _UNSET:
-        return assign_proxy_accounts(db, organization_id, actor_id, [account.id for account in current_accounts], proxy_id=proxy_id, label=label, region=region)
+        if current_accounts:
+            return assign_proxy_accounts(db, organization_id, actor_id, [account.id for account in current_accounts], proxy_id=proxy_id, label=label, region=region)
+        if observation:
+            if label is not _UNSET:
+                observation.label = label
+            if region is not _UNSET:
+                observation.region = region
+            db.commit()
+            return {"proxy_id": proxy_id, "updated_count": 0, "account_ids": []}
+        raise ImportValidationError("Proxy assignment not found")
+    if not current_accounts:
+        try:
+            proxy = parse_proxy(proxy_value)
+        except ProxyValidationError as exc:
+            raise ImportValidationError(str(exc)) from exc
+        if proxy is None:
+            raise ImportValidationError("Enter a proxy connection")
+        observation = _upsert_proxy_inventory(db, organization_id, proxy, label if label is not _UNSET else None, region if region is not _UNSET else None)
+        db.commit()
+        return {"proxy_id": proxy.proxy_id, "updated_count": 0, "account_ids": []}
     return assign_proxy_accounts(db, organization_id, actor_id, [account.id for account in current_accounts], proxy_value=proxy_value, label=label, region=region)
 
 

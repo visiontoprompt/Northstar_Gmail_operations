@@ -11,6 +11,7 @@ from .config import get_settings
 logger = logging.getLogger(__name__)
 
 _authenticated_ensured = False
+_proxy_inventory_ensured = False
 
 
 def _ensure_profile_authenticated_column() -> None:
@@ -29,6 +30,22 @@ def _ensure_profile_authenticated_column() -> None:
     _authenticated_ensured = True
 
 
+def _ensure_proxy_inventory_payload_column() -> None:
+    """Upgrade databases created before persistent proxy inventory existed."""
+    global _proxy_inventory_ensured
+    if _proxy_inventory_ensured:
+        return
+    try:
+        with engine.connect() as conn:
+            columns = {col["name"] for col in inspect(conn).get_columns("proxy_inventory")}
+            if "encrypted_payload" not in columns:
+                conn.execute(text("ALTER TABLE proxy_inventory ADD COLUMN encrypted_payload TEXT"))
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Could not ensure proxy_inventory.encrypted_payload column: %s", exc)
+    _proxy_inventory_ensured = True
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -45,6 +62,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 def get_db() -> Generator[Session, None, None]:
     _ensure_profile_authenticated_column()
+    _ensure_proxy_inventory_payload_column()
     db = SessionLocal()
     try:
         yield db

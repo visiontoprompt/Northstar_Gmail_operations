@@ -160,3 +160,31 @@ def test_proxy_inventory_can_reassign_edit_and_remove_accounts() -> None:
         removed = client.request("DELETE", f"/api/v1/proxies/{proxy_id}", json={"confirmation": "REMOVE"})
         assert removed.status_code == 200
         assert client.get("/api/v1/proxies").json() == []
+
+
+def test_unassign_keeps_proxy_inventory_available_for_reassignment() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        accounts = [client.post("/api/v1/accounts/single", json={"email": f"proxy-retain-{index}@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json() for index in range(3)]
+        assigned = client.post("/api/v1/proxies/assignments", json={"account_ids": [accounts[0]["id"]], "proxy": "proxy-user:proxy-pass:198.51.100.44:8080"})
+        assert assigned.status_code == 200
+        proxy_id = assigned.json()["proxy_id"]
+
+        cleared = client.request("DELETE", f"/api/v1/proxies/{proxy_id}/assignments", json={"account_ids": [accounts[0]["id"]]})
+        assert cleared.status_code == 200
+        retained = client.get("/api/v1/proxies").json()
+        assert retained[0]["id"] == proxy_id
+        assert retained[0]["account_count"] == 0
+
+        reassigned = client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [accounts[1]["id"]]})
+        assert reassigned.status_code == 200
+        assert reassigned.json()["proxy_id"] == proxy_id
+        assert client.get("/api/v1/proxies").json()[0]["account_count"] == 1
+
+
+def test_observer_does_not_fall_back_to_direct_when_proxy_resolution_fails(tmp_path) -> None:
+    playwright = MagicMock()
+    observer = BrowserObserver("s1", "account@example.com__org", 0, profile_dir=str(tmp_path), executable="fake-browser", headless=True, resolve_proxy=lambda _session_id: (_ for _ in ()).throw(RuntimeError("proxy unavailable")))
+
+    assert _launch_profile_context(playwright, observer) is None
+    playwright.chromium.launch_persistent_context.assert_not_called()

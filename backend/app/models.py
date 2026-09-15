@@ -68,12 +68,17 @@ class GmailAccount(Base):
 
 
 class ProxyInventory(Base):
-    """Safe, organization-scoped observations for a deterministic proxy id."""
+    """Safe, organization-scoped inventory for a deterministic proxy id.
+
+    The connection itself remains encrypted so an unassigned proxy can be
+    reassigned without depending on an account that currently uses it.
+    """
 
     __tablename__ = "proxy_inventory"
 
     id: Mapped[str] = mapped_column(String(96), primary_key=True)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    encrypted_payload: Mapped[str | None] = mapped_column(Text)
     label: Mapped[str | None] = mapped_column(String(160))
     region: Mapped[str | None] = mapped_column(String(80))
     provider: Mapped[str | None] = mapped_column(String(200))

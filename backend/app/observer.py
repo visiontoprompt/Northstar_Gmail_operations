@@ -59,6 +59,8 @@ _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _ACCOUNT_HANDOFF_HOSTS = _LOGIN_HOSTS | {"mail.google.com", "myaccount.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
 _OPERATION_FAILURE_EVENTS = {
+    "login": "login.failed",
+    "reuse": "reuse.failed",
     "contacts": "contacts.failed",
     "labels_markers": "labels_markers.failed",
     "security": "security.failed",
@@ -182,7 +184,8 @@ class BrowserObserver:
         with sync_playwright() as pw:
             context = _launch_profile_context(pw, self)
             if context is None:
-                self._emit("failed", "could not launch the isolated browser", result="failure")
+                failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose, "failed")
+                self._emit(failure_event, "Could not launch the isolated browser with the assigned proxy; verify the proxy connection and that it permits Google", result="failure")
                 self._notify_browser_closed()
                 return
             try:
@@ -242,8 +245,9 @@ class BrowserObserver:
                 logger.info("session %s: retrying initial navigation attempt %d to %s", self.session_id, self._start_navigation_attempts, self.start_url)
                 _open_start_page(page, self.start_url)
                 return
-            if self.purpose == "security":
-                self._emit("security.failed", "The isolated browser could not navigate to Google Account security", result="failure")
+            failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose)
+            if failure_event:
+                self._emit(failure_event, "The isolated browser could not load the operation start page; verify the assigned proxy permits Google", result="failure")
                 self._stop.set()
             return
         title = page.title() or ""
@@ -353,9 +357,9 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
     if observer._resolve_proxy is not None:
         try:
             proxy = observer._resolve_proxy(observer.session_id)
-        except Exception:  # noqa: BLE001 - a missing proxy must not block login
-            logger.exception("session %s: could not resolve its proxy", observer.session_id)
-            proxy = None
+        except Exception:  # noqa: BLE001 - never cross an assigned proxy boundary
+            logger.exception("session %s: could not resolve its proxy; refusing direct fallback", observer.session_id)
+            return None
         if proxy:
             launch_kwargs["proxy"] = proxy
     if not observer.headless:
