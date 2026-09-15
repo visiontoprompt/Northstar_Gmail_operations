@@ -38,3 +38,19 @@ The application does not solve or bypass CAPTCHA/MFA, or use stealth/fingerprint
 - `POST /api/v1/login-jobs/{id}/resume` — resume a paused batch and dispatch available profiles.
 - `POST /api/v1/login-jobs/{id}/pause` / `cancel` — control queued work and release profiles on cancellation.
 - `POST /api/v1/maintenance/recover-stale-sessions` — release profiles whose workers stopped reporting heartbeats and mark them for attention.
+
+## Profile-backed settings operations
+
+Once an account has a saved authenticated profile, the Accounts registry can
+start these verified operations in the same isolated browser boundary:
+
+- `POST /api/v1/accounts/{id}/labels-markers` — update and verify Gmail
+  Importance markers and the Spam system label.
+- `POST /api/v1/accounts/{id}/security` — open Google Account Enhanced Safe
+  Browsing, enable it when needed, verify the resulting control state in
+  English, French, or Spanish, then close the browser session.
+
+Both operations require `browser_profiles.authenticated_at`, never combine a
+new login with a settings mutation, and finish only after a verified terminal
+event. Their sessions are recorded with `purpose`, `operation_status`, and a
+terminal login state (`LABELS_MARKERS_COMPLETED` or `SECURITY_COMPLETED`).

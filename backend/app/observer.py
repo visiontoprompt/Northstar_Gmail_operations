@@ -113,6 +113,10 @@ class BrowserObserver:
         self._labels_verified = False
         self._labels_markers_tick_count = 0
         self._labels_markers_completion_ticks = 0
+        self._security_verified = False
+        self._security_clicked = False
+        self._security_tick_count = 0
+        self._security_completion_ticks = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_observation: tuple[str, str, str, str] | None = None
@@ -257,6 +261,8 @@ class BrowserObserver:
             _handle_contacts_tick(self, page, host, signal)
         if self.purpose == "labels_markers":
             _handle_labels_markers_tick(self, page, host)
+        if self.purpose == "security":
+            _handle_security_tick(self, page, host)
 
         state_key = (signal.value, url)
         if state_key in self._logged_states:
@@ -728,6 +734,21 @@ _CONTACTS_FINAL_IMPORT_SELECTOR = (
 
 _GMAIL_MARKERS_SETTINGS_URL = "https://mail.google.com/mail/u/0/?tab=rm&ogbl#settings/inbox"
 _GMAIL_LABELS_SETTINGS_URL = "https://mail.google.com/mail/u/0/#settings/labels"
+_GOOGLE_ENHANCED_SAFE_BROWSING_URL = "https://myaccount.google.com/account-enhanced-safe-browsing"
+_SAFE_BROWSING_PAGE_PATH = "/account-enhanced-safe-browsing"
+_SAFE_BROWSING_TERMS = (
+    "enhanced safe browsing",
+    "use enhanced safe browsing",
+    "enhanced protection",
+    "navigation sécurisée améliorée",
+    "navigation securisee amelioree",
+    "protection renforcée",
+    "protection renforcee",
+    "navegación segura mejorada",
+    "navegacion segura mejorada",
+    "protección mejorada",
+    "proteccion mejorada",
+)
 _GMAIL_MARKER_SECTION_LABELS = (
     "importance markers",
     "marqueurs d'importance",
@@ -850,6 +871,83 @@ def _handle_labels_markers_tick(observer: "BrowserObserver", page: "Page", host:
         return
     observer._emit("labels_markers.completed", "Gmail Importance markers enabled and Spam shown")
     observer._stop.set()
+
+
+def _handle_security_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:
+    """Enable and verify Enhanced Safe Browsing in the signed-in profile.
+
+    The My Account surface is a client-rendered page whose DOM changes across
+    locales and releases. The helper below finds a semantic switch/checkbox
+    in the container labelled for Enhanced Safe Browsing, rather than relying
+    on a generated CSS path or a screen coordinate.
+    """
+    observer._security_tick_count = getattr(observer, "_security_tick_count", 0) + 1
+    if observer._security_tick_count > 120:
+        observer._emit("security.failed", "Enhanced Safe Browsing did not reach a verified enabled state", result="failure")
+        observer._stop.set()
+        return
+    if host != "myaccount.google.com":
+        return
+    url = page.url or ""
+    if _SAFE_BROWSING_PAGE_PATH not in urlparse(url).path.lower():
+        _navigate_settings(page, _GOOGLE_ENHANCED_SAFE_BROWSING_URL)
+        return
+    state = _set_enhanced_safe_browsing(page)
+    if state == "clicked":
+        observer._security_clicked = True
+        observer._emit("security.toggle_clicked", "selected Enhanced Safe Browsing")
+        return
+    if state == "already":
+        observer._security_verified = True
+    if not observer._security_verified:
+        return
+    if getattr(observer, "_security_completion_ticks", 0) < 2:
+        observer._security_completion_ticks = getattr(observer, "_security_completion_ticks", 0) + 1
+        return
+    observer._emit("security.completed", "Enhanced Safe Browsing enabled and verified")
+    observer._stop.set()
+
+
+def _set_enhanced_safe_browsing(page: "Page") -> str | None:
+    """Return ``clicked`` or ``already`` for the localized security control."""
+    try:
+        result = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const terms = config.terms.map(normalize);
+                const action = ['turn on', 'enable', 'activate', 'activer', 'activa', 'activar', 'habilitar'];
+                const controls = [...document.querySelectorAll('input[type="checkbox"], [role="switch"], [role="checkbox"], button')];
+                const textOf = node => normalize([node?.innerText, node?.textContent, node?.getAttribute?.('aria-label'), node?.getAttribute?.('title')].filter(Boolean).join(' '));
+                const hasTerm = value => terms.some(term => value.includes(term));
+                const checked = node => node.checked === true || node.getAttribute('aria-checked') === 'true' || node.getAttribute('aria-pressed') === 'true' || /\\b(on|enabled|active|selected|checked)\\b/i.test(node.className || '');
+                for (const control of controls) {
+                    let scope = control;
+                    let scopeText = '';
+                    for (let depth = 0; scope && depth < 5; depth += 1, scope = scope.parentElement) {
+                        const candidate = textOf(scope);
+                        if (candidate.length > scopeText.length && candidate.length < 1200) scopeText = candidate;
+                        if (hasTerm(candidate)) break;
+                    }
+                    const ownText = textOf(control);
+                    const label = control.labels?.[0] ? textOf(control.labels[0]) : '';
+                    const context = [ownText, label, scopeText].join(' ');
+                    if (!hasTerm(context)) continue;
+                    if (checked(control)) return 'already';
+                    const actionText = context;
+                    if (control.matches('button') && !action.some(term => actionText.includes(term)) && !control.getAttribute('aria-checked')) continue;
+                    control.click();
+                    return 'clicked';
+                }
+                const body = normalize(document.body?.innerText);
+                const enabledPattern = new RegExp('(?:' + terms.join('|') + ').{0,100}(?:on|enabled|active|turned on|activee|activado|activada|active)', 'i');
+                if (enabledPattern.test(body)) return 'already';
+                return null;
+            }""",
+            {"terms": _SAFE_BROWSING_TERMS},
+        )
+        return result if result in {"clicked", "already"} else None
+    except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
+        return None
 
 
 def _navigate_settings(page: "Page", url: str) -> None:

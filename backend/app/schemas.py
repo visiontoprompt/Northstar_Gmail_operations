@@ -324,7 +324,7 @@ class LoginJobProgressResponse(BaseModel):
 
 
 class SessionStartRequest(BaseModel):
-    purpose: Literal["login", "reuse", "contacts", "labels_markers"] = "login"
+    purpose: Literal["login", "reuse", "contacts", "labels_markers", "security"] = "login"
 
 
 class AuditEventResponse(BaseModel):
@@ -338,7 +338,7 @@ class AuditEventResponse(BaseModel):
 
 
 class SessionEventCreate(BaseModel):
-    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "CONTACTS_IMPORTED", "HEARTBEAT"]
+    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "CONTACTS_IMPORTED", "SECURITY_COMPLETED", "HEARTBEAT"]
     detail: str | None = Field(default=None, max_length=300)
 
 

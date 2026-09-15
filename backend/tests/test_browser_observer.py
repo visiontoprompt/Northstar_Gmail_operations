@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _is_safe_interstitial
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial
 
 
 class _FakeButton:
@@ -135,6 +135,34 @@ class _FakeFinalImportPage:
         self.evaluated_selector = selector
         self.button.click()
         return True
+
+
+class _FakeSecurityPage:
+    def __init__(self, url: str):
+        self.url = url
+        self.goto_calls: list[str] = []
+
+    def goto(self, url: str, **_kwargs):
+        self.goto_calls.append(url)
+        self.url = url
+
+    def evaluate(self, _script: str, _config: dict):
+        return "already"
+
+
+def test_security_operation_navigates_to_exact_page_and_waits_for_verified_completion():
+    events: list[str] = []
+    observer = BrowserObserver("s-security", "p-security", 9222, purpose="security", report_event=lambda _sid, event, _detail, _result: events.append(event))
+    page = _FakeSecurityPage("https://mail.google.com/mail/u/0/")
+
+    _handle_security_tick(observer, page, "mail.google.com")
+    assert page.goto_calls == []
+    _handle_security_tick(observer, page, "myaccount.google.com")
+    assert page.goto_calls == ["https://myaccount.google.com/account-enhanced-safe-browsing"]
+    _handle_security_tick(observer, page, "myaccount.google.com")
+    _handle_security_tick(observer, page, "myaccount.google.com")
+    _handle_security_tick(observer, page, "myaccount.google.com")
+    assert "security.completed" in events
 
 
 def test_contacts_clicks_the_configured_final_import_button_selector():

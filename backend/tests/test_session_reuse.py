@@ -204,3 +204,30 @@ def test_labels_markers_operation_requires_saved_profile_and_uses_operation_purp
         finished = client.get(f"/api/v1/sessions/{session['id']}").json()
         assert finished["state"] == "CLOSED"
         assert finished["login_state"] == "LABELS_MARKERS_COMPLETED"
+
+
+def test_security_operation_requires_saved_profile_and_closes_after_verification(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="safe_browsing@example.com")
+        missing = client.post(f"/api/v1/accounts/{account['id']}/security")
+        assert missing.status_code == 422
+
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/close")
+
+        started = client.post(f"/api/v1/accounts/{account['id']}/security")
+        assert started.status_code == 201
+        session = client.get(f"/api/v1/sessions/{started.json()['id']}").json()
+        assert session["purpose"] == "security"
+        assert session["login_state"] == "AUTHENTICATED"
+
+        service._report_observer_event(session["id"], "security.completed", "Enhanced Safe Browsing verified")
+        finished = client.get(f"/api/v1/sessions/{session['id']}").json()
+        assert finished["state"] == "CLOSED"
+        assert finished["login_state"] == "SECURITY_COMPLETED"
+        assert finished["operation_status"] == "COMPLETED"
+        assert finished["browser_opened"] is False

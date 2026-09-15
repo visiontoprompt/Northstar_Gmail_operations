@@ -146,7 +146,7 @@ Exit criteria:
 - Bulk execution honors group and global concurrency limits.
 - External security challenges stop the affected item for human attention.
 
-**Status: Partial.** The registry `Labels & Markers` action now executes the approved Gmail settings operation for authenticated saved profiles, with localized verification, audit events, and automatic session close. The remaining Phase 4 modules continue to use preparation-only drafts until their workers are implemented.
+**Status: Partial.** The registry `Labels & Markers` action now executes the approved Gmail settings operation for authenticated saved profiles, with localized verification, audit events, and automatic session close. The `Browser security` action now executes the same profile-backed lifecycle for Enhanced Safe Browsing at Google Account security, using localized semantic control detection, verification, audit events, and automatic session close. The remaining Phase 4 modules continue to use preparation-only drafts until their workers are implemented.
 
 ## Phase 5 — Employees, access, and assignment
 

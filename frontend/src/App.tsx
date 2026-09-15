@@ -90,6 +90,7 @@ function App() {
   const [actionScope, setActionScope] = useState<ActionScope>("selected");
   const [activeOperation, setActiveOperation] = useState<{ kind: OperationKind; accounts: Account[] } | null>(null);
   const [labelsMarkersTargets, setLabelsMarkersTargets] = useState<Account[] | null>(null);
+  const [securityTargets, setSecurityTargets] = useState<Account[] | null>(null);
   const [contactTargets, setContactTargets] = useState<Account[] | null>(null);
   const [activeAdminAction, setActiveAdminAction] = useState<{ kind: "edit" | "move" | "delete"; accounts: Account[] } | null>(null);
   const [credentialAccount, setCredentialAccount] = useState<Account | null>(null);
@@ -182,6 +183,16 @@ function App() {
         }
         return;
       }
+      if (kind === "security") {
+        if (targets.length === 1) {
+          const session = await api<Session>(`/api/v1/accounts/${targets[0].id}/security`, { method: "POST" });
+          setActiveSession(session);
+          reload();
+        } else {
+          setSecurityTargets(targets);
+        }
+        return;
+      }
       if (["edit", "move", "delete"].includes(kind)) { setActiveAdminAction({ kind: kind as "edit" | "move" | "delete", accounts: targets }); return; }
       setActiveOperation({ kind: kind as OperationKind, accounts: targets });
     } catch (requestError) { notify("error", (requestError as Error).message); }
@@ -245,6 +256,7 @@ function App() {
       {activeOperation && <BulkOperationDesigner accounts={activeOperation.accounts} kind={activeOperation.kind} onClose={() => setActiveOperation(null)} onSaved={(message) => { setActiveOperation(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {contactTargets && <ContactsImportModal accounts={contactTargets} onClose={() => setContactTargets(null)} onStarted={(session) => setActiveSession(session)} onPrepared={(message) => { setContactTargets(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {labelsMarkersTargets && <LabelsMarkersBatchModal accounts={labelsMarkersTargets} onClose={() => setLabelsMarkersTargets(null)} onFinished={(message) => { notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
+      {securityTargets && <SecurityBatchModal accounts={securityTargets} onClose={() => setSecurityTargets(null)} onFinished={(message) => { notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeAdminAction && <BulkAdminDesigner accounts={activeAdminAction.accounts} groups={groups} kind={activeAdminAction.kind} onClose={() => setActiveAdminAction(null)} onSaved={(message) => { setActiveAdminAction(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeJob && <LoginJobWorkspace job={activeJob} onUpdate={(job) => { setActiveJob(job); reload(); }} onClose={() => { setActiveJob(null); reload(); }} onError={(message) => notify("error", message)} />}
       <ToastRegion toasts={toasts} />
@@ -267,7 +279,7 @@ function InventoryToolbar({ value, onChange, onClear, placeholder, status, onSta
 }
 
 function InventoryStatus({ status }: { status: string }) {
-  const tone = ["AUTHENTICATED", "SAVED", "ASSIGNED", "UNLOCKED", "CLOSED", "COMPLETED"].includes(status) ? "ok" : ["ERROR", "CORRUPT", "UNREACHABLE", "NONEXISTENT", "FAILED"].includes(status) ? "danger" : ["OPEN", "RUNNING", "NEEDS_ATTENTION", "LOGIN_REQUIRED", "REQUIRED", "IN_PROGRESS", "INTERRUPTED", "NOT_FINISHED"].includes(status) ? "warning" : "neutral";
+  const tone = ["AUTHENTICATED", "SAVED", "ASSIGNED", "UNLOCKED", "CLOSED", "COMPLETED", "CONTACTS_IMPORTED", "LABELS_MARKERS_COMPLETED", "SECURITY_COMPLETED"].includes(status) ? "ok" : ["ERROR", "CORRUPT", "UNREACHABLE", "NONEXISTENT", "FAILED", "CONTACTS_IMPORT_FAILED", "LABELS_MARKERS_FAILED", "SECURITY_FAILED"].includes(status) ? "danger" : ["OPEN", "RUNNING", "NEEDS_ATTENTION", "LOGIN_REQUIRED", "REQUIRED", "IN_PROGRESS", "INTERRUPTED", "NOT_FINISHED"].includes(status) ? "warning" : "neutral";
   return <span className={`inventory-status ${tone}`}><span className="inventory-status-dot" />{status === "NOT_STARTED" ? "Never used" : labelStatus(status)}</span>;
 }
 
@@ -288,7 +300,7 @@ function SessionsPage({ groups, refreshKey, onRefresh, onOpenAccount, onOpenSess
   const interruptedCount = sessions.filter((session) => session.operation_status === "INTERRUPTED").length;
   const unfinishedCount = sessions.filter((session) => session.operation_status === "NOT_FINISHED").length;
   const failedCount = sessions.filter((session) => session.operation_status === "FAILED").length;
-  const actionOptions = [{ value: "login", label: "Login" }, { value: "reuse", label: "Reopen profile" }, { value: "contacts", label: "Import contacts" }, { value: "labels_markers", label: "Labels & Markers" }];
+  const actionOptions = [{ value: "login", label: "Login" }, { value: "reuse", label: "Reopen profile" }, { value: "contacts", label: "Import contacts" }, { value: "security", label: "Browser security" }, { value: "labels_markers", label: "Labels & Markers" }];
   const scopeLabel = scope === "latest" ? "Latest per account" : "All activity";
   return <div className="infra-page"><InfrastructureHeader eyebrow="RUNTIME CONTROL" title="Sessions" description="Review every profile-backed action and its evidence-based outcome for each account." icon={<Clock3 size={20} />} onRefresh={onRefresh} loading={loading} /><section className="summary-grid" aria-label="Session summary"><SummaryCard label={scope === "latest" ? "Accounts in view" : "Activity records"} value={sessions.length.toString()} note={scopeLabel} icon={<Clock3 size={17} />} /><SummaryCard label="Completed" value={completedCount.toString()} note="Recorded terminal success" icon={<Check size={17} />} tone="teal" /><SummaryCard label="Interrupted" value={interruptedCount.toString()} note="Needs attention" icon={<Activity size={17} />} tone="amber" /><SummaryCard label="Not finished" value={unfinishedCount.toString()} note={`${failedCount} failed · ${openCount} open · ${savedCount} saved`} icon={<XCircle size={17} />} /></section><section className="infra-panel"><div className="panel-header"><div><h2>{scopeLabel}</h2><p>{scope === "latest" ? "One latest action per account. Switch to All activity to inspect completed and interrupted history." : "All stored session actions in the selected scope, ordered by most recent event."}</p></div><div className="session-context-controls"><div className="group-context"><span>GROUP CONTEXT</span><label className="select-wrap"><select aria-label="Filter sessions by account group" value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="all">All groups</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.account_count} accounts</option>)}</select><ChevronDown size={15} /></label></div><div className="group-context"><span>VIEW</span><label className="select-wrap"><select aria-label="Choose session view" value={scope} onChange={(event) => setScope(event.target.value as "latest" | "all")}><option value="latest">Latest per account</option><option value="all">All activity</option></select><ChevronDown size={15} /></label></div></div></div><div className="session-filter-row"><InventoryToolbar value={query} onChange={setQuery} onClear={() => setQuery("")} placeholder="Search account, action, session, or outcome" status={status} onStatusChange={setStatus} statuses={[{ value: "IN_PROGRESS", label: "In progress" }, { value: "COMPLETED", label: "Completed" }, { value: "INTERRUPTED", label: "Interrupted" }, { value: "NOT_FINISHED", label: "Not finished" }, { value: "FAILED", label: "Failed" }]} loading={loading} onRefresh={onRefresh} /><label className="filter-select session-action-filter"><Filter size={15} /><span className="sr-only">Filter sessions by action</span><select aria-label="Filter sessions by action" value={action} onChange={(event) => setAction(event.target.value)}><option value="ALL">All actions</option>{actionOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>{error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={onRefresh}>Retry</button></div>}{!loading && !filtered.length ? <div className="table-state empty-state"><div className="empty-icon"><Clock3 size={21} /></div><strong>No session activity matches this view</strong><span>Try a different action, outcome, group, or view scope.</span></div> : <div className="table-scroll"><table className="infra-table sessions-table"><caption className="sr-only">{scopeLabel} session activity</caption><thead><tr><th>Account</th><th>Action</th><th>Outcome</th><th>Gmail state</th><th>Profile</th><th>Runtime</th><th>Last event</th><th><span className="sr-only">Open</span></th></tr></thead><tbody>{filtered.map((session) => <tr key={session.id}><td><button type="button" className="infra-link" onClick={() => onOpenAccount(session.account_id)}><strong>{session.account_email}</strong><small className="mono">{session.id}</small></button></td><td><strong className="session-action-label">{session.action ?? labelStatus(session.purpose ?? "login")}</strong><small className="table-subtext">{session.duration_seconds != null ? `${session.duration_seconds}s duration` : "Duration pending"}</small></td><td><InventoryStatus status={session.operation_status ?? "NOT_FINISHED"} /><small className="table-subtext">{session.status_detail ?? labelStatus(session.state)}</small></td><td><InventoryStatus status={session.login_state || session.state} /><small className="table-subtext">{labelStatus(session.state)}</small></td><td><span className="metadata-cell"><span className={`status-dot ${session.profile_saved ? "teal" : "neutral"}`} />{session.profile_saved ? "Saved" : "Reserved"}</span></td><td><span className="table-subtext">{labelStatus(session.runtime_type)}</span><small className="table-subtext">{session.browser_opened ? "Browser open" : "Browser closed"}</small></td><td><span className="table-subtext">{formatDateTime(session.last_event_at)}</span></td><td><button type="button" className="row-open" aria-label={`Open session for ${session.account_email}`} onClick={() => onOpenSession(session)}><ArrowRight size={16} /></button></td></tr>)}</tbody></table></div>}</section><footer className="page-footer"><span>Northstar Operations</span><span>Session ledger · {scopeLabel.toLowerCase()}</span></footer></div>;
 }
@@ -700,6 +712,61 @@ function LabelsMarkersBatchModal({ accounts, onClose, onFinished, onError }: { a
   }, [finished, failedCount, completedCount, accounts.length, onFinished, onError]);
 
   return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal="true" aria-labelledby="labels-markers-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LABELS & MARKERS</div><h2 id="labels-markers-title">Enable Gmail labels & markers</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Labels & Markers progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Tags size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each authenticated profile opens Gmail settings, enables Importance markers, shows Spam under System labels, verifies both changes, and closes its browser session.</span></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
+}
+
+function SecurityBatchModal({ accounts, onClose, onFinished, onError }: { accounts: Account[]; onClose: () => void; onFinished: (message: string) => void; onError: (message: string) => void }) {
+  type RunState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  const [states, setStates] = useState<Record<string, RunState>>(() => Object.fromEntries(accounts.map((account) => [account.id, "QUEUED"] as const)));
+  const [failureEmails, setFailureEmails] = useState<string[]>([]);
+  const [finished, setFinished] = useState(false);
+  const completionNotified = useRef(false);
+  const completionNoticeSent = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let cursor = 0;
+    const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+    const runAccount = async () => {
+      while (!cancelled) {
+        const account = accounts[cursor++];
+        if (!account) return;
+        setStates((current) => ({ ...current, [account.id]: "RUNNING" }));
+        try {
+          const started = await api<Session>(`/api/v1/accounts/${account.id}/security`, { method: "POST" });
+          let current = started;
+          for (let attempt = 0; attempt < 120 && !cancelled && current.state !== "CLOSED"; attempt += 1) {
+            await wait(1000);
+            current = await api<Session>(`/api/v1/sessions/${started.id}`);
+          }
+          if (current.login_state === "SECURITY_COMPLETED") setStates((state) => ({ ...state, [account.id]: "COMPLETED" }));
+          else { setStates((state) => ({ ...state, [account.id]: "FAILED" })); setFailureEmails((emails) => [...emails, account.email]); }
+        } catch {
+          setStates((state) => ({ ...state, [account.id]: "FAILED" }));
+          setFailureEmails((emails) => [...emails, account.email]);
+        }
+      }
+    };
+    const run = async () => {
+      await Promise.all(Array.from({ length: Math.min(4, accounts.length) }, () => runAccount()));
+      if (cancelled || completionNotified.current) return;
+      completionNotified.current = true;
+      setFinished(true);
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [accounts]);
+
+  const completedCount = Object.values(states).filter((state) => state === "COMPLETED").length;
+  const failedCount = Object.values(states).filter((state) => state === "FAILED").length;
+  useEffect(() => {
+    if (!finished || completionNoticeSent.current) return;
+    completionNoticeSent.current = true;
+    const message = failedCount ? `Browser security completed for ${completedCount} accounts · ${failedCount} require review.` : `Browser security completed for ${completedCount} accounts.`;
+    onFinished(message);
+    if (failedCount === accounts.length) onError("No browser security operations completed. Review the account statuses and retry.");
+  }, [finished, failedCount, completedCount, accounts.length, onFinished, onError]);
+
+  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal="true" aria-labelledby="security-batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> BROWSER SECURITY</div><h2 id="security-batch-title">Enable Enhanced Safe Browsing</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close browser security progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><ShieldCheck size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each authenticated profile opens Google Account security, enables Enhanced Safe Browsing in the current page language, verifies the setting, and closes its browser session.</span></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
 }
 
 function OperationDesigner({ account, kind, onClose, onSaved, onError }: { account: Account; kind: OperationKind; onClose: () => void; onSaved: (message: string) => void; onError: (message: string) => void }) {
