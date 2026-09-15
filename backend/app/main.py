@@ -304,8 +304,8 @@ def browser_profiles(q: str | None = Query(default=None, max_length=320), status
 
 
 @app.get("/api/v1/proxies", response_model=list[ProxyResponse])
-def proxies(q: str | None = Query(default=None, max_length=320), status_filter: str | None = Query(default=None, alias="status"), db: Session = Depends(get_db)) -> list[dict]:
-    return list_proxies(db, settings.demo_org_id, q, status_filter)
+def proxies(q: str | None = Query(default=None, max_length=320), group_id: str | None = Query(default=None, max_length=64), status_filter: str | None = Query(default=None, alias="status"), db: Session = Depends(get_db)) -> list[dict]:
+    return list_proxies(db, settings.demo_org_id, q, status_filter, group_id=group_id)
 
 
 @app.post("/api/v1/proxies/assignments")

@@ -87,7 +87,7 @@ The Sessions page defaults to one latest action per account and can switch to Al
 
 Account proxies can be assigned during single-account intake or from account metadata editing. Supported values are `ip:port` and `username:password:ip:port`; the connection is encrypted with the account vault and supplied only to that account's isolated Playwright browser at launch. Proxy usernames and passwords are never returned in API responses or logs.
 
-The Proxies inventory is account-scoped: it groups identical assigned endpoints, lets an administrator test up to 300 selected endpoints, and records safe public-IP, provider, country, city, and latency observations from the configured health-check URL. It also supports reassignment, metadata edits, unassignment, and confirmed removal. A provider or location is shown only after a successful health check; the app never fabricates those values.
+The Proxies inventory is account-scoped and group-filterable: it groups identical assigned endpoints within the selected group scope, lets an administrator test up to 300 selected endpoints, and records safe public-IP, provider, country, city, and latency observations from the configured health-check URL. It also supports reassignment, metadata edits, unassignment, and confirmed removal. A provider or location is shown only after a successful health check; the app never fabricates those values.
 
 Login page handling is observation-first: normal Google interstitials can be classified, account-not-found copy is recognized in English and French, and CAPTCHA/MFA/security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
 

@@ -83,6 +83,8 @@ def test_infrastructure_inventory_endpoints_are_safe_and_account_scoped() -> Non
             with TestClient(app) as client:
                 group_id = client.get("/api/v1/groups").json()[0]["id"]
                 account = client.post("/api/v1/accounts/single", json={"email": "inventory@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "proxy": "proxy-user:proxy-pass:198.51.100.12:8080", "group_id": group_id}).json()
+                second_group_id = client.get("/api/v1/groups").json()[1]["id"]
+                second_account = client.post("/api/v1/accounts/single", json={"email": "inventory-two@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "proxy": "proxy-user:proxy-pass:198.51.100.12:8080", "group_id": second_group_id}).json()
 
                 # A reserved onboarding row is not a real profile until its
                 # persistent user-data directory exists.
@@ -96,8 +98,11 @@ def test_infrastructure_inventory_endpoints_are_safe_and_account_scoped() -> Non
 
                 proxies = client.get("/api/v1/proxies").json()
                 assert len(proxies) == 1
-                assert proxies[0]["account_count"] == 1
-                assert proxies[0]["account_refs"] == [{"id": account["id"], "email": "inventory@example.com"}]
+                assert proxies[0]["account_count"] == 2
+                assert {reference["id"] for reference in proxies[0]["account_refs"]} == {account["id"], second_account["id"]}
+                scoped_proxies = client.get(f"/api/v1/proxies?group_id={group_id}").json()
+                assert scoped_proxies[0]["account_count"] == 1
+                assert scoped_proxies[0]["account_refs"] == [{"id": account["id"], "email": "inventory@example.com"}]
                 assert "proxy-user" not in client.get("/api/v1/proxies").text
                 assert "proxy-pass" not in client.get("/api/v1/proxies").text
         finally:

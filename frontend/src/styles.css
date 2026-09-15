@@ -500,6 +500,9 @@ table { min-width: 1050px; }
 .infra-toolbar { background: #fcfdfc; }
 .inventory-count { color: #7f908b; font-family: var(--font-data); font-size: 10px; white-space: nowrap; }
 .infra-table { min-width: 920px; }
+.proxy-panel-controls { display: flex; align-items: flex-end; gap: 14px; }
+.proxy-panel-controls .group-context { min-width: 220px; }
+.proxy-geo-value { display: block; color: #31564d; font-family: var(--font-data); font-size: 10px; font-weight: 500; }
 .sessions-table { min-width: 1250px; }
 .session-context-controls { display: flex; align-items: flex-end; gap: 10px; }
 .session-context-controls .group-context { min-width: 190px; }
@@ -550,6 +553,8 @@ table { min-width: 1050px; }
   .infra-panel .panel-header { display: flex; }
   .session-context-controls { align-items: stretch; flex-direction: column; gap: 4px; }
   .session-context-controls .group-context { min-width: 0; }
+  .proxy-panel-controls { align-items: stretch; flex-direction: column; gap: 10px; }
+  .proxy-panel-controls .group-context { min-width: 0; }
   .session-filter-row { display: block; }
   .session-action-filter { margin: 0 16px 12px; }
   .account-chip-list { max-width: 250px; }

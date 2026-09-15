@@ -1275,9 +1275,12 @@ def _proxy_inventory_item(observation: ProxyInventory | None) -> dict:
     return {"provider": observation.provider, "country": observation.country, "city": observation.city, "public_ip": observation.public_ip, "test_status": observation.test_status, "test_error": observation.test_error, "latency_ms": observation.latency_ms, "last_tested_at": observation.last_tested_at}
 
 
-def list_proxies(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None) -> list[dict]:
+def list_proxies(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None, group_id: str | None = None) -> list[dict]:
     """Build a safe proxy inventory from account-scoped assignments."""
-    accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)).all()
+    account_query = select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)
+    if group_id:
+        account_query = account_query.where(GmailAccount.group_id == group_id)
+    accounts = db.scalars(account_query).all()
     observations = {item.id: item for item in db.scalars(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id)).all()}
     grouped: dict[str, dict] = {}
     for account in accounts:
