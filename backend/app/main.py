@@ -294,8 +294,8 @@ def audit_events(account_id: str | None = None, limit: int = Query(default=25, g
 
 
 @app.get("/api/v1/sessions", response_model=list[BrowserSessionResponse])
-def sessions(account_id: str | None = None, group_id: str | None = None, latest_per_account: bool = False, limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
-    return list_sessions(db, settings.demo_org_id, account_id, limit, group_id=group_id, latest_per_account=latest_per_account)
+def sessions(account_id: str | None = None, group_id: str | None = None, latest_per_account: bool = False, purpose: str | None = Query(default=None, max_length=40), outcome: str | None = Query(default=None, max_length=32), limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
+    return list_sessions(db, settings.demo_org_id, account_id, limit, group_id=group_id, latest_per_account=latest_per_account, purpose=purpose, outcome=outcome)
 
 
 @app.get("/api/v1/browser-profiles", response_model=list[BrowserProfileResponse])

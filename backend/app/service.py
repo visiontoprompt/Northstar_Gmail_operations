@@ -7,7 +7,7 @@ import json
 import time
 from urllib.request import ProxyHandler, Request, build_opener
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import timedelta, timezone
 from logging import getLogger
 from pathlib import Path
 
@@ -1103,7 +1103,23 @@ def _ensure_browser_profile(db: Session, account: GmailAccount) -> BrowserProfil
     return profile
 
 
+def _duration_seconds(start, end) -> int | None:
+    if not start or not end:
+        return None
+    # SQLite may return legacy DateTime values as naive while newer rows are
+    # timezone-aware. Normalize both to UTC-naive for arithmetic only; the
+    # original values are still returned unchanged through the API.
+    def normalize(value):
+        return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value
+    return max(0, round((normalize(end) - normalize(start)).total_seconds()))
+
+
 def session_response(session: BrowserSession) -> dict:
+    metadata = session.metadata_json or {}
+    purpose = metadata.get("purpose", "login")
+    operation_status, status_detail = _session_operation_status(session)
+    end_at = session.closed_at or session.last_event_at
+    duration_seconds = _duration_seconds(session.opened_at, end_at)
     return {
         "id": session.id,
         "account_id": session.account_id,
@@ -1115,7 +1131,11 @@ def session_response(session: BrowserSession) -> dict:
         "profile_authenticated_at": session.profile.authenticated_at,
         "state": session.state,
         "login_state": session.login_state,
-        "purpose": (session.metadata_json or {}).get("purpose", "login"),
+        "purpose": purpose,
+        "action": {"login": "Login", "reuse": "Reopen profile", "contacts": "Import contacts", "labels_markers": "Labels & Markers"}.get(purpose, purpose.replace("_", " ").title()),
+        "operation_status": operation_status,
+        "status_detail": status_detail,
+        "duration_seconds": duration_seconds,
         "runtime_type": session.runtime_type,
         "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
         "observer_attached": bool(session.metadata_json.get("observer_attached", False)),
@@ -1126,6 +1146,22 @@ def session_response(session: BrowserSession) -> dict:
         "closed_at": session.closed_at,
         "failure_reason": session.failure_reason,
     }
+
+
+def _session_operation_status(session: BrowserSession) -> tuple[str, str | None]:
+    """Derive an operator-facing outcome from durable session evidence."""
+    successful_states = {"AUTHENTICATED", "CONTACTS_IMPORTED", "LABELS_MARKERS_COMPLETED"}
+    failed_states = {"ACCOUNT_NOT_FOUND", "FAILED", "LAUNCH_FAILED"}
+    interrupted_states = {"VERIFICATION_REQUIRED", "SECURITY_CHALLENGE", "CAPTCHA", "MFA_REQUIRED"}
+    if session.login_state in successful_states:
+        return "COMPLETED", "The operation reached its recorded completion state."
+    if session.login_state in failed_states:
+        return "FAILED", session.failure_reason or "The account or operation was not completed."
+    if session.state == "NEEDS_ATTENTION" or session.login_state in interrupted_states:
+        return "INTERRUPTED", session.failure_reason or "The operation needs attention before it can continue."
+    if session.state in {"STARTING", "LOGIN_REQUIRED", "RUNNING"}:
+        return "IN_PROGRESS", "The isolated browser operation is still in progress."
+    return "NOT_FINISHED", session.failure_reason or "The session closed before the operation was completed."
 
 
 def _session_automation_hint(session: BrowserSession) -> str | None:
@@ -1157,7 +1193,7 @@ def get_session(db: Session, organization_id: str, session_id: str) -> BrowserSe
     return db.scalar(select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.id == session_id))
 
 
-def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25, group_id: str | None = None, latest_per_account: bool = False) -> list[dict]:
+def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25, group_id: str | None = None, latest_per_account: bool = False, purpose: str | None = None, outcome: str | None = None) -> list[dict]:
     query = select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id).order_by(BrowserSession.created_at.desc()).limit(limit)
     if account_id:
         query = query.where(BrowserSession.account_id == account_id)
@@ -1166,7 +1202,12 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
     if latest_per_account:
         ranked = select(BrowserSession.id, func.row_number().over(partition_by=BrowserSession.account_id, order_by=(BrowserSession.created_at.desc(), BrowserSession.id.desc())).label("session_rank")).where(BrowserSession.organization_id == organization_id).subquery()
         query = query.join(ranked, BrowserSession.id == ranked.c.id).where(ranked.c.session_rank == 1)
-    return [session_response(item) for item in db.scalars(query).unique().all()]
+    if purpose:
+        query = query.where(BrowserSession.metadata_json["purpose"].as_string() == purpose)
+    rows = [session_response(item) for item in db.scalars(query).unique().all()]
+    if outcome:
+        rows = [row for row in rows if row["operation_status"] == outcome]
+    return rows
 
 
 def browser_profile_response(profile: BrowserProfile) -> dict:

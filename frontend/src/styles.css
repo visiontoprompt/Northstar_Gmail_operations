@@ -500,6 +500,12 @@ table { min-width: 1050px; }
 .infra-toolbar { background: #fcfdfc; }
 .inventory-count { color: #7f908b; font-family: var(--font-data); font-size: 10px; white-space: nowrap; }
 .infra-table { min-width: 920px; }
+.sessions-table { min-width: 1250px; }
+.session-context-controls { display: flex; align-items: flex-end; gap: 10px; }
+.session-context-controls .group-context { min-width: 190px; }
+.session-filter-row { display: grid; grid-template-columns: minmax(0, 1fr) 195px; align-items: stretch; border-bottom: 1px solid #edf1f0; }
+.session-filter-row .infra-toolbar { border-bottom: 0; }
+.session-action-filter { align-self: center; margin-right: 23px; }
 .infra-table th:last-child, .infra-table td:last-child { text-align: left; }
 .infra-link { display: grid; gap: 4px; padding: 0; color: inherit; background: transparent; text-align: left; }
 .infra-link strong { color: var(--color-ink); font-family: var(--font-data); font-size: 11px; font-weight: 500; }
@@ -542,6 +548,10 @@ table { min-width: 1050px; }
   .infra-heading .heading-actions { margin-top: 17px; }
   .infra-heading .button { width: 100%; }
   .infra-panel .panel-header { display: flex; }
+  .session-context-controls { align-items: stretch; flex-direction: column; gap: 4px; }
+  .session-context-controls .group-context { min-width: 0; }
+  .session-filter-row { display: block; }
+  .session-action-filter { margin: 0 16px 12px; }
   .account-chip-list { max-width: 250px; }
   .proxy-action-strip { align-items: flex-start; flex-direction: column; }
   .proxy-action-strip > div { justify-content: flex-start; }

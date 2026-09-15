@@ -391,6 +391,10 @@ class BrowserSessionResponse(BaseModel):
     state: str
     login_state: str
     purpose: str = "login"
+    action: str = "Login"
+    operation_status: str = "NOT_FINISHED"
+    status_detail: str | None = None
+    duration_seconds: int | None = None
     runtime_type: str
     browser_opened: bool
     observer_attached: bool = False

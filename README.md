@@ -83,6 +83,8 @@ Contact import files are stored separately from account records under the config
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 
+The Sessions page defaults to one latest action per account and can switch to All activity. It filters by group, action (login, reopen profile, contacts, or Labels & Markers), and evidence-derived outcome: in progress, completed, interrupted, not finished, or failed. The outcome is derived from persisted session events and close state, not guessed by the frontend.
+
 Account proxies can be assigned during single-account intake or from account metadata editing. Supported values are `ip:port` and `username:password:ip:port`; the connection is encrypted with the account vault and supplied only to that account's isolated Playwright browser at launch. Proxy usernames and passwords are never returned in API responses or logs.
 
 The Proxies inventory is account-scoped: it groups identical assigned endpoints, lets an administrator test up to 300 selected endpoints, and records safe public-IP, provider, country, city, and latency observations from the configured health-check URL. It also supports reassignment, metadata edits, unassignment, and confirmed removal. A provider or location is shown only after a successful health check; the app never fabricates those values.

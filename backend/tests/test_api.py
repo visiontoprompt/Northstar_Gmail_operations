@@ -116,6 +116,14 @@ def test_latest_sessions_endpoint_returns_one_record_per_account_and_supports_gr
         matching = [session for session in latest if session["account_id"] == account["id"]]
         assert len(matching) == 1
         assert matching[0]["id"] == second["id"]
+        assert matching[0]["action"] == "Login"
+        assert matching[0]["operation_status"] == "IN_PROGRESS"
+        history = client.get(f"/api/v1/sessions?latest_per_account=false&purpose=login&limit=100").json()
+        account_history = [session for session in history if session["account_id"] == account["id"]]
+        assert len(account_history) == 2
+        assert {session["operation_status"] for session in account_history} == {"NOT_FINISHED", "IN_PROGRESS"}
+        unfinished = client.get("/api/v1/sessions?latest_per_account=false&outcome=NOT_FINISHED&limit=100").json()
+        assert any(session["id"] == first["id"] for session in unfinished)
         scoped = client.get(f"/api/v1/sessions?latest_per_account=true&group_id={groups[0]['id']}").json()
         assert any(session["account_id"] == account["id"] for session in scoped)
 
