@@ -364,6 +364,7 @@ def test_delete_archives_account_closes_session_and_removes_it_from_registry() -
         assert "archived" in blocked.json()["detail"].lower()
         audit = client.get("/api/v1/audit-events", params={"account_id": account["id"], "limit": 20}).json()
         assert any(event["action"] == "account.archived" for event in audit)
+        assert any(event["target_id"] == session["id"] for event in audit)
         assert "hidden-password" not in str(audit)
 
 

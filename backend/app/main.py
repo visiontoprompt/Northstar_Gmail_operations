@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -284,7 +284,9 @@ def recover_stale_session_locks(db: Session = Depends(get_db)) -> dict[str, int]
 def audit_events(account_id: str | None = None, limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
     query = select(AuditEvent).where(AuditEvent.organization_id == settings.demo_org_id).order_by(AuditEvent.created_at.desc()).limit(limit)
     if account_id:
-        query = query.where(AuditEvent.target_id == account_id)
+        # Session events target the session id, so include them when their
+        # structured metadata identifies the account being inspected.
+        query = query.where(or_(AuditEvent.target_id == account_id, AuditEvent.metadata_json["account_id"].as_string() == account_id))
     return [{"id": item.id, "action": item.action, "target_type": item.target_type, "target_id": item.target_id, "result": item.result, "metadata": item.metadata_json, "created_at": item.created_at} for item in db.scalars(query).all()]
 
 
