@@ -14,7 +14,7 @@ from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, ProxyAssignmentRequest, ProxyDeleteRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest
-from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, assign_proxy_accounts, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_browser_profiles, list_contact_files, list_login_jobs, list_operation_drafts, list_proxies, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, remove_proxy_assignments, resume_login_job, session_response, start_contacts_import, start_labels_markers_operation, start_login_session, start_security_operation, test_proxy, update_account_metadata, update_credentials, update_login_job_state, update_proxy
+from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, assign_proxy_accounts, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_browser_profiles, list_contact_files, list_login_jobs, list_operation_drafts, list_proxies, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, remove_proxy_assignments, resume_login_job, session_response, start_addons_operation, start_contacts_import, start_labels_markers_operation, start_login_session, start_security_operation, test_proxy, update_account_metadata, update_credentials, update_login_job_state, update_proxy
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
@@ -409,6 +409,15 @@ def labels_markers_operation(account_id: str, db: Session = Depends(get_db)) -> 
 def security_operation(account_id: str, db: Session = Depends(get_db)) -> dict:
     try:
         return session_response(start_security_operation(db, settings.demo_org_id, "admin_demo", account_id))
+    except ImportValidationError as exc:
+        message = str(exc).lower()
+        raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/accounts/{account_id}/addons", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
+def addons_operation(account_id: str, db: Session = Depends(get_db)) -> dict:
+    try:
+        return session_response(start_addons_operation(db, settings.demo_org_id, "admin_demo", account_id))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc

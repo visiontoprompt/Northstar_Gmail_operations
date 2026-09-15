@@ -231,3 +231,31 @@ def test_security_operation_requires_saved_profile_and_closes_after_verification
         assert finished["login_state"] == "SECURITY_COMPLETED"
         assert finished["operation_status"] == "COMPLETED"
         assert finished["browser_opened"] is False
+
+
+def test_addons_operation_requires_saved_profile_and_closes_after_three_installs(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="addons@example.com")
+        missing = client.post(f"/api/v1/accounts/{account['id']}/addons")
+        assert missing.status_code == 422
+
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/close")
+
+        started = client.post(f"/api/v1/accounts/{account['id']}/addons")
+        assert started.status_code == 201
+        session = client.get(f"/api/v1/sessions/{started.json()['id']}").json()
+        assert session["purpose"] == "addons"
+        assert session["action"] == "Install Gmail add-ons"
+        assert session["login_state"] == "AUTHENTICATED"
+
+        service._report_observer_event(session["id"], "addons.completed", "Three Marketplace listings verified")
+        finished = client.get(f"/api/v1/sessions/{session['id']}").json()
+        assert finished["state"] == "CLOSED"
+        assert finished["login_state"] == "ADDONS_COMPLETED"
+        assert finished["operation_status"] == "COMPLETED"
+        assert finished["browser_opened"] is False

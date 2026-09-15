@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _click_gmail_addons_sidebar_toggle, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -137,6 +137,15 @@ class _FakeFinalImportPage:
         return True
 
 
+class _FakeAddonsSidebarPage:
+    def __init__(self):
+        self.selector = None
+
+    def evaluate(self, _script: str, selector: str):
+        self.selector = selector
+        return True
+
+
 class _FakeSecurityPage:
     def __init__(self, url: str):
         self.url = url
@@ -206,6 +215,13 @@ def test_contacts_clicks_the_configured_final_import_button_selector():
     assert _contacts_click_final_import(page) is True
     assert getattr(page.button, "clicked", False) is True
     assert page.evaluated_selector == _CONTACTS_FINAL_IMPORT_SELECTOR
+
+
+def test_addons_clicks_the_configured_gmail_sidebar_selector():
+    page = _FakeAddonsSidebarPage()
+
+    assert _click_gmail_addons_sidebar_toggle(page) is True
+    assert page.selector == _GMAIL_ADDONS_SIDEBAR_SELECTOR
 
 
 def test_contacts_clicks_exact_visible_action_text_before_title_or_container():

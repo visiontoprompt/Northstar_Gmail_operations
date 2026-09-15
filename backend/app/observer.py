@@ -64,6 +64,7 @@ _OPERATION_FAILURE_EVENTS = {
     "contacts": "contacts.failed",
     "labels_markers": "labels_markers.failed",
     "security": "security.failed",
+    "addons": "addons.failed",
 }
 _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], input#password"
 _OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
@@ -90,6 +91,7 @@ class BrowserObserver:
         connect_timeout: float = 12.0,
         purpose: str = "login",
         contacts_csv_path: str | None = None,
+        addon_candidates: list[dict[str, str]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.profile_id = profile_id
@@ -109,6 +111,7 @@ class BrowserObserver:
         self._connect_timeout = connect_timeout
         self.purpose = purpose
         self.contacts_csv_path = contacts_csv_path
+        self.addon_candidates = addon_candidates or []
         self._contacts_imported = False
         self._contacts_uploaded = False
         self._contacts_confirm_clicked = False
@@ -125,6 +128,17 @@ class BrowserObserver:
         self._security_clicked = False
         self._security_tick_count = 0
         self._security_completion_ticks = 0
+        self._addons_tick_count = 0
+        self._addons_sidebar_opened = False
+        self._addons_get_opened = False
+        self._addons_search_attempted = False
+        self._addons_listing_opened = False
+        self._addons_install_attempted = False
+        self._addons_current_index = 0
+        self._addons_installed: list[str] = []
+        self._addons_skipped: list[str] = []
+        self._addons_wait_ticks = 0
+        self._addons_permission_reported = False
         self._start_navigation_attempts = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -232,7 +246,7 @@ class BrowserObserver:
                     self._notify_browser_closed()
 
     def _tick(self, browser: "Browser | BrowserContext") -> None:
-        page = _active_page(browser)
+        page = _active_page(browser, self.purpose)
         if page is None:
             if not self._reported_no_page:
                 logger.warning("observer found no open page for session %s; pausing for the browser window", self.session_id)
@@ -304,6 +318,8 @@ class BrowserObserver:
             _handle_labels_markers_tick(self, page, host)
         if self.purpose == "security":
             _handle_security_tick(self, page, host)
+        if self.purpose == "addons":
+            _handle_addons_tick(self, page, host)
 
         state_key = (signal.value, url)
         if state_key in self._logged_states:
@@ -419,10 +435,17 @@ def _open_page_url(page: "Page") -> str:
         return ""
 
 
-def _page_rank(url: str) -> int:
+def _page_rank(url: str, purpose: str | None = None) -> int:
     if not url:
         return 3
     host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if purpose == "addons":
+        if host == "workspace.google.com":
+            return 0
+        if host == "mail.google.com":
+            return 1
+        if host in _LOGIN_HOSTS:
+            return 2
     if host in _LOGIN_HOSTS:
         return 0
     if host == "mail.google.com" or url.startswith(_BLANK_URL_PREFIXES):
@@ -430,7 +453,7 @@ def _page_rank(url: str) -> int:
     return 1
 
 
-def _active_page(owner: "Browser | BrowserContext") -> "Page | None":
+def _active_page(owner: "Browser | BrowserContext", purpose: str | None = None) -> "Page | None":
     if hasattr(owner, "contexts"):
         candidates = [page for context in owner.contexts for page in context.pages]
     else:
@@ -439,7 +462,7 @@ def _active_page(owner: "Browser | BrowserContext") -> "Page | None":
         return None
     # Prefer the sign-in tab: a remembered profile can leave a blank/first-run
     # window in another tab, and the automation must latch onto accounts.google.
-    ranked = sorted(candidates, key=lambda page: _page_rank(_open_page_url(page)))
+    ranked = sorted(candidates, key=lambda page: _page_rank(_open_page_url(page), purpose))
     for page in ranked:
         if _open_page_url(page):
             return page
@@ -992,6 +1015,293 @@ def _handle_labels_markers_tick(observer: "BrowserObserver", page: "Page", host:
         return
     observer._emit("labels_markers.completed", "Gmail Importance markers enabled and Spam shown")
     observer._stop.set()
+
+
+_GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
+_GOOGLE_WORKSPACE_MARKETPLACE_URL = "https://workspace.google.com/marketplace/"
+_GMAIL_ADDONS_SIDEBAR_SELECTOR = r"body > div.tVu25 > div.nH > div > div.nH.aqk.aql.bkL > div:nth-child(3) > div > div.bAw\.bcf.it > div.brC-dA-I-Jw > div"
+_ADDONS_SIDEBAR_TOGGLE_LABELS = (
+    "show side panel",
+    "hide side panel",
+    "afficher le panneau latéral",
+    "masquer le panneau latéral",
+    "mostrar panel lateral",
+    "ocultar panel lateral",
+)
+_ADDONS_GET_LABELS = (
+    "get add-ons",
+    "get addons",
+    "obtenir des modules complémentaires",
+    "obtenir des modules complementaires",
+    "obtener complementos",
+    "obtener complementos de google workspace",
+)
+_ADDONS_SEARCH_LABELS = (
+    "search",
+    "search apps",
+    "search marketplace",
+    "rechercher",
+    "buscar",
+)
+_ADDONS_INSTALL_LABELS = ("install", "installer", "instalar", "obtenir", "get")
+_ADDONS_ALREADY_INSTALLED_LABELS = (
+    "uninstall",
+    "désinstaller",
+    "desinstaller",
+    "desinstalar",
+    "installed",
+    "installé",
+    "instalado",
+)
+_ADDONS_PERMISSION_TERMS = (
+    "allow this application",
+    "allow access",
+    "autoriser",
+    "autorizar",
+    "permissions",
+    "permissions requested",
+    "access your google account",
+    "acceder a tu cuenta de google",
+    "accéder à votre compte google",
+    "grant access",
+    "paid plan",
+    "free trial",
+    "payment",
+    "subscription",
+)
+
+
+def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:
+    """Install up to three approved Marketplace add-ons in an authenticated profile.
+
+    Gmail's add-on rail and Marketplace are both dynamic and localized. The
+    flow therefore uses the supplied rail selector only as a first-choice
+    toggle, then semantic visible labels for the rest. It never accepts a
+    third-party permission, OAuth, billing, or subscription prompt.
+    """
+    observer._addons_tick_count += 1
+    if observer._addons_tick_count > 240:
+        observer._emit("addons.failed", "The Marketplace did not verify three add-on installations before the bounded timeout", result="failure")
+        observer._stop.set()
+        return
+    if len(observer.addon_candidates) < 1:
+        observer._emit("addons.failed", "No approved Gmail add-on candidates were available", result="failure")
+        observer._stop.set()
+        return
+
+    if host == "mail.google.com":
+        if not observer._addons_sidebar_opened:
+            if _click_gmail_addons_sidebar_toggle(page):
+                observer._addons_sidebar_opened = True
+                observer._emit("addons.sidebar_opened", "opened the Gmail add-ons sidebar")
+            return
+        if not observer._addons_get_opened:
+            if _click_element_with_text(page, _ADDONS_GET_LABELS):
+                observer._addons_get_opened = True
+                observer._emit("addons.marketplace_opened", "opened Get add-ons from the Gmail sidebar")
+            return
+        return
+
+    if host != "workspace.google.com":
+        return
+
+    if observer._addons_current_index >= len(observer.addon_candidates):
+        observer._emit("addons.failed", f"Only {len(observer._addons_installed)} approved add-ons were installed; three were required", result="failure")
+        observer._stop.set()
+        return
+
+    candidate = observer.addon_candidates[observer._addons_current_index]
+    name = candidate.get("name", "approved add-on")
+    url = page.url or ""
+    is_listing = "/marketplace/app/" in urlparse(url).path.lower()
+
+    if not is_listing:
+        observer._addons_wait_ticks += 1
+        if not observer._addons_search_attempted:
+            observer._addons_search_attempted = True
+            if _addons_search_marketplace(page, name):
+                observer._emit("addons.search_submitted", f"searched Marketplace for {name}")
+                return
+            # The Marketplace occasionally opens in a reduced shell without a
+            # search field. The candidate URL is still an allowlisted official
+            # Marketplace listing, so use it as a bounded fallback.
+            _navigate_settings(page, url if "/marketplace/app/" in url else candidate["url"])
+            observer._emit("addons.listing_opened", f"opened the allowlisted Marketplace listing for {name}")
+            return
+        if _addons_click_search_result(page, name):
+            observer._emit("addons.search_result_opened", f"opened the Marketplace search result for {name}")
+            return
+        if observer._addons_wait_ticks >= 6:
+            _navigate_settings(page, candidate["url"])
+            observer._emit("addons.listing_fallback", f"opened the allowlisted Marketplace listing for {name} after search results did not expose the card")
+        return
+
+    if _addons_permission_dialog_visible(page):
+        if not observer._addons_permission_reported:
+            observer._addons_permission_reported = True
+            observer._emit("addons.permission_required", f"Marketplace requested operator approval before installing {name}", result="attention")
+        # Keep the dedicated window open for the operator. If the operator
+        # approves the Marketplace dialog, the next tick can verify the
+        # resulting listing and continue without relaunching the profile.
+        return
+    observer._addons_permission_reported = False
+
+    if not observer._addons_listing_opened:
+        observer._addons_listing_opened = True
+        observer._emit("addons.listing_ready", f"Marketplace listing ready for {name}")
+
+    if _addons_listing_is_installed(page):
+        observer._addons_skipped.append(name)
+        observer._emit("addons.already_installed", f"{name} is already installed; counted toward the per-account maximum only once")
+        _addons_advance(observer, page)
+        return
+
+    if not observer._addons_install_attempted:
+        if _addons_click_install(page):
+            observer._addons_install_attempted = True
+            observer._addons_wait_ticks = 0
+            observer._emit("addons.install_clicked", f"clicked Install for {name}")
+        else:
+            observer._addons_wait_ticks += 1
+            if observer._addons_wait_ticks >= 8:
+                observer._emit("addons.failed", f"Marketplace Install was not available for {name}", result="failure")
+                observer._stop.set()
+        return
+
+    observer._addons_wait_ticks += 1
+    if _addons_permission_dialog_visible(page):
+        if not observer._addons_permission_reported:
+            observer._addons_permission_reported = True
+            observer._emit("addons.permission_required", f"Marketplace requested operator approval before completing {name}", result="attention")
+        return
+    observer._addons_permission_reported = False
+    if _addons_listing_is_installed(page):
+        observer._addons_installed.append(name)
+        observer._emit("addons.installed", f"verified {name} is installed")
+        if len(observer._addons_installed) >= 3:
+            installed = ", ".join(observer._addons_installed)
+            observer._emit("addons.completed", f"verified three Gmail add-ons: {installed}")
+            observer._stop.set()
+            return
+        _addons_advance(observer, page)
+        return
+    if observer._addons_wait_ticks >= 20:
+        observer._emit("addons.failed", f"Marketplace did not verify installation of {name}", result="failure")
+        observer._stop.set()
+
+
+def _click_gmail_addons_sidebar_toggle(page: "Page") -> bool:
+    """Click Gmail's right-rail toggle, with a semantic fallback for locales."""
+    try:
+        clicked = page.evaluate(
+            """selector => {
+                const node = document.querySelector(selector);
+                if (!node) return false;
+                const rect = node.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                node.click();
+                return true;
+            }""",
+            _GMAIL_ADDONS_SIDEBAR_SELECTOR,
+        )
+        if clicked:
+            return True
+    except Exception:  # noqa: BLE001 - semantic fallback below
+        pass
+    return _click_element_with_text(page, _ADDONS_SIDEBAR_TOGGLE_LABELS)
+
+
+def _addons_search_marketplace(page: "Page", name: str) -> bool:
+    try:
+        for field in page.locator("input").all():
+            try:
+                if not field.is_visible():
+                    continue
+                label = " ".join((field.get_attribute("aria-label") or "", field.get_attribute("placeholder") or "")).strip().lower()
+                if not any(term in label for term in _ADDONS_SEARCH_LABELS):
+                    continue
+                field.fill(name, timeout=2000)
+                field.press("Enter", timeout=2000)
+                return True
+            except Exception:  # noqa: BLE001 - try the next visible search field
+                continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _addons_click_search_result(page: "Page", name: str) -> bool:
+    wanted = name.lower().replace("™", "").strip()
+    try:
+        for card in page.locator('a[href*="/marketplace/app/"], [role="link"]').all():
+            try:
+                if not card.is_visible():
+                    continue
+                href = card.get_attribute("href") or ""
+                text = (card.inner_text() or "").replace("™", "").strip().lower()
+                if "/marketplace/app/" not in href and wanted not in text:
+                    continue
+                if wanted not in text:
+                    continue
+                card.click(timeout=2000)
+                return True
+            except Exception:  # noqa: BLE001 - keep scanning result cards
+                continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _addons_click_install(page: "Page") -> bool:
+    try:
+        for control in page.locator("button, [role=button], a").all():
+            try:
+                if not control.is_visible():
+                    continue
+                text = (control.inner_text() or "").strip().lower()
+                if text in _ADDONS_INSTALL_LABELS:
+                    control.click(timeout=2000)
+                    return True
+            except Exception:  # noqa: BLE001 - keep scanning localized controls
+                continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _addons_listing_is_installed(page: "Page") -> bool:
+    try:
+        for control in page.locator("button, [role=button], a").all():
+            if not control.is_visible():
+                continue
+            text = (control.inner_text() or "").strip().lower()
+            if text in _ADDONS_ALREADY_INSTALLED_LABELS:
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _addons_permission_dialog_visible(page: "Page") -> bool:
+    try:
+        for dialog in page.locator('[role="dialog"], [aria-modal="true"]').all():
+            if not dialog.is_visible():
+                continue
+            text = (dialog.inner_text() or "").replace("\n", " ").strip().lower()
+            if any(term in text for term in _ADDONS_PERMISSION_TERMS):
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _addons_advance(observer: "BrowserObserver", page: "Page") -> None:
+    observer._addons_current_index += 1
+    observer._addons_search_attempted = False
+    observer._addons_listing_opened = False
+    observer._addons_install_attempted = False
+    observer._addons_wait_ticks = 0
+    _navigate_settings(page, _GOOGLE_WORKSPACE_MARKETPLACE_URL)
 
 
 def _handle_security_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:

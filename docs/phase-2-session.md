@@ -49,8 +49,13 @@ start these verified operations in the same isolated browser boundary:
 - `POST /api/v1/accounts/{id}/security` — open Google Account Enhanced Safe
   Browsing, enable it when needed, verify the resulting control state in
   English, French, or Spanish, then close the browser session.
+- `POST /api/v1/accounts/{id}/addons` — open Gmail at the inbox, search the
+  curated Workspace Marketplace catalog, and install and verify up to three
+  listings in the saved profile. Permission, OAuth, billing, and subscription
+  prompts pause the session for operator attention.
 
-Both operations require `browser_profiles.authenticated_at`, never combine a
+These operations require `browser_profiles.authenticated_at`, never combine a
 new login with a settings mutation, and finish only after a verified terminal
 event. Their sessions are recorded with `purpose`, `operation_status`, and a
-terminal login state (`LABELS_MARKERS_COMPLETED` or `SECURITY_COMPLETED`).
+terminal login state (`LABELS_MARKERS_COMPLETED`, `SECURITY_COMPLETED`, or
+`ADDONS_COMPLETED`).

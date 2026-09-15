@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from .config import get_settings
 from .contacts import build_google_contacts_csv, contact_file_checksum, new_contact_file_id, parse_emails, validate_contact_file, write_contact_file, write_contacts_upload
+from .addons import select_addon_candidates
 from .db import SessionLocal
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, ProxyInventory, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
@@ -581,7 +582,7 @@ def _locks() -> RedisLocks:
 _observers: dict[str, BrowserObserver] = {}
 
 
-def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login", contacts_csv_path: str | None = None) -> bool:
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login", contacts_csv_path: str | None = None, addon_candidates: list[dict[str, str]] | None = None) -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
         logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
@@ -605,6 +606,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
             if purpose == "security"
             else "https://mail.google.com/"
             if purpose == "reuse"
+            else "https://mail.google.com/mail/u/0/#inbox"
+            if purpose == "addons"
             else None
         ),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
@@ -617,6 +620,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         settle_seconds=settings.browser_observe_settle_seconds,
         purpose=purpose,
         contacts_csv_path=contacts_csv_path,
+        addon_candidates=addon_candidates,
     )
     _observers[session_id] = observer
     observer.start()
@@ -768,7 +772,12 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
         session = db.get(BrowserSession, session_id)
         if not session:
             return
-        terminal_events = {"login.failed", "reuse.failed", "contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed", "security.failed", "security.completed"}
+        terminal_events = {"login.failed", "reuse.failed", "contacts.failed", "contacts.imported", "labels_markers.failed", "labels_markers.completed", "security.failed", "security.completed", "addons.failed", "addons.completed"}
+        if event == "addons.permission_required" and session.state in ACTIVE_SESSION_STATES:
+            session.state = "NEEDS_ATTENTION"
+            session.login_state = "VERIFICATION_REQUIRED"
+            session.failure_reason = detail[:300] or "Marketplace permission or billing approval is required"
+            session.last_event_at = utcnow()
         if event in terminal_events and session.state in ACTIVE_SESSION_STATES:
             # The observer owns the browser-close operation and will release
             # the process in its finally block. Finalize the durable session
@@ -782,16 +791,20 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 session.login_state = "LABELS_MARKERS_COMPLETED"
             elif event == "security.completed":
                 session.login_state = "SECURITY_COMPLETED"
+            elif event == "addons.completed":
+                session.login_state = "ADDONS_COMPLETED"
             elif event == "security.failed":
                 session.login_state = "SECURITY_FAILED"
+            elif event == "addons.failed":
+                session.login_state = "ADDONS_FAILED"
             elif event == "login.failed":
                 session.login_state = "FAILED"
             elif event == "reuse.failed":
                 session.login_state = "FAILED"
             session.closed_at = now
             session.last_event_at = now
-            session.failure_reason = None if event in {"contacts.imported", "labels_markers.completed", "security.completed"} else (detail[:300] or "Operation failed before completion")
-            if event in {"contacts.imported", "labels_markers.completed", "security.completed"}:
+            session.failure_reason = None if event in {"contacts.imported", "labels_markers.completed", "security.completed", "addons.completed"} else (detail[:300] or "Operation failed before completion")
+            if event in {"contacts.imported", "labels_markers.completed", "security.completed", "addons.completed"}:
                 session.account.login_status = "AUTHENTICATED"
                 session.account.profile_status = "SAVED"
             elif event == "login.failed" and session.profile.authenticated_at is None:
@@ -810,6 +823,8 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 "labels_markers.failed": "LABELS_MARKERS_FAILED",
                 "security.completed": "SECURITY_COMPLETED",
                 "security.failed": "SECURITY_FAILED",
+                "addons.completed": "ADDONS_COMPLETED",
+                "addons.failed": "ADDONS_FAILED",
                 "login.failed": "LOGIN_FAILED",
                 "reuse.failed": "REOPEN_FAILED",
             }[event]
@@ -823,10 +838,12 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 "labels_markers.failed": "LABELS_MARKERS_FAILED",
                 "security.completed": "SECURITY_COMPLETED",
                 "security.failed": "SECURITY_FAILED",
+                "addons.completed": "ADDONS_COMPLETED",
+                "addons.failed": "ADDONS_FAILED",
                 "login.failed": "LOGIN_FAILED",
                 "reuse.failed": "REOPEN_FAILED",
             }[event]
-            db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="success" if event in {"contacts.imported", "labels_markers.completed", "security.completed"} else "failure", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": terminal_result}))
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="success" if event in {"contacts.imported", "labels_markers.completed", "security.completed", "addons.completed"} else "failure", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": terminal_result}))
         db.commit()
         logger.info("session %s: auto-login %s %s", session_id, event, result)
     finally:
@@ -1168,7 +1185,7 @@ def session_response(session: BrowserSession) -> dict:
         "state": session.state,
         "login_state": session.login_state,
         "purpose": purpose,
-        "action": {"login": "Login", "reuse": "Reopen profile", "contacts": "Import contacts", "security": "Browser security", "labels_markers": "Labels & Markers"}.get(purpose, purpose.replace("_", " ").title()),
+        "action": {"login": "Login", "reuse": "Reopen profile", "contacts": "Import contacts", "security": "Browser security", "labels_markers": "Labels & Markers", "addons": "Install Gmail add-ons"}.get(purpose, purpose.replace("_", " ").title()),
         "operation_status": operation_status,
         "status_detail": status_detail,
         "duration_seconds": duration_seconds,
@@ -1186,11 +1203,11 @@ def session_response(session: BrowserSession) -> dict:
 
 def _session_operation_status(session: BrowserSession) -> tuple[str, str | None]:
     """Derive an operator-facing outcome from durable session evidence."""
-    successful_states = {"AUTHENTICATED", "CONTACTS_IMPORTED", "LABELS_MARKERS_COMPLETED", "SECURITY_COMPLETED"}
-    failed_states = {"ACCOUNT_NOT_FOUND", "FAILED", "LAUNCH_FAILED", "SECURITY_FAILED"}
+    successful_states = {"AUTHENTICATED", "CONTACTS_IMPORTED", "LABELS_MARKERS_COMPLETED", "SECURITY_COMPLETED", "ADDONS_COMPLETED"}
+    failed_states = {"ACCOUNT_NOT_FOUND", "FAILED", "LAUNCH_FAILED", "SECURITY_FAILED", "ADDONS_FAILED"}
     interrupted_states = {"VERIFICATION_REQUIRED", "SECURITY_CHALLENGE", "CAPTCHA", "MFA_REQUIRED"}
     purpose = (session.metadata_json or {}).get("purpose", "login")
-    if purpose in {"contacts", "labels_markers", "security"} and session.login_state == "AUTHENTICATED":
+    if purpose in {"contacts", "labels_markers", "security", "addons"} and session.login_state == "AUTHENTICATED":
         return "NOT_FINISHED", "The profile is authenticated, but this operation has not reached its verified completion event."
     if session.login_state in successful_states:
         return "COMPLETED", "The operation reached its recorded completion state."
@@ -1543,9 +1560,9 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
-    if purpose not in {"login", "reuse", "contacts", "labels_markers", "security"}:
-        raise ImportValidationError("Session purpose must be 'login', 'reuse', 'contacts', 'labels_markers', or 'security'")
-    if purpose in {"reuse", "contacts", "labels_markers", "security"} and profile.authenticated_at is None:
+    if purpose not in {"login", "reuse", "contacts", "labels_markers", "security", "addons"}:
+        raise ImportValidationError("Session purpose must be 'login', 'reuse', 'contacts', 'labels_markers', 'security', or 'addons'")
+    if purpose in {"reuse", "contacts", "labels_markers", "security", "addons"} and profile.authenticated_at is None:
         raise ImportValidationError("No authenticated profile saved for this account — complete a login session first so the profile gets saved")
     if purpose == "contacts" and not contacts_csv_path:
         raise ImportValidationError("A contacts CSV file is required for a contacts session")
@@ -1564,8 +1581,12 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         # Nothing is persisted for this attempt, so the account/profile stay
         # clean and a later attempt can retry without a zombie session blocking it.
         raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
-    existing_auth = purpose in {"reuse", "contacts", "labels_markers", "security"}
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path})
+    existing_auth = purpose in {"reuse", "contacts", "labels_markers", "security", "addons"}
+    addon_candidates = select_addon_candidates(3) if purpose == "addons" else []
+    session_metadata = {"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path}
+    if purpose == "addons":
+        session_metadata.update({"addons_requested": 3, "addons_candidates": addon_candidates})
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type="LOCAL_CHROME", metadata_json=session_metadata)
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
@@ -1577,7 +1598,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.commit()
-    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose, contacts_csv_path=contacts_csv_path)
+    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose, contacts_csv_path=contacts_csv_path, addon_candidates=addon_candidates)
     logger.info("session %s: observer started=%s", session.id, observer_started)
     return get_session(db, organization_id, session.id)
 
@@ -1685,6 +1706,11 @@ def start_labels_markers_operation(db: Session, organization_id: str, actor_id: 
 def start_security_operation(db: Session, organization_id: str, actor_id: str, account_id: str) -> BrowserSession:
     """Start Enhanced Safe Browsing verification in the saved profile."""
     return start_login_session(db, organization_id, actor_id, account_id, purpose="security")
+
+
+def start_addons_operation(db: Session, organization_id: str, actor_id: str, account_id: str) -> BrowserSession:
+    """Start the bounded Marketplace installation in the saved profile."""
+    return start_login_session(db, organization_id, actor_id, account_id, purpose="addons")
 
 
 def record_session_event(db: Session, organization_id: str, actor_id: str, session_id: str, event_type: str, detail: str | None = None) -> BrowserSession:

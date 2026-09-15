@@ -14,6 +14,7 @@ This phase can:
 - version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
 - keep reusable CSV/VCF/TXT contact files in an organization library and launch profile-backed imports at Google Contacts.
+- open Gmail's Add-ons rail and install up to three randomly selected, allowlisted Workspace Marketplace listings per authenticated account, with a configurable bulk concurrency limit.
 
 The complete product direction and delivery sequence are defined in [ROADMAP.md](ROADMAP.md). The system topology, domain ownership, state model, and module boundaries are defined in [docs/architecture.md](docs/architecture.md).
 
@@ -83,13 +84,17 @@ Contact import files are stored separately from account records under the config
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 
-The Sessions page defaults to one latest action per account and can switch to All activity. It filters by group, action (login, reopen profile, contacts, or Labels & Markers), and evidence-derived outcome: in progress, completed, interrupted, not finished, or failed. The outcome is derived from persisted session events and close state, not guessed by the frontend.
+The Sessions page defaults to one latest action per account and can switch to All activity. It filters by group, action (login, reopen profile, contacts, Labels & Markers, or Gmail add-ons), and evidence-derived outcome: in progress, completed, interrupted, not finished, or failed. The outcome is derived from persisted session events and close state, not guessed by the frontend.
 
 Account proxies can be assigned during single-account intake or from account metadata editing. Supported values are `ip:port` and `username:password:ip:port`; the connection is encrypted with the account vault and supplied only to that account's isolated Playwright browser at launch. Proxy usernames and passwords are never returned in API responses or logs.
 
 The Proxies inventory is account-scoped and group-filterable: it groups identical assigned endpoints within the selected group scope, lets an administrator test up to 300 selected endpoints, and records safe public-IP, provider, country, city, and latency observations from the configured health-check URL. It also supports reassignment, metadata edits, unassignment, and confirmed removal. A provider or location is shown only after a successful health check; the app never fabricates those values.
 
 Login page handling is observation-first: normal Google interstitials can be classified, account-not-found copy is recognized in English and French, and CAPTCHA/MFA/security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
+
+Gmail add-ons use a curated set of official Workspace Marketplace listing URLs. The observer searches the Marketplace and verifies up to three installs per account. Google or a Marketplace publisher may still require permission, OAuth, billing, or subscription approval; those prompts are recorded as `NEEDS_ATTENTION` and are never accepted automatically.
+
+Gmail add-ons use a curated set of official Workspace Marketplace listing URLs. The observer searches the Marketplace and verifies up to three installs per account. Google or a Marketplace publisher may still require permission, OAuth, billing, or subscription approval; those prompts are recorded as `NEEDS_ATTENTION` and are never accepted automatically.
 
 ## Verification
 

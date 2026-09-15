@@ -324,7 +324,7 @@ class LoginJobProgressResponse(BaseModel):
 
 
 class SessionStartRequest(BaseModel):
-    purpose: Literal["login", "reuse", "contacts", "labels_markers", "security"] = "login"
+    purpose: Literal["login", "reuse", "contacts", "labels_markers", "security", "addons"] = "login"
 
 
 class AuditEventResponse(BaseModel):
