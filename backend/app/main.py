@@ -13,7 +13,7 @@ from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
-from .service import ImportValidationError, account_response, add_account, add_contact_file, archive_account, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_contact_files, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, resume_login_job, session_response, start_contacts_import, start_labels_markers_operation, start_login_session, update_account_metadata, update_credentials, update_login_job_state
+from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_contact_files, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, resume_login_job, session_response, start_contacts_import, start_labels_markers_operation, start_login_session, update_account_metadata, update_credentials, update_login_job_state
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
@@ -61,7 +61,7 @@ async def lifespan(_app: FastAPI):
     stop_login_worker()
 
 
-app = FastAPI(title=settings.app_name, version="0.1.0", description="Phase 1 account onboarding; no Gmail login automation", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.1.0", description="Profile-backed Gmail account operations; no Gmail API or OAuth integration", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -126,7 +126,8 @@ def create_account(payload: AccountStructuredInput, db: Session = Depends(get_db
 @app.patch("/api/v1/accounts/{account_id}", response_model=AccountResponse)
 def edit_account_metadata(account_id: str, payload: AccountMetadataUpdate, db: Session = Depends(get_db)) -> dict:
     try:
-        return update_account_metadata(db, settings.demo_org_id, "admin_demo", account_id, payload.proxy_label, payload.proxy_region)
+        proxy_value = payload.proxy if "proxy" in payload.model_fields_set else _UNSET
+        return update_account_metadata(db, settings.demo_org_id, "admin_demo", account_id, payload.proxy_label, payload.proxy_region, proxy_value)
     except ImportValidationError as exc:
         raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 409, detail=str(exc)) from exc
 

@@ -6,7 +6,7 @@ This document describes the frontend and backend contract for the account detail
 
 Open an account from the registry to access:
 
-- Edit account metadata: proxy label and proxy region are editable; the Gmail address remains immutable. The API validates and audits the update.
+- Edit account metadata: proxy connection (`ip:port` or `username:password:ip:port`), proxy label, and proxy region are editable; the Gmail address remains immutable. Proxy credentials are encrypted and never returned. The API validates and audits the update.
 - Move group: choose another capacity-planned group. The API checks destination capacity and audits the transactional move.
 - Delete account: requires typing the exact email. The API archives the account, closes active sessions, and leaves profile/secrets subject to retention policy.
 - Login: opens the existing isolated profile-backed session flow. Automated credential entry, verification solving, and security bypass are outside this frontend milestone.

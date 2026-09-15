@@ -8,7 +8,7 @@ This phase can:
 - add one account or preview/import many accounts using `email:password:recovery:2fa`;
 - validate and deduplicate accounts inside an organization;
 - keep credential material in an encrypted secrets table, separate from operational metadata;
-- reserve dedicated proxy and persistent browser-profile metadata for later provisioning;
+- reserve dedicated proxy metadata and persistent browser-profile metadata for profile-backed operations;
 - open a durable, profile-backed login session and record its lifecycle;
 - queue a whole group for concurrency-controlled isolated profile dispatch;
 - version encrypted credential updates and mark accounts for re-authentication;
@@ -82,6 +82,8 @@ The raw import line is accepted only at the API boundary, parsed in memory, encr
 Contact import files are stored separately from account records under the configured profile root. The registry Contacts action asks the operator to select a ready library file, then starts the import only for an authenticated profile. File contents are not returned by the API or written to audit metadata.
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
+
+Account proxies can be assigned during single-account intake or from account metadata editing. Supported values are `ip:port` and `username:password:ip:port`; the connection is encrypted with the account vault and supplied only to that account's isolated Playwright browser at launch. Proxy usernames and passwords are never returned in API responses or logs.
 
 Login page handling is observation-first: normal Google interstitials can be classified, account-not-found copy is recognized in English and French, and CAPTCHA/MFA/security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
 

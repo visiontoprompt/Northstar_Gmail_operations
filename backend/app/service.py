@@ -19,6 +19,7 @@ from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, remove_local_profile, resolve_browser_executable
 from .observer import BrowserObserver
 from .login_policy import PageObservation, classify_page
+from .proxy import ProxyValidationError, parse_proxy, proxy_from_payload
 from .worker.locks import RedisLocks, account_lock_key
 from .worker.queue import RedisQueue
 from urllib.parse import urlparse
@@ -29,6 +30,7 @@ WORKER_PREFIX = "worker-"
 API_WORKER_ID = "orchestrator-api"
 OPERATION_TYPES = {"contacts", "security", "labels", "apps", "mail", "addons", "alerts"}
 FORBIDDEN_OPERATION_KEY_PARTS = ("password", "recovery", "2fa", "totp", "cookie", "token", "secret")
+_UNSET = object()
 
 
 def _worker_token() -> str:
@@ -131,7 +133,7 @@ def profile_folder_name(organization_id: str, email: str) -> str:
     return f"{local}__{org}"
 
 
-def _add_credential_revision(db: Session, organization_id: str, account_id: str, payload: dict[str, str], recovery_hint: str, two_fa_configured: bool, actor_id: str, version: int = 1) -> None:
+def _add_credential_revision(db: Session, organization_id: str, account_id: str, payload: dict, recovery_hint: str, two_fa_configured: bool, actor_id: str, version: int = 1) -> None:
     db.add(CredentialRevision(id=_new_id("credrev"), organization_id=organization_id, account_id=account_id, version=version, secret_ref=f"secret://account/{account_id}/v{version}", encrypted_payload=SecretCipher().encrypt(payload), recovery_hint=recovery_hint, two_fa_configured=two_fa_configured, status="ACTIVE", created_by=actor_id))
 
 
@@ -139,7 +141,7 @@ def _next_secret_version(db: Session, organization_id: str, account_id: str) -> 
     return (db.scalar(select(func.max(CredentialRevision.version)).where(CredentialRevision.organization_id == organization_id, CredentialRevision.account_id == account_id)) or 0) + 1
 
 
-def _reactivate_account(db: Session, organization_id: str, actor_id: str, account: GmailAccount, group: AccountGroup, email: str, password: str, recovery: str, two_fa: str, proxy_label: str | None, proxy_region: str | None) -> None:
+def _reactivate_account(db: Session, organization_id: str, actor_id: str, account: GmailAccount, group: AccountGroup, email: str, password: str, recovery: str, two_fa: str, proxy_label: str | None, proxy_region: str | None, proxy_value: str | None = None) -> None:
     """Revive an ARCHIVED account (soft-deleted row is retained for policy)
     with fresh credential material and a reset profile for a clean login."""
     account.group_id = group.id
@@ -149,11 +151,18 @@ def _reactivate_account(db: Session, organization_id: str, actor_id: str, accoun
     account.gmail_status = "NOT_CHECKED"
     account.recovery_hint = mask_recovery(recovery)
     account.two_fa_configured = bool(two_fa)
-    account.proxy_label = proxy_label
+    try:
+        proxy = parse_proxy(proxy_value)
+    except ProxyValidationError as exc:
+        raise ImportValidationError(str(exc)) from exc
+    account.proxy_id = proxy.proxy_id if proxy else None
+    account.proxy_label = proxy_label or (proxy.display_endpoint if proxy else None)
     account.proxy_region = proxy_region
-    account.proxy_status = "UNASSIGNED"
+    account.proxy_status = "ASSIGNED" if proxy or proxy_label or proxy_region else "UNASSIGNED"
     account.profile_status = "RESERVED"
-    payload = {"password": password, "recovery": recovery, "2fa": two_fa}
+    payload: dict = {"password": password, "recovery": recovery, "2fa": two_fa}
+    if proxy:
+        payload["proxy"] = proxy.encrypted_payload()
     secret = account.secret
     if secret is None:
         secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary")
@@ -183,13 +192,20 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     if existing and existing.lifecycle_status != "ARCHIVED":
         raise ImportValidationError("An account with this email already exists")
     if existing:
-        _reactivate_account(db, organization_id, actor_id, existing, group, email, data.password, data.recovery, data.two_fa, data.proxy_label, data.proxy_region)
+        _reactivate_account(db, organization_id, actor_id, existing, group, email, data.password, data.recovery, data.two_fa, data.proxy_label, data.proxy_region, data.proxy)
         db.commit()
         db.refresh(existing)
         return existing
+    try:
+        proxy = parse_proxy(data.proxy)
+    except ProxyValidationError as exc:
+        raise ImportValidationError(str(exc)) from exc
     account_id = _new_id("acct")
-    account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group.id, email=email, normalized_email=email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(data.recovery), two_fa_configured=bool(data.two_fa), proxy_label=data.proxy_label, proxy_region=data.proxy_region, proxy_status="UNASSIGNED", profile_id=profile_folder_name(organization_id, email), profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
-    secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt({"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}))
+    account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group.id, email=email, normalized_email=email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(data.recovery), two_fa_configured=bool(data.two_fa), proxy_id=proxy.proxy_id if proxy else None, proxy_label=data.proxy_label or (proxy.display_endpoint if proxy else None), proxy_region=data.proxy_region, proxy_status="ASSIGNED" if proxy or data.proxy_label or data.proxy_region else "UNASSIGNED", profile_id=profile_folder_name(organization_id, email), profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
+    secret_payload: dict = {"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}
+    if proxy:
+        secret_payload["proxy"] = proxy.encrypted_payload()
+    secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt(secret_payload))
     db.add(account)
     db.add(secret)
     _add_credential_revision(db, organization_id, account_id, {"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}, account.recovery_hint, account.two_fa_configured, actor_id)
@@ -236,7 +252,15 @@ def import_accounts(db: Session, organization_id: str, actor_id: str, group_id: 
 
 
 def account_response(account: GmailAccount) -> dict:
-    return {"id": account.id, "email": account.email, "group_id": account.group_id, "group_name": account.group.name, "lifecycle_status": account.lifecycle_status, "readiness_status": account.readiness_status, "login_status": account.login_status, "gmail_status": account.gmail_status, "secret_status": "STORED_ENCRYPTED" if account.secret else "MISSING", "recovery_masked": account.recovery_hint, "two_fa_configured": account.two_fa_configured, "proxy": {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status}, "profile": {"id": account.profile_id, "storage_reference": account.profile_storage_ref, "status": account.profile_status}, "created_at": account.created_at, "updated_at": account.updated_at}
+    # Profile authentication is the durable source of truth for a saved
+    # account. Older sessions can leave the denormalized login flag at
+    # REQUIRED, so reconcile that stale value at the API boundary unless a
+    # fresh login session is currently open.
+    login_status = account.login_status
+    profile = account.browser_profile
+    if login_status in {"NOT_STARTED", "REQUIRED"} and profile and profile.authenticated_at and not profile.active_session_id:
+        login_status = "AUTHENTICATED"
+    return {"id": account.id, "email": account.email, "group_id": account.group_id, "group_name": account.group.name, "lifecycle_status": account.lifecycle_status, "readiness_status": account.readiness_status, "login_status": login_status, "gmail_status": account.gmail_status, "secret_status": "STORED_ENCRYPTED" if account.secret else "MISSING", "recovery_masked": account.recovery_hint, "two_fa_configured": account.two_fa_configured, "proxy": {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status}, "profile": {"id": account.profile_id, "storage_reference": account.profile_storage_ref, "status": account.profile_status}, "created_at": account.created_at, "updated_at": account.updated_at}
 
 
 def list_accounts(db: Session, organization_id: str, q: str | None, group_id: str | None, status: str | None, page: int, page_size: int) -> dict:
@@ -247,26 +271,55 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
     if group_id:
         filters.append(GmailAccount.group_id == group_id)
     if status:
-        filters.append(GmailAccount.readiness_status == status)
+        if status == "AUTHENTICATED":
+            filters.append(or_(GmailAccount.login_status == "AUTHENTICATED", (GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]) & (GmailAccount.profile_status == "SAVED"))))
+        elif status in {"NOT_STARTED", "REQUIRED", "NONEXISTENT", "VERIFICATION_REQUIRED"}:
+            filters.append(GmailAccount.login_status == status)
+        else:
+            filters.append(GmailAccount.readiness_status == status)
     total = db.scalar(select(func.count(GmailAccount.id)).join(AccountGroup).where(*filters)) or 0
-    items = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).join(AccountGroup).where(*filters).order_by(GmailAccount.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).unique().all()
+    items = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).join(AccountGroup).where(*filters).order_by(GmailAccount.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).unique().all()
     return {"items": [account_response(item) for item in items], "page": page, "page_size": page_size, "total": total}
 
 
 def get_account(db: Session, organization_id: str, account_id: str) -> GmailAccount | None:
-    return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+    return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
 
 
-def update_account_metadata(db: Session, organization_id: str, actor_id: str, account_id: str, proxy_label: str | None, proxy_region: str | None) -> dict:
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+def update_account_metadata(db: Session, organization_id: str, actor_id: str, account_id: str, proxy_label: str | None, proxy_region: str | None, proxy_value: str | None | object = _UNSET) -> dict:
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot be edited")
-    account.proxy_label = proxy_label
+    payload: dict = {}
+    if account.secret:
+        try:
+            payload = SecretCipher().decrypt(account.secret.encrypted_payload) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise ImportValidationError("The encrypted account vault could not be opened") from exc
+    if not isinstance(payload, dict):
+        payload = {}
+    if proxy_value is _UNSET:
+        proxy = proxy_from_payload(payload.get("proxy"))
+    else:
+        try:
+            proxy = parse_proxy(proxy_value if isinstance(proxy_value, str) else None)
+        except ProxyValidationError as exc:
+            raise ImportValidationError(str(exc)) from exc
+    account.proxy_id = proxy.proxy_id if proxy else None
+    account.proxy_label = proxy_label or (proxy.display_endpoint if proxy else None)
     account.proxy_region = proxy_region
-    account.proxy_status = "ASSIGNED" if proxy_label or proxy_region else "UNASSIGNED"
-    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.metadata_updated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_label_changed": True, "proxy_region_changed": True, "proxy_status": account.proxy_status}))
+    account.proxy_status = "ASSIGNED" if proxy or proxy_label or proxy_region else "UNASSIGNED"
+    if proxy:
+        payload["proxy"] = proxy.encrypted_payload()
+    elif proxy_value is not _UNSET:
+        payload.pop("proxy", None)
+    if account.secret:
+        account.secret.encrypted_payload = SecretCipher().encrypt(payload)
+    else:
+        account.secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary", encrypted_payload=SecretCipher().encrypt(payload))
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.metadata_updated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_label_changed": True, "proxy_region_changed": True, "proxy_configured": bool(proxy), "proxy_authentication": "authenticated" if proxy and proxy.authenticated else "anonymous" if proxy else "none", "proxy_status": account.proxy_status}))
     db.commit()
     return account_response(get_account(db, organization_id, account.id))
 
@@ -380,13 +433,21 @@ def list_operation_drafts(db: Session, organization_id: str, account_id: str) ->
 
 
 def update_credentials(db: Session, organization_id: str, actor_id: str, account_id: str, password: str, recovery: str, two_fa: str) -> dict:
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
     if not account:
         raise ImportValidationError("Account not found")
     latest = db.scalar(select(func.max(CredentialRevision.version)).where(CredentialRevision.account_id == account.id)) or 0
     for revision in db.scalars(select(CredentialRevision).where(CredentialRevision.account_id == account.id, CredentialRevision.status == "ACTIVE")).all():
         revision.status = "RETIRED"
-    encrypted_payload = SecretCipher().encrypt({"password": password, "recovery": recovery, "2fa": two_fa})
+    payload: dict = {"password": password, "recovery": recovery, "2fa": two_fa}
+    if account.secret:
+        try:
+            existing_payload = SecretCipher().decrypt(account.secret.encrypted_payload) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise ImportValidationError("The encrypted account vault could not be opened") from exc
+        if isinstance(existing_payload, dict) and existing_payload.get("proxy"):
+            payload["proxy"] = existing_payload["proxy"]
+    encrypted_payload = SecretCipher().encrypt(payload)
     if account.secret:
         account.secret.encrypted_payload = encrypted_payload
         account.secret.key_version = "v1"
@@ -396,6 +457,12 @@ def update_credentials(db: Session, organization_id: str, actor_id: str, account
     account.two_fa_configured = bool(two_fa)
     account.readiness_status = "READY_FOR_LOGIN"
     account.login_status = "REQUIRED"
+    if account.browser_profile:
+        # Credential rotation invalidates the previous authenticated browser
+        # state. The next login must establish a fresh saved profile.
+        account.browser_profile.authenticated_at = None
+        account.browser_profile.status = "RESERVED"
+        account.profile_status = "RESERVED"
     version = latest + 1
     db.add(CredentialRevision(id=_new_id("credrev"), organization_id=organization_id, account_id=account.id, version=version, secret_ref=f"secret://account/{account.id}/v{version}", encrypted_payload=encrypted_payload, recovery_hint=account.recovery_hint, two_fa_configured=account.two_fa_configured, status="ACTIVE", created_by=actor_id))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.credentials_updated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"version": version, "secret_status": "encrypted", "reauth_required": True}))
@@ -532,6 +599,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
+        resolve_proxy=lambda sid: _resolve_proxy_options(sid),
         report_event=_report_observer_event,
         on_browser_closed=_on_observer_browser_closed,
         interval=settings.browser_observe_interval,
@@ -639,6 +707,23 @@ def _resolve_login_otp_secret(session_id: str) -> str | None:
         return secret or None
     except Exception:  # noqa: BLE001 - never break a session over missing secrets
         logger.exception("could not resolve OTP secret for session %s", session_id)
+        return None
+    finally:
+        db.close()
+
+
+def _resolve_proxy_options(session_id: str) -> dict[str, str] | None:
+    """Decrypt an account proxy only for the isolated browser launch."""
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session or not session.account or not session.account.secret:
+            return None
+        payload = SecretCipher().decrypt(session.account.secret.encrypted_payload) or {}
+        proxy = proxy_from_payload((payload or {}).get("proxy")) if isinstance(payload, dict) else None
+        return proxy.playwright_options() if proxy else None
+    except Exception:  # noqa: BLE001 - an absent/bad proxy falls back to direct access
+        logger.exception("could not resolve proxy options for session %s", session_id)
         return None
     finally:
         db.close()
@@ -785,6 +870,10 @@ def _recover_stale_session(db: Session, organization_id: str, actor_id: str, ses
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
         session.account.login_status = "NOT_STARTED"
+        session.account.profile_status = "RESERVED"
+    elif session.profile.authenticated_at is not None:
+        session.account.login_status = "AUTHENTICATED"
+        session.account.profile_status = "SAVED"
     if not observer_stopped:
         _prune_unsaved_profile_folder(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id, "reason": "dedicated_browser_not_running"}))
@@ -1106,6 +1195,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     profile.last_opened_at = utcnow()
     if not existing_auth:
         account.login_status = "REQUIRED"
+        account.profile_status = "OPEN"
     db.add(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
@@ -1307,6 +1397,10 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
         session.account.login_status = "NOT_STARTED"
+        session.account.profile_status = "RESERVED"
+    elif session.profile.authenticated_at is not None:
+        session.account.login_status = "AUTHENTICATED"
+        session.account.profile_status = "SAVED"
     if not observer_stopped:
         _prune_unsaved_profile_folder(session)
     job = _sync_job_item_for_session(db, session.id, session.state)

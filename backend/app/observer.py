@@ -74,6 +74,7 @@ class BrowserObserver:
         observe_session_page=object,
         resolve_credentials=None,
         resolve_otp_secret=None,
+        resolve_proxy=None,
         report_event=None,
         on_browser_closed=None,
         interval: float = 1.0,
@@ -92,6 +93,7 @@ class BrowserObserver:
         self._observe_session_page = observe_session_page
         self._resolve_credentials = resolve_credentials
         self._resolve_otp_secret = resolve_otp_secret
+        self._resolve_proxy = resolve_proxy
         self._report_event = report_event
         self._on_browser_closed = on_browser_closed
         self._interval = interval
@@ -305,6 +307,14 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
         pass
     logger.info("session %s: launching the saved profile with %s", observer.session_id, executable)
     launch_kwargs = {}
+    if observer._resolve_proxy is not None:
+        try:
+            proxy = observer._resolve_proxy(observer.session_id)
+        except Exception:  # noqa: BLE001 - a missing proxy must not block login
+            logger.exception("session %s: could not resolve its proxy", observer.session_id)
+            proxy = None
+        if proxy:
+            launch_kwargs["proxy"] = proxy
     if not observer.headless:
         launch_kwargs["no_viewport"] = True
     try:

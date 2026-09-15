@@ -42,6 +42,7 @@ class AccountStructuredInput(BaseModel):
     group_id: str
     proxy_label: str | None = Field(default=None, max_length=160)
     proxy_region: str | None = Field(default=None, max_length=80)
+    proxy: str | None = Field(default=None, max_length=512)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -112,6 +113,7 @@ class AccountResponse(BaseModel):
 class AccountMetadataUpdate(BaseModel):
     proxy_label: str | None = Field(default=None, max_length=160)
     proxy_region: str | None = Field(default=None, max_length=80)
+    proxy: str | None = Field(default=None, max_length=512)
 
     @field_validator("proxy_label", "proxy_region")
     @classmethod
