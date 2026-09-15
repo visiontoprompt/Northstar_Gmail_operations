@@ -47,7 +47,7 @@ components:
 
 Gmail Operations is an admin control room for people who prepare and operate a large, company-owned account fleet. The product surface should feel closer to a calm infrastructure console than a sales dashboard: clear state, reliable affordances, and enough density to scan hundreds of accounts without visual noise.
 
-The signature is a thin amber “handoff rail” used for the current Phase 1 boundary: accounts are safely stored and ready for a later login/provisioning phase, but are not presented as authenticated or healthy before that work occurs.
+The signature is a thin amber “handoff rail” used for the current Phase 1 boundary, paired with a registry action rail that keeps fleet operations beside the data they affect. Accounts are safely stored and ready for the next login/provisioning phase, but are not presented as authenticated or healthy before concrete browser evidence exists.
 
 The product register is operational and trustworthy. It must never resemble an anti-detection tool, growth-hacking console, or generic CRM.
 
@@ -61,7 +61,7 @@ Space Grotesk gives headings a technical, distinctive voice without becoming dec
 
 ## Layout
 
-The desktop shell uses a compact dark navigation rail, a light work canvas, and a persistent group selector in the header. The account registry is the primary route. The top of the page carries a readiness summary and the current group boundary before the table begins. Tables remain bounded to their own scroll surface; the page and long forms keep document scrolling.
+The desktop shell uses a compact dark navigation rail, a light work canvas, and a persistent group selector in the header. The account registry is the primary route. The page leads with attention, then readiness summary, group context, and a registry action rail before the table begins. Tables remain bounded to their own scroll surface; the page and long forms keep document scrolling.
 
 ## Elevation & Depth
 
@@ -73,7 +73,7 @@ Controls and cards use 12–16px radii. Status badges are compact rounded labels
 
 ## Components
 
-The frontend owns shared `Button`, `IconButton`, `SearchField`, `StatusBadge`, `Modal`, `FormField`, and `ToastRegion` patterns. Runtime values are maintained in `frontend/src/styles.css`, which is the canonical token source for this new application; this document mirrors those values and records the intent. No component may render raw credential values.
+The frontend owns shared `Button`, `IconButton`, `SearchField`, `StatusBadge`, `RegistryActionBar`, `Modal`, `FormField`, and `ToastRegion` patterns. Runtime values are maintained in `frontend/src/styles.css`, which is the canonical token source for this new application; this document mirrors those values and records the intent. No component may render raw credential values.
 
 ## Do's and Don'ts
 

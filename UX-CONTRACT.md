@@ -10,6 +10,7 @@ This contract covers the Phase 1 admin product surface. Visual intent lives in [
 | Select/Listbox | Native select | UX-CONTRACT.md + DESIGN.md | native | Keyboard and popup review |
 | Search | Shared debounced registry behavior | UX-CONTRACT.md | query / clear | 300ms debounce and stale-request test |
 | Table | Semantic account table | API list contract | page / responsive stacked records | Table semantics and API tests |
+| Registry actions | Registry action rail | This contract + account operation APIs | selected / entire group | Scope, disabled, partial-failure review |
 | Toast | `ToastRegion` | UX-CONTRACT.md | success / error / info | Live-region interaction review |
 | CRUD | Account service + registry flow | API contract + UX-CONTRACT.md | create / import / edit / move / delete shell | Inline errors, destructive confirmation, and API tests |
 | Session hand-off | Account detail session action + session workspace | Browser session API | open / authenticated / verification required / closed | Session lifecycle API and browser smoke test |
@@ -25,6 +26,26 @@ This contract covers the Phase 1 admin product surface. Visual intent lives in [
 6. Successful records are stored with `lifecycle_status=SETUP_REQUIRED` and `readiness_status=READY_FOR_LOGIN`. This does not mean Google authentication succeeded.
 7. The registry refreshes, keeps the selected group/search context, and announces `Account added` or an exact partial-import count.
 8. Account detail can open one profile-backed login session. The session workspace exposes the current hand-off state and explicit actions to record a human-completed login or a verification requirement, then close the session.
+
+## Registry action rail
+
+The Account Registry owns the action surface. Login, credential revision,
+contacts, browser security, markers and labels, Google apps, send and reply,
+add-ons, Google Alerts, metadata edit, group move, and archive are displayed in
+the registry action rail above the table rather than as the primary actions of
+the account detail modal.
+
+- `Selected` applies to the checked rows in the current registry view.
+- `Entire group` applies to every account in the selected group, not only the
+  currently loaded page.
+- Login uses the existing controlled batch flow and its concurrency setting.
+- Non-login operations save one audited plan per account until their execution
+  worker is available.
+- Credential revision remains limited to exactly one selected account because
+  credential values are account-specific and security-sensitive.
+- Archive is confirmed with an explicit bulk confirmation and each server-side
+  archive remains independently auditable. Partial failures remain visible and
+  retryable.
 
 ## State vocabulary
 
