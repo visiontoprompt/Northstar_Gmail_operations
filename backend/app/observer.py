@@ -835,6 +835,14 @@ _SAFE_BROWSING_TERMS = (
     "protección mejorada",
     "proteccion mejorada",
 )
+_SAFE_BROWSING_ACTIVATE_LABELS = (
+    "turn on",
+    "enable",
+    "activate",
+    "activer",
+    "activar",
+    "habilitar",
+)
 _GMAIL_MARKER_SECTION_LABELS = (
     "importance markers",
     "marqueurs d'importance",
@@ -978,6 +986,10 @@ def _handle_security_tick(observer: "BrowserObserver", page: "Page", host: str) 
     if _SAFE_BROWSING_PAGE_PATH not in urlparse(url).path.lower():
         _navigate_settings(page, _GOOGLE_ENHANCED_SAFE_BROWSING_URL)
         return
+    confirmation = _confirm_enhanced_safe_browsing(page)
+    if confirmation:
+        observer._emit("security.activation_confirmed", f"confirmed Enhanced Safe Browsing with {confirmation}")
+        return
     state = _set_enhanced_safe_browsing(page)
     if state == "clicked":
         observer._security_clicked = True
@@ -992,6 +1004,64 @@ def _handle_security_tick(observer: "BrowserObserver", page: "Page", host: str) 
         return
     observer._emit("security.completed", "Enhanced Safe Browsing enabled and verified")
     observer._stop.set()
+
+
+def _confirm_enhanced_safe_browsing(page: "Page") -> str | None:
+    """Click the confirmation dialog's localized activation action.
+
+    Clicking the first toggle can open a second Google Account dialog. Its
+    action is commonly ``Activate`` / ``Activer`` / ``Activar``. Search only
+    visible controls inside a modal and require Enhanced Safe Browsing context
+    when the dialog exposes it; this avoids pressing similarly named controls
+    elsewhere on the account page.
+    """
+    try:
+        result = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const terms = config.terms.map(normalize);
+                const labels = config.labels.map(normalize);
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const modals = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+                    .filter(visible)
+                    .sort((a, b) => textOf(b).length - textOf(a).length);
+                for (const modal of modals) {
+                    const modalText = textOf(modal);
+                    const hasSafeBrowsingContext = terms.some(term => modalText.includes(term));
+                    const controls = [...modal.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')]
+                        .filter(visible);
+                    for (const control of controls) {
+                        const label = textOf(control);
+                        const matches = labels.some(value => label === value || label.startsWith(value + ' '));
+                        if (matches && (hasSafeBrowsingContext || labels.includes(label))) {
+                            control.click();
+                            return label;
+                        }
+                    }
+                }
+                return null;
+            }""",
+            {"terms": _SAFE_BROWSING_TERMS, "labels": _SAFE_BROWSING_ACTIVATE_LABELS},
+        )
+        if not isinstance(result, str):
+            return None
+        normalized = result.strip().lower()
+        if normalized in _SAFE_BROWSING_ACTIVATE_LABELS or any(normalized.startswith(f"{label} ") for label in _SAFE_BROWSING_ACTIVATE_LABELS):
+            return normalized
+        return None
+    except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
+        return None
 
 
 def _set_enhanced_safe_browsing(page: "Page") -> str | None:

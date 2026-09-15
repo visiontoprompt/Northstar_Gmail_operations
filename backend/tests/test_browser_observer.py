@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -150,6 +150,13 @@ class _FakeSecurityPage:
         return "already"
 
 
+class _FakeSecurityConfirmationPage:
+    url = "https://myaccount.google.com/account-enhanced-safe-browsing"
+
+    def evaluate(self, _script: str, _config: dict):
+        return "activer"
+
+
 class _FakeBlankPage:
     url = "about:blank"
 
@@ -180,6 +187,17 @@ def test_security_operation_navigates_to_exact_page_and_waits_for_verified_compl
     _handle_security_tick(observer, page, "myaccount.google.com")
     _handle_security_tick(observer, page, "myaccount.google.com")
     assert "security.completed" in events
+
+
+def test_security_operation_confirms_localized_activation_dialog():
+    events: list[str] = []
+    observer = BrowserObserver("s-security", "p-security", 9222, purpose="security", report_event=lambda _sid, event, _detail, _result: events.append(event))
+    page = _FakeSecurityConfirmationPage()
+
+    _handle_security_tick(observer, page, "myaccount.google.com")
+
+    assert "security.activation_confirmed" in events
+    assert _confirm_enhanced_safe_browsing(page) == "activer"
 
 
 def test_contacts_clicks_the_configured_final_import_button_selector():
