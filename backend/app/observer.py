@@ -581,7 +581,14 @@ def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str)
     return clicked
 
 
-_CONTINUE_HANDOFF_LABELS = ("continue", "continuer", "continuar")
+_CONTINUE_HANDOFF_LABELS = (
+    "continue",
+    "continue as",
+    "continuer",
+    "continuer en tant que",
+    "continuar",
+    "continuar como",
+)
 
 
 def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", url: str) -> bool:
@@ -607,7 +614,7 @@ def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", u
                 label = (candidate.inner_text() or "").strip().lower()
             except Exception:  # noqa: BLE001
                 continue
-            if label in _CONTINUE_HANDOFF_LABELS:
+            if any(label == wanted or label.startswith(wanted + " ") for wanted in _CONTINUE_HANDOFF_LABELS):
                 try:
                     candidate.click(timeout=1500)
                     observer._emit("account_continue_clicked", url)
