@@ -63,7 +63,8 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
 - Registry is the owning list. Successful create/import returns to it.
 - API validation failures stay in the form with inline corrections; network/server failures stay in the form with retry.
 - Search/filter changes reset the page to 1 and preserve state in URL parameters when the frontend is connected to a router.
-- Rows link to an account detail shell. Detail tabs are non-functional placeholders until their phase is implemented, but the overview clearly marks them as future work.
+- Rows link to an account detail panel that re-fetches the account, sessions, and audit events when opened and refreshes the live record while it remains visible. Overview, Sessions, and Audit are functional tabs; the panel shows current server state rather than relying on the registry row snapshot.
+- Account detail is a focused read surface: phase, login, Gmail observation, lifecycle, vault, proxy, profile, metadata, session history, and audit history each have a dedicated place. Registry actions remain in the registry action rail.
 - Account detail exposes server-backed edit metadata, move group, and guarded archive controls. The API validates, audits, and reloads the registry after success.
 - Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer saves a versioned, non-secret plan; no external action occurs when a plan is saved.
 - Archive is exposed only through the guarded Delete action because it affects account, secret, session, and profile records.

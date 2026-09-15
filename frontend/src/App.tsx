@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   Contact as AddressBook,
@@ -42,6 +42,7 @@ import { isOpenSessionState } from "./session-contract";
 type Group = { id: string; name: string; description: string | null; capacity: number; account_count: number; ready_count: number; issue_count: number; status: string };
 type Account = { id: string; email: string; group_id: string; group_name: string; lifecycle_status: string; readiness_status: string; login_status: string; gmail_status: string; secret_status: string; recovery_masked: string; two_fa_configured: boolean; proxy: { id: string | null; label: string | null; region: string | null; status: string }; profile: { id: string | null; storage_reference: string | null; status: string }; created_at: string; updated_at: string };
 type Session = { id: string; account_id: string; account_email: string; profile_id: string; profile_storage_reference: string; profile_status: string; profile_saved?: boolean; profile_authenticated_at?: string | null; state: string; login_state: string; runtime_type: string; browser_opened: boolean; observer_attached: boolean; automation_hint: string | null; session_url: string; opened_at: string; last_event_at: string; closed_at: string | null; failure_reason: string | null };
+type AuditEvent = { id: string; action: string; target_type: string; target_id: string; result: string; metadata: Record<string, unknown>; created_at: string };
 type Preview = { total_rows: number; valid_rows: number; duplicate_rows: number; invalid_rows: number; rows: { row_number: number; email?: string | null; recovery_masked?: string | null; two_fa_configured: boolean; valid: boolean; duplicate: boolean; error?: string | null }[] };
 type Toast = { id: number; tone: "success" | "error" | "info"; message: string };
 type LoginJob = { id: string; group_id: string | null; concurrency_limit: number; status: string; total_count: number; queued_count: number; running_count: number; succeeded_count: number; attention_count: number; failed_count: number; created_at: string; started_at: string | null; completed_at: string | null; updated_at: string; items: { id: string; account_id: string; account_email: string; session_id: string | null; state: string; attempts: number; last_error: string | null; updated_at: string }[] };
@@ -59,6 +60,7 @@ const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
 };
 
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+const formatDateTime = (value: string | null | undefined) => value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "—";
 const labelStatus = (value: string) => value.toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 function App() {
@@ -283,34 +285,78 @@ function SecretField({ label, id, value, onChange, visible, onToggle, autoComple
 
 function AccountDetail({ account, groups, onClose, onSessionOpened, onUpdated, onPrepared, onError }: { account: Account; groups: Group[]; onClose: () => void; onSessionOpened: (session: Session) => void; onUpdated: () => void; onPrepared: (message: string) => void; onError: (message: string) => void }) {
   const [pending, setPending] = useState(false);
+  const [detailAccount, setDetailAccount] = useState(account);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [detailTab, setDetailTab] = useState<"overview" | "sessions" | "audit">("overview");
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [detailError, setDetailError] = useState("");
+  const [lastRefreshed, setLastRefreshed] = useState<string | null>(null);
   const [existingSession, setExistingSession] = useState<Session | null>(null);
   const [editingCredentials, setEditingCredentials] = useState(false);
   const [operation, setOperation] = useState<OperationKind | null>(null);
   const [adminAction, setAdminAction] = useState<"edit" | "move" | "delete" | null>(null);
-  useEffect(() => {
-    let mounted = true;
-    api<Session[]>(`/api/v1/sessions?account_id=${account.id}`).then((sessions) => {
-      if (mounted) setExistingSession(sessions.find((session) => isOpenSessionState(session.state)) ?? null);
-    }).catch(() => undefined);
-    return () => { mounted = false; };
+
+  const refreshDetail = useCallback(async () => {
+    setDetailLoading(true);
+    try {
+      const [freshAccount, freshSessions, freshAudit] = await Promise.all([
+        api<Account>(`/api/v1/accounts/${account.id}`),
+        api<Session[]>(`/api/v1/sessions?account_id=${account.id}&limit=50`),
+        api<AuditEvent[]>(`/api/v1/audit-events?account_id=${account.id}&limit=50`),
+      ]);
+      setDetailAccount(freshAccount);
+      setSessions(freshSessions);
+      setAuditEvents(freshAudit);
+      setExistingSession(freshSessions.find((session) => isOpenSessionState(session.state)) ?? null);
+      setLastRefreshed(new Date().toISOString());
+      setDetailError("");
+    } catch (error) {
+      setDetailError((error as Error).message || "Live account details are temporarily unavailable.");
+    } finally {
+      setDetailLoading(false);
+    }
   }, [account.id]);
+
+  useEffect(() => {
+    setDetailAccount(account);
+    setDetailTab("overview");
+    void refreshDetail();
+    const interval = window.setInterval(() => { void refreshDetail(); }, 4000);
+    return () => window.clearInterval(interval);
+  }, [account, refreshDetail]);
+
   const openSession = async () => {
     setPending(true);
     try {
       const session = await api<Session>(`/api/v1/accounts/${account.id}/sessions`, { method: "POST" });
       onSessionOpened(session);
+      void refreshDetail();
     } catch (error) {
       onError((error as Error).message);
     } finally {
       setPending(false);
     }
   };
+  const profileValue = detailAccount.profile.id ?? "Reserved for first sign-in";
+  const profileNote = detailAccount.profile.status === "SAVED" ? `${detailAccount.profile.storage_reference ?? "Profile storage"} · reopens without login` : `${labelStatus(detailAccount.profile.status)} · no saved profile yet`;
+  const proxyValue = detailAccount.proxy.label ?? "Not assigned";
+  const proxyNote = detailAccount.proxy.region ? `${detailAccount.proxy.region} · ${labelStatus(detailAccount.proxy.status)}` : `Assignment metadata · ${labelStatus(detailAccount.proxy.status)}`;
+  const recentSessions = sessions.slice(0, 3);
+  const detailContent = detailTab === "overview" ? <>
+    <div className="detail-overview-grid">
+      <div className="detail-overview-card"><span className="detail-label">Record metadata</span><dl className="detail-facts"><div><dt>Email</dt><dd>{detailAccount.email}</dd></div><div><dt>Group</dt><dd>{detailAccount.group_name}</dd></div><div><dt>Lifecycle</dt><dd>{labelStatus(detailAccount.lifecycle_status)}</dd></div><div><dt>Added</dt><dd>{formatDateTime(detailAccount.created_at)}</dd></div><div><dt>Last record update</dt><dd>{formatDateTime(detailAccount.updated_at)}</dd></div></dl></div>
+      <div className="detail-overview-card"><div className="detail-section-heading"><span className="detail-label">Latest activity</span><button type="button" className="text-action" onClick={() => setDetailTab("sessions")}>View all</button></div>{recentSessions.length ? <div className="activity-list">{recentSessions.map((session) => <div className="activity-item" key={session.id}><span className={`status-dot ${session.login_state === "AUTHENTICATED" ? "teal" : session.login_state === "NONEXISTENT" ? "danger" : "neutral"}`} /><div><strong>{labelStatus(session.login_state || session.state)}</strong><small>{formatDateTime(session.last_event_at)} · {session.browser_opened ? "Browser open" : "Browser closed"}</small></div></div>)}</div> : <div className="detail-empty">No login sessions have been recorded.</div>}<div className="activity-footer"><span>{auditEvents.length} audit {auditEvents.length === 1 ? "event" : "events"}</span><button type="button" className="text-action" onClick={() => setDetailTab("audit")}>Review audit</button></div></div>
+    </div>
+    <div className="detail-note"><ShieldCheck size={17} /><span>Account data is read live from the registry. Credentials remain encrypted and are never returned to this view. Registry actions stay in the action rail so this panel remains a focused record.</span></div>
+  </> : detailTab === "sessions" ? <div className="detail-section"><div className="detail-section-heading"><div><span className="detail-label">Session history</span><strong>{sessions.length} recorded {sessions.length === 1 ? "session" : "sessions"}</strong></div><button type="button" className="icon-text-button" onClick={() => void refreshDetail()} disabled={detailLoading}><RefreshCw size={13} className={detailLoading ? "spin" : ""} /> Refresh</button></div>{sessions.length ? <div className="session-history">{sessions.map((session) => <article className="session-history-item" key={session.id}><div className="session-history-main"><div><strong>{labelStatus(session.login_state || session.state)}</strong><span>{session.runtime_type} · {session.browser_opened ? "Browser open" : "Browser closed"}</span></div><LoginBadge status={session.login_state} /></div><div className="session-history-meta"><span>Opened {formatDateTime(session.opened_at)}</span><span>Last event {formatDateTime(session.last_event_at)}</span><span>{session.profile_saved ? "Profile saved" : "Profile not saved"}</span></div>{session.failure_reason && <p className="session-failure">{session.failure_reason}</p>}<code className="session-id">{session.id}</code></article>)}</div> : <div className="detail-empty">No sessions have been recorded for this account.</div>}</div> : <div className="detail-section"><div className="detail-section-heading"><div><span className="detail-label">Audit trail</span><strong>Account and session events</strong></div><button type="button" className="icon-text-button" onClick={() => void refreshDetail()} disabled={detailLoading}><RefreshCw size={13} className={detailLoading ? "spin" : ""} /> Refresh</button></div>{auditEvents.length ? <div className="audit-list">{auditEvents.map((event) => <div className="audit-item" key={event.id}><span className={`audit-result ${event.result.toLowerCase()}`}>{labelStatus(event.result)}</span><div><strong>{labelStatus(event.action)}</strong><small>{labelStatus(event.target_type)} · {formatDateTime(event.created_at)}</small></div><code>{event.target_id}</code></div>)}</div> : <div className="detail-empty">No audit events have been recorded for this account.</div>}</div>;
+
   return <>
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="modal detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
-        <div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT DETAIL</div><h2 id="detail-title">{account.email}</h2><p>{account.group_name} · added {formatDate(account.created_at)}</p></div><button type="button" className="icon-button" aria-label="Close account detail" onClick={onClose}><X size={18} /></button></div>
-        <div className="detail-body"><div className="detail-status"><div><span className="detail-label">Current hand-off state</span><StatusBadge status={account.readiness_status} /></div><div className="detail-id"><span>Account ID</span><code>{account.id}</code><button type="button" className="copy-button" aria-label="Copy account ID" onClick={() => navigator.clipboard?.writeText(account.id)}><Copy size={14} /></button></div></div><div className="detail-grid"><DetailCard icon={<LockKeyhole size={17} />} label="Credential vault" value="Encrypted at rest" note="Raw fields are never returned" /><DetailCard icon={<KeyRound size={17} />} label="Dedicated proxy" value={account.proxy.label ?? "Not assigned"} note={account.proxy.region ?? "Assignment metadata reserved"} /><DetailCard icon={<Layers3 size={17} />} label="Persistent profile" value={account.profile.id ?? "Reserved"} note={account.profile.status === "SAVED" ? "Saved · reopens without login" : "Created once the first sign-in completes"} /></div><div className="secret-summary"><div><span className="detail-label">Recovery</span><strong>{account.recovery_masked}</strong></div><div><span className="detail-label">2FA</span><strong>{account.two_fa_configured ? "Configured" : "Not configured"}</strong></div><div><span className="detail-label">Login state</span><strong>{labelStatus(account.login_status)}</strong></div></div><div className="operation-heading"><div><span className="detail-label">Account operations</span><strong>Choose a workflow to prepare</strong></div><span className="operation-caption">Saved plans · execution separate</span></div><div className="operation-grid"><OperationCard icon={<Globe2 size={16} />} title="Login" note="Open isolated profile" onClick={openSession} /><OperationCard icon={<LockKeyhole size={16} />} title="Credentials" note="Create encrypted revision" onClick={() => setEditingCredentials(true)} /><OperationCard icon={<AddressBook size={16} />} title="Contacts" note="Upload Google contacts" onClick={() => setOperation("contacts")} /><OperationCard icon={<ShieldCheck size={16} />} title="Browser security" note="Enhance security settings" onClick={() => setOperation("security")} /><OperationCard icon={<Tags size={16} />} title="Markers & labels" note="Prepare label rules" onClick={() => setOperation("labels")} /><OperationCard icon={<Boxes size={16} />} title="Google apps" note="Create app configuration" onClick={() => setOperation("apps")} /><OperationCard icon={<Mail size={16} />} title="Send & reply" note="Prepare mail workflow" onClick={() => setOperation("mail")} /><OperationCard icon={<SlidersHorizontal size={16} />} title="Add-ons" note="Select approved add-ons" onClick={() => setOperation("addons")} /><OperationCard icon={<Bell size={16} />} title="Google Alerts" note="Choose topics" onClick={() => setOperation("alerts")} /></div><div className="future-tabs" role="tablist" aria-label="Account detail sections"><span className="selected" role="tab" aria-selected="true">Overview</span><span role="tab" aria-selected="false">Sessions <small>Next</small></span><span role="tab" aria-selected="false">Audit <small>Next</small></span></div><div className="detail-note"><ShieldCheck size={17} /><span>Each operation will later run through the same isolated profile, queue, and audit boundary. No workflow is marked complete from a frontend draft.</span></div><div className="admin-actions"><span className="detail-label">Account administration</span><div><button type="button" className="text-action" onClick={() => setAdminAction("edit")}><Pencil size={14} /> Edit account</button><button type="button" className="text-action" onClick={() => setAdminAction("move")}><MoveRight size={14} /> Move group</button><button type="button" className="text-action danger-action" onClick={() => setAdminAction("delete")}><Trash2 size={14} /> Delete account</button></div></div></div>
-        <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Close detail</button><button type="button" className="button secondary" onClick={() => setEditingCredentials(true)}><Pencil size={16} /> Update credentials</button>{existingSession ? <button type="button" className="button primary" onClick={() => onSessionOpened(existingSession)}><Globe2 size={16} /> Resume login session</button> : <button type="button" className="button primary" onClick={openSession} disabled={pending} aria-busy={pending}>{pending && <span className="button-spinner" />}<Globe2 size={16} /> Open login session</button>}</div>
+        <div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT DETAIL</div><h2 id="detail-title">{detailAccount.email}</h2><p>{detailAccount.group_name} · added {formatDate(detailAccount.created_at)}</p></div><div className="detail-header-actions"><span className="live-indicator"><span className={`status-dot ${detailLoading ? "neutral" : "teal"}`} />{detailLoading ? "Refreshing" : `Updated ${lastRefreshed ? formatDateTime(lastRefreshed) : "just now"}`}</span><button type="button" className="icon-button" aria-label="Refresh account detail" onClick={() => void refreshDetail()} disabled={detailLoading}><RefreshCw size={16} className={detailLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="Close account detail" onClick={onClose}><X size={18} /></button></div></div>
+        <div className="detail-body"><div className="detail-status"><div className="detail-status-grid"><div><span className="detail-label">Phase status</span><StatusBadge status={detailAccount.readiness_status} /></div><div><span className="detail-label">Login status</span><LoginBadge status={detailAccount.login_status} /></div><div><span className="detail-label">Gmail status</span><strong className="detail-status-value">{labelStatus(detailAccount.gmail_status)}</strong></div><div><span className="detail-label">Lifecycle</span><strong className="detail-status-value">{labelStatus(detailAccount.lifecycle_status)}</strong></div></div><div className="detail-id"><span>Account ID</span><code>{detailAccount.id}</code><button type="button" className="copy-button" aria-label="Copy account ID" onClick={() => navigator.clipboard?.writeText(detailAccount.id)}><Copy size={14} /></button></div></div>{detailError && <div className="detail-refresh-error" role="status"><XCircle size={15} /> Showing the last known record · {detailError}</div>}<div className="detail-grid"><DetailCard icon={<LockKeyhole size={17} />} label="Credential vault" value={detailAccount.secret_status === "STORED_ENCRYPTED" ? "Encrypted at rest" : labelStatus(detailAccount.secret_status)} note="Raw fields are never returned" /><DetailCard icon={<KeyRound size={17} />} label="Dedicated proxy" value={proxyValue} note={proxyNote} /><DetailCard icon={<Layers3 size={17} />} label="Persistent profile" value={profileValue} note={profileNote} /><DetailCard icon={<Globe2 size={17} />} label="Gmail observation" value={labelStatus(detailAccount.gmail_status)} note="Derived from the latest account session" /></div><div className="secret-summary"><div><span className="detail-label">Recovery</span><strong>{detailAccount.recovery_masked}</strong></div><div><span className="detail-label">2FA</span><strong>{detailAccount.two_fa_configured ? "Configured" : "Not configured"}</strong></div><div><span className="detail-label">Last login signal</span><strong>{labelStatus(detailAccount.login_status)}</strong></div><div><span className="detail-label">Profile state</span><strong>{labelStatus(detailAccount.profile.status)}</strong></div></div><div className="future-tabs" role="tablist" aria-label="Account detail sections"><button type="button" role="tab" aria-selected={detailTab === "overview"} className={detailTab === "overview" ? "selected" : ""} onClick={() => setDetailTab("overview")}>Overview</button><button type="button" role="tab" aria-selected={detailTab === "sessions"} className={detailTab === "sessions" ? "selected" : ""} onClick={() => setDetailTab("sessions")}>Sessions <span>{sessions.length}</span></button><button type="button" role="tab" aria-selected={detailTab === "audit"} className={detailTab === "audit" ? "selected" : ""} onClick={() => setDetailTab("audit")}>Audit <span>{auditEvents.length}</span></button></div><div className="detail-tab-panel" role="tabpanel">{detailContent}</div></div>
+        <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Close detail</button>{existingSession ? <button type="button" className="button primary" onClick={() => onSessionOpened(existingSession)}><Globe2 size={16} /> Resume login session</button> : <button type="button" className="button primary" onClick={openSession} disabled={pending} aria-busy={pending}>{pending && <span className="button-spinner" />}<Globe2 size={16} /> Open login session</button>}</div>
       </section>
     </div>
     {editingCredentials && <CredentialEditor account={account} onClose={() => setEditingCredentials(false)} onSaved={() => { setEditingCredentials(false); onUpdated(); }} onError={onError} />}
