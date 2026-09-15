@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "continuer", "continuar", "next", "got it", "ok", "i understand", "understand")
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
+_ACCOUNT_HANDOFF_HOSTS = _LOGIN_HOSTS | {"mail.google.com", "myaccount.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
 _OPERATION_FAILURE_EVENTS = {
     "contacts": "contacts.failed",
@@ -278,10 +279,17 @@ class BrowserObserver:
                     _fill_sign_in_form(page, self, url)
             elif url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
                 self._chooser_clicked_urls.add(url)
-            elif url not in self._continue_clicked_urls and _handle_google_account_continue(page, self, url):
+            elif url not in self._continue_clicked_urls and _handle_google_account_continue(page, self, url, host):
                 self._continue_clicked_urls.add(url)
             if _has_otp_input(page) and self._resolve_otp_secret is not None and url not in self._otp_attempted_urls:
                 _fill_otp_code(page, self, url)
+        elif host in _ACCOUNT_HANDOFF_HOSTS and url not in self._continue_clicked_urls:
+            # A saved profile can render the account hand-off inside Gmail or
+            # My Account rather than on accounts.google.com. Only account-
+            # specific wording is eligible on those already-authenticated
+            # hosts, so ordinary Gmail buttons are never pressed.
+            if _handle_google_account_continue(page, self, url, host):
+                self._continue_clicked_urls.add(url)
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
@@ -589,16 +597,21 @@ _CONTINUE_HANDOFF_LABELS = (
     "continuar",
     "continuar como",
 )
+_ACCOUNT_SPECIFIC_CONTINUE_LABELS = (
+    "continue as",
+    "continuer en tant que",
+    "continuar como",
+)
 
 
-def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", url: str) -> bool:
+def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", url: str, host: str | None = None) -> bool:
     """Advance Google's post-login account hand-off page.
 
     Google may retain hidden sign-in inputs after authentication and show a
-    visible button such as ``Continue`` / ``Continuer`` / ``Continuar`` before
-    handing the profile to Gmail. This is restricted to Google's login hosts,
-    requires no visible credential or OTP field, and only clicks an exact
-    Continue-labelled control.
+    visible button such as ``Continue as`` / ``Continuer en tant que`` before
+    handing the profile to Gmail. On login hosts, a plain Continue is also
+    accepted for Google's sign-in hand-off. On Gmail/My Account, only the
+    account-specific wording is accepted.
     """
     if _has_credential_input(page) or _has_otp_input(page):
         return False
@@ -606,7 +619,8 @@ def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", u
         body_text = _visible_text(page).lower()
     except Exception:  # noqa: BLE001
         return False
-    if not any(label in body_text for label in _CONTINUE_HANDOFF_LABELS):
+    labels = _CONTINUE_HANDOFF_LABELS if host in _LOGIN_HOSTS else _ACCOUNT_SPECIFIC_CONTINUE_LABELS
+    if not any(label in body_text for label in labels):
         return False
     try:
         for candidate in page.locator("button, [role=button], a").all():
@@ -614,7 +628,7 @@ def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", u
                 label = (candidate.inner_text() or "").strip().lower()
             except Exception:  # noqa: BLE001
                 continue
-            if any(label == wanted or label.startswith(wanted + " ") for wanted in _CONTINUE_HANDOFF_LABELS):
+            if any(label == wanted or label.startswith(wanted + " ") for wanted in labels):
                 try:
                     candidate.click(timeout=1500)
                     observer._emit("account_continue_clicked", url)

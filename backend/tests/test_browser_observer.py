@@ -515,6 +515,24 @@ def test_observer_clicks_account_specific_continue_handoff():
     assert getattr(button, "clicked", False) is True
 
 
+def test_observer_checks_saved_profile_handoff_inside_gmail():
+    button = _FakeButton("Continuar como Alfredo")
+    page = _FakePage("https://mail.google.com/mail/u/0/", "Gmail", "Continuar como Alfredo", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, report_event=lambda *a: None)
+    with patch("app.observer.classify_page", return_value=(PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is True
+
+
+def test_observer_does_not_click_generic_gmail_continue():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://mail.google.com/mail/u/0/", "Gmail", "Continue", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, report_event=lambda *a: None)
+    with patch("app.observer.classify_page", return_value=(PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is not True
+
+
 def test_observer_ignores_transient_unknown_during_cold_page_load():
     seen = []
     observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05, settle_seconds=5.0)
