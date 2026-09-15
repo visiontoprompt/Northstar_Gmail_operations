@@ -13,7 +13,7 @@ from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
-from .service import ImportValidationError, account_response, add_account, archive_account, close_session, create_login_job, create_operation_draft, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_login_session, update_account_metadata, update_credentials, update_login_job_state
+from .service import ImportValidationError, account_response, add_account, archive_account, cleanup_unsaved_invalid_profiles, close_session, create_login_job, create_operation_draft, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_login_session, update_account_metadata, update_credentials, update_login_job_state
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
@@ -36,6 +36,7 @@ def startup() -> None:
             for key, name, description in [("sales-us", "Sales · US", "North America sales account pool"), ("support", "Customer Support", "Customer care account pool"), ("partnerships", "Partnerships", "Partner operations account pool")]:
                 db.add(AccountGroup(id=f"group_{key}", organization_id=org.id, name=name, description=description, capacity=300))
             db.commit()
+        cleanup_unsaved_invalid_profiles(db, settings.demo_org_id)
     finally:
         db.close()
 

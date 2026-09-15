@@ -74,6 +74,7 @@ class BrowserObserver:
         resolve_credentials=None,
         resolve_otp_secret=None,
         report_event=None,
+        on_browser_closed=None,
         interval: float = 1.0,
         settle_seconds: float = 5.0,
         connect_timeout: float = 12.0,
@@ -89,6 +90,7 @@ class BrowserObserver:
         self._resolve_credentials = resolve_credentials
         self._resolve_otp_secret = resolve_otp_secret
         self._report_event = report_event
+        self._on_browser_closed = on_browser_closed
         self._interval = interval
         self._settle_seconds = settle_seconds
         self._connect_timeout = connect_timeout
@@ -132,6 +134,14 @@ class BrowserObserver:
         except Exception:  # noqa: BLE001 - event reporting must never kill the observer
             logger.exception("observer event report failed for session %s", self.session_id)
 
+    def _notify_browser_closed(self) -> None:
+        if self._on_browser_closed is None:
+            return
+        try:
+            self._on_browser_closed(self.session_id)
+        except Exception:  # noqa: BLE001 - cleanup reporting must not mask shutdown
+            logger.exception("browser-close cleanup failed for session %s", self.session_id)
+
     def _run(self) -> None:
         try:
             from playwright.sync_api import sync_playwright
@@ -142,6 +152,7 @@ class BrowserObserver:
             context = _launch_profile_context(pw, self)
             if context is None:
                 self._emit("failed", "could not launch the isolated browser", result="failure")
+                self._notify_browser_closed()
                 return
             try:
                 page = context.pages[0] if context.pages else context.new_page()
@@ -170,6 +181,11 @@ class BrowserObserver:
                     context.close()
                 except Exception:  # noqa: BLE001
                     logger.debug("observer context close failed for session %s", self.session_id, exc_info=True)
+                finally:
+                    # Cleanup runs only after Chromium releases its files.
+                    # Removing an unsaved profile from the page callback lets
+                    # the closing browser recreate a partial directory.
+                    self._notify_browser_closed()
 
     def _tick(self, browser: "Browser | BrowserContext") -> None:
         page = _active_page(browser)

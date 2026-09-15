@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 class PageSignal(StrEnum):
     LOGIN_FORM = "LOGIN_FORM"
     GMAIL_HOME = "GMAIL_HOME"
+    GOOGLE_ACCOUNT_HOME = "GOOGLE_ACCOUNT_HOME"
     ORDINARY_INTERSTITIAL = "ORDINARY_INTERSTITIAL"
     CAPTCHA = "CAPTCHA"
     MFA_OR_SECURITY_CHECK = "MFA_OR_SECURITY_CHECK"
@@ -71,6 +72,22 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
     if host in {"accounts.google.com", "consent.google.com", "myaccount.google.com"}:
         if any(marker in haystack for marker in ("sign in", "email or phone", "enter your password")):
             return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE
+        if host == "myaccount.google.com" and any(marker in haystack for marker in (
+            "google account",
+            "personal info",
+            "security",
+            "data & privacy",
+            "people & sharing",
+            "payments & subscriptions",
+            "privacy & personalization",
+            "informations personnelles",
+            "sécurité",
+            "données et confidentialité",
+        )):
+            # This is positive post-authentication evidence, distinct from an
+            # inbox observation. Logged-out My Account pages are handled by
+            # the sign-in markers above.
+            return PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE
         if any(marker in haystack for marker in ("continue", "welcome", "terms of service", "privacy", "review settings")):
             return PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE
     return PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION

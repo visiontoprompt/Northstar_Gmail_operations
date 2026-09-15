@@ -524,6 +524,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
         report_event=_report_observer_event,
+        on_browser_closed=_on_observer_browser_closed,
         interval=settings.browser_observe_interval,
         settle_seconds=settings.browser_observe_settle_seconds,
     )
@@ -551,10 +552,40 @@ def _record_observer_status(session_id: str, organization_id: str, actor_id: str
         db.close()
 
 
-def _stop_observer(session_id: str) -> None:
+def _stop_observer(session_id: str) -> bool:
     observer = _observers.pop(session_id, None)
     if observer:
         observer.stop()
+        return True
+    return False
+
+
+def _on_observer_browser_closed(session_id: str) -> None:
+    """Finalize browser-close bookkeeping after Playwright releases the
+    persistent profile directory.
+
+    Unsaved profile cleanup is intentionally deferred until this callback so
+    the closing Chromium process cannot recreate the scratch directory after
+    the service removes it.
+    """
+    db = SessionLocal()
+    try:
+        session = db.get(BrowserSession, session_id)
+        if not session:
+            return
+        metadata = dict(session.metadata_json or {})
+        metadata["browser_opened"] = False
+        metadata["observer_attached"] = False
+        session.metadata_json = metadata
+        if session.state == "CLOSED" and session.login_state != "AUTHENTICATED":
+            _prune_unsaved_profile_folder(session)
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.browser_closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
+        db.commit()
+    except Exception:  # noqa: BLE001 - observer shutdown must remain best effort
+        db.rollback()
+        logger.exception("browser-close bookkeeping failed for session %s", session_id)
+    finally:
+        db.close()
 
 
 def _resolve_login_credentials(session_id: str) -> tuple[str, str] | None:
@@ -642,10 +673,34 @@ def _prune_unsaved_profile_folder(session: BrowserSession) -> None:
     remove_local_profile(session.profile_id)
 
 
+def cleanup_unsaved_invalid_profiles(db: Session, organization_id: str) -> int:
+    """Remove orphaned on-disk profile directories for accounts already
+    classified as nonexistent.
+
+    This is intentionally narrow: authenticated profiles and accounts with any
+    other status are never touched. It repairs scratch directories left by
+    older observer versions on the next safe application startup.
+    """
+    rows = db.scalars(
+        select(BrowserProfile)
+        .join(GmailAccount, GmailAccount.id == BrowserProfile.account_id)
+        .where(
+            BrowserProfile.organization_id == organization_id,
+            BrowserProfile.authenticated_at.is_(None),
+            GmailAccount.login_status == "NONEXISTENT",
+        )
+    ).all()
+    for profile in rows:
+        remove_local_profile(profile.id)
+    if rows:
+        logger.info("startup cleanup removed %s unsaved nonexistent-account profile director%s", len(rows), "y" if len(rows) == 1 else "ies")
+    return len(rows)
+
+
 def _recover_stale_session(db: Session, organization_id: str, actor_id: str, session: BrowserSession) -> None:
     """Release a durable session row whose dedicated browser is gone."""
     close_local_browser(session.id)
-    _stop_observer(session.id)
+    observer_stopped = _stop_observer(session.id)
     now = utcnow()
     session.state = "CLOSED"
     session.closed_at = now
@@ -656,7 +711,8 @@ def _recover_stale_session(db: Session, organization_id: str, actor_id: str, ses
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
-    _prune_unsaved_profile_folder(session)
+    if not observer_stopped:
+        _prune_unsaved_profile_folder(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id, "reason": "dedicated_browser_not_running"}))
     logger.warning("session %s: recovered stale profile lock because its browser is not running", session.id)
 
@@ -1006,10 +1062,10 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
     elif event_type == "ACCOUNT_NOT_FOUND":
         # This is a definitive terminal result, not a human challenge. Close
         # the dedicated browser, release the profile lock, and remove the
-        # unsaved scratch directory immediately. The durable session remains
+        # unsaved scratch directory after Chromium has fully closed. The durable session remains
         # in history as CLOSED with ACCOUNT_NOT_FOUND for audit/status views.
         close_local_browser(session.id)
-        _stop_observer(session.id)
+        observer_stopped = _stop_observer(session.id)
         session.state = "CLOSED"
         session.login_state = "ACCOUNT_NOT_FOUND"
         session.account.login_status = "NONEXISTENT"
@@ -1024,7 +1080,8 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         metadata["browser_opened"] = False
         metadata["terminal_result"] = "ACCOUNT_NOT_FOUND"
         session.metadata_json = metadata
-        _prune_unsaved_profile_folder(session)
+        if not observer_stopped:
+            _prune_unsaved_profile_folder(session)
     elif event_type == "HEARTBEAT":
         pass
     job = None
@@ -1044,7 +1101,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     if session.state == "CLOSED":
         return session
     close_local_browser(session.id)
-    _stop_observer(session.id)
+    observer_stopped = _stop_observer(session.id)
     now = utcnow()
     session.state = "CLOSED"
     session.last_event_at = now
@@ -1055,7 +1112,8 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
-    _prune_unsaved_profile_folder(session)
+    if not observer_stopped:
+        _prune_unsaved_profile_folder(session)
     job = _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
@@ -1090,6 +1148,10 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
         return signal.value, action.value, updated
     if signal == "GMAIL_HOME" and session.login_state != "AUTHENTICATED":
         logger.info("session %s: Gmail reached on %s -> login completed", session_id, url)
+        updated = record_session_event(db, organization_id, actor_id, session_id, "LOGIN_COMPLETED")
+        return signal.value, action.value, updated
+    if signal == "GOOGLE_ACCOUNT_HOME" and session.login_state != "AUTHENTICATED":
+        logger.info("session %s: signed-in Google Account home reached on %s -> login completed", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "LOGIN_COMPLETED")
         return signal.value, action.value, updated
     session.last_event_at = utcnow()

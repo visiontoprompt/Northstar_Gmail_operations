@@ -240,6 +240,23 @@ def test_classifier_detects_google_account_not_found_copy() -> None:
     assert signal.value == "ACCOUNT_NOT_FOUND"
 
 
+def test_signed_in_google_account_home_marks_account_authenticated() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "post-auth@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        response = client.post(f"/api/v1/sessions/{session['id']}/observations", json={"url": "https://myaccount.google.com/?pli=1", "title": "Google Account", "text": "Google Account Personal info Security Data & privacy"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["signal"] == "GOOGLE_ACCOUNT_HOME"
+        assert body["session"]["state"] == "RUNNING"
+        assert body["session"]["login_state"] == "AUTHENTICATED"
+        assert body["session"]["profile_saved"] is True
+        stored = next(a for a in client.get("/api/v1/accounts").json()["items"] if a["email"] == "post-auth@example.com")
+        assert stored["login_status"] == "AUTHENTICATED"
+        assert stored["profile"]["status"] == "SAVED"
+
+
 def test_credential_update_creates_encrypted_revision_and_requires_reauth() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
