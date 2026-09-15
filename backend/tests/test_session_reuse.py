@@ -83,3 +83,72 @@ def test_invalid_session_purpose_is_rejected(monkeypatch) -> None:
         account = _create_account(client, email="purpose@example.com")
         response = client.post(f"/api/v1/accounts/{account['id']}/sessions", json={"purpose": "explore"})
         assert response.status_code == 422
+
+
+def test_contacts_import_requires_saved_profile(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="noauth_contacts@example.com")
+        resp = client.post(
+            f"/api/v1/accounts/{account['id']}/contacts-import",
+            json={"emails": "a@test.com\nb@test.com"},
+        )
+        assert resp.status_code == 422
+        assert "saved" in resp.json()["detail"]
+
+
+def test_contacts_import_starts_session_with_saved_profile(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="contacts_auth@example.com")
+        # Simulate a saved profile via LOGIN_COMPLETED
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        session_id = opened.json()["id"]
+        client.post(f"/api/v1/sessions/{session_id}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{session_id}/close")
+
+        resp = client.post(
+            f"/api/v1/accounts/{account['id']}/contacts-import",
+            json={"emails": "alice@test.com\nbob@test.com"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["email_count"] == 2
+        assert body["account_id"] == account["id"]
+        assert body["status"] == "REQUIRED"
+
+
+def test_contact_file_library_upload_list_and_start_import(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="file_contacts@example.com")
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/close")
+
+        uploaded = client.post("/api/v1/contact-files", files={"file": ("partners.csv", b"Name,Email\nAlice,alice@example.com\nBob,bob@example.com\n", "text/csv")})
+        assert uploaded.status_code == 201
+        file_body = uploaded.json()
+        assert file_body["original_filename"] == "partners.csv"
+        assert file_body["contact_count"] == 2
+        assert "alice@example.com" not in uploaded.text
+
+        duplicate = client.post("/api/v1/contact-files", files={"file": ("copy.csv", b"Name,Email\nAlice,alice@example.com\nBob,bob@example.com\n", "text/csv")})
+        assert duplicate.status_code == 409
+        invalid = client.post("/api/v1/contact-files", files={"file": ("contacts.json", b'{"email":"alice@example.com"}', "application/json")})
+        assert invalid.status_code == 422
+
+        listed = client.get("/api/v1/contact-files")
+        assert listed.status_code == 200
+        assert listed.json()[0]["id"] == file_body["id"]
+
+        started = client.post(f"/api/v1/accounts/{account['id']}/contacts-import", json={"file_id": file_body["id"]})
+        assert started.status_code == 201
+        assert started.json()["contact_file_id"] == file_body["id"]
+        assert started.json()["email_count"] == 2

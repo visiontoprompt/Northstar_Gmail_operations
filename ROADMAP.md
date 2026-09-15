@@ -131,7 +131,7 @@ Planned modules:
 - Browser security: organization-approved Enhanced Safe Browsing and related managed Chrome policy verification.
 - Gmail markers and labels: create, update, map, and verify required labels.
 - Google apps: create/configure approved Google application resources and verify selected options.
-- Contacts: upload one-address-per-line files, validate, deduplicate, preview, version contact sets, synchronize to one account or a group, and report per-account results.
+- Contacts: upload reusable CSV/VCF/TXT assets, validate and deduplicate email addresses, select a file from the registry, synchronize it to one account or a selected/group scope through the isolated profile, and report per-account results. Initial file-library and profile-backed import are implemented; versioned contact sets and full per-account verification remain planned.
 - Add-ons/extensions: approved catalog keyed by Chrome Web Store ID, permissions review, required version, installation policy, and installed/missing/wrong-version states.
 - Profile personalization: controlled profile name, theme, and approved per-account settings.
 - Google Alerts: template-based topic configuration with reviewable settings and per-account verification.

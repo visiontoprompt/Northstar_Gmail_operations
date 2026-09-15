@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LifecycleStatus(StrEnum):
@@ -249,7 +249,7 @@ class LoginJobProgressResponse(BaseModel):
 
 
 class SessionStartRequest(BaseModel):
-    purpose: Literal["login", "reuse"] = "login"
+    purpose: Literal["login", "reuse", "contacts"] = "login"
 
 
 class AuditEventResponse(BaseModel):
@@ -263,7 +263,7 @@ class AuditEventResponse(BaseModel):
 
 
 class SessionEventCreate(BaseModel):
-    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "HEARTBEAT"]
+    event_type: Literal["LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "CONTACTS_IMPORTED", "HEARTBEAT"]
     detail: str | None = Field(default=None, max_length=300)
 
 
@@ -271,6 +271,37 @@ class PageObservationCreate(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
     title: str = Field(default="", max_length=200)
     text: str = Field(default="", max_length=5000)
+
+
+class ContactFileResponse(BaseModel):
+    id: str
+    original_filename: str
+    media_type: str
+    size_bytes: int
+    contact_count: int
+    status: str
+    last_used_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContactsImportRequest(BaseModel):
+    file_id: str | None = Field(default=None, min_length=1, max_length=96)
+    emails: str | None = Field(default=None, min_length=1, max_length=30000)
+
+    @model_validator(mode="after")
+    def require_asset(self):
+        if not self.file_id and not self.emails:
+            raise ValueError("Choose a contact file")
+        return self
+
+
+class ContactsImportResponse(BaseModel):
+    session_id: str
+    account_id: str
+    contact_file_id: str | None
+    email_count: int
+    status: str
 
 
 class BrowserSessionResponse(BaseModel):

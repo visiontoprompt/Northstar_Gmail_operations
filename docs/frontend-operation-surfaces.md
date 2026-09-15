@@ -11,7 +11,8 @@ Open an account from the registry to access:
 - Delete account: requires typing the exact email. The API archives the account, closes active sessions, and leaves profile/secrets subject to retention policy.
 - Login: opens the existing isolated profile-backed session flow. Automated credential entry, verification solving, and security bypass are outside this frontend milestone.
 - Credentials: opens the existing encrypted credential-revision flow.
-- Contacts, browser security, markers & labels, Google apps, send & reply, add-ons, and Google Alerts: each opens a workflow designer and saves a versioned, non-secret operation draft. Saving a draft does not execute the Google action.
+- Contacts: the registry action opens the reusable Contact File Library. An administrator uploads a CSV, VCF, or TXT asset once, selects a ready file, and starts the import for one account, selected accounts, or the current group. The backend stores the asset outside account metadata and opens the account's isolated profile at `https://contacts.google.com/` for the observer-driven upload.
+- Browser security, markers & labels, Google apps, send & reply, add-ons, and Google Alerts: each opens a workflow designer and saves a versioned, non-secret operation draft. Saving a draft does not execute the Google action.
 
 ## Server contracts now implemented
 
@@ -24,6 +25,9 @@ These endpoints now back the UI. Production authentication/authorization should 
 | Delete account | `DELETE /api/v1/accounts/{account_id}` | Require server-side confirmation, revoke/close owned sessions, apply the project retention policy to profile and secret records, write an audit event, and return no secrets. |
 | Save operation draft | `POST /api/v1/accounts/{account_id}/operation-drafts` | Validate a typed non-secret operation payload, version the draft, and return status plus audit-safe metadata only. |
 | List operation drafts | `GET /api/v1/accounts/{account_id}/operation-drafts` | Return typed draft summaries and lifecycle state; never return passwords, recovery values, 2FA secrets, session cookies, or browser profile contents. |
+| Upload contact file | `POST /api/v1/contact-files` | Validate a CSV/VCF/TXT asset, store it under the organization contact library, return metadata and a contact count, and never return file contents. |
+| List contact files | `GET /api/v1/contact-files` | Return reusable file metadata only. |
+| Start contact import | `POST /api/v1/accounts/{account_id}/contacts-import` | Accept a `file_id`, require an authenticated profile, open a `contacts.google.com` session, and record the file reference in session metadata. |
 
 The frontend shows a success state only after the corresponding response is accepted. Errors remain inline or appear as an error toast; destructive and security-sensitive actions do not use optimistic success.
 

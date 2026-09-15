@@ -43,6 +43,7 @@ type Group = { id: string; name: string; description: string | null; capacity: n
 type Account = { id: string; email: string; group_id: string; group_name: string; lifecycle_status: string; readiness_status: string; login_status: string; gmail_status: string; secret_status: string; recovery_masked: string; two_fa_configured: boolean; proxy: { id: string | null; label: string | null; region: string | null; status: string }; profile: { id: string | null; storage_reference: string | null; status: string }; created_at: string; updated_at: string };
 type Session = { id: string; account_id: string; account_email: string; profile_id: string; profile_storage_reference: string; profile_status: string; profile_saved?: boolean; profile_authenticated_at?: string | null; state: string; login_state: string; runtime_type: string; browser_opened: boolean; observer_attached: boolean; automation_hint: string | null; session_url: string; opened_at: string; last_event_at: string; closed_at: string | null; failure_reason: string | null };
 type AuditEvent = { id: string; action: string; target_type: string; target_id: string; result: string; metadata: Record<string, unknown>; created_at: string };
+type ContactFile = { id: string; original_filename: string; media_type: string; size_bytes: number; contact_count: number; status: string; last_used_at: string | null; created_at: string; updated_at: string };
 type Preview = { total_rows: number; valid_rows: number; duplicate_rows: number; invalid_rows: number; rows: { row_number: number; email?: string | null; recovery_masked?: string | null; two_fa_configured: boolean; valid: boolean; duplicate: boolean; error?: string | null }[] };
 type Toast = { id: number; tone: "success" | "error" | "info"; message: string };
 type LoginJob = { id: string; group_id: string | null; concurrency_limit: number; status: string; total_count: number; queued_count: number; running_count: number; succeeded_count: number; attention_count: number; failed_count: number; created_at: string; started_at: string | null; completed_at: string | null; updated_at: string; items: { id: string; account_id: string; account_email: string; session_id: string | null; state: string; attempts: number; last_error: string | null; updated_at: string }[] };
@@ -51,7 +52,8 @@ type RegistryAction = OperationKind | "login" | "credentials" | "edit" | "move" 
 type ActionScope = "selected" | "group";
 
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) }, ...options });
+  const isMultipart = options?.body instanceof FormData;
+  const response = await fetch(path, { headers: { ...(isMultipart ? {} : { "Content-Type": "application/json" }), ...(options?.headers ?? {}) }, ...options });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(typeof payload.detail === "string" ? payload.detail : "The request could not be completed.");
@@ -61,6 +63,7 @@ const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
 
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 const formatDateTime = (value: string | null | undefined) => value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "—";
+const formatBytes = (value: number) => value < 1024 * 1024 ? `${Math.max(1, Math.round(value / 1024))} KB` : `${(value / (1024 * 1024)).toFixed(1)} MB`;
 const labelStatus = (value: string) => value.toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 function App() {
@@ -73,6 +76,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [isOnboardingOpen, setOnboardingOpen] = useState(false);
+  const [isContactLibraryOpen, setContactLibraryOpen] = useState(false);
   const [isBatchOpen, setBatchOpen] = useState(false);
   const [activeAccount, setActiveAccount] = useState<Account | null>(null);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
@@ -80,6 +84,7 @@ function App() {
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [actionScope, setActionScope] = useState<ActionScope>("selected");
   const [activeOperation, setActiveOperation] = useState<{ kind: OperationKind; accounts: Account[] } | null>(null);
+  const [contactTargets, setContactTargets] = useState<Account[] | null>(null);
   const [activeAdminAction, setActiveAdminAction] = useState<{ kind: "edit" | "move" | "delete"; accounts: Account[] } | null>(null);
   const [credentialAccount, setCredentialAccount] = useState<Account | null>(null);
   const [batchAccountIds, setBatchAccountIds] = useState<string[]>([]);
@@ -156,6 +161,10 @@ function App() {
         setCredentialAccount(targets[0]);
         return;
       }
+      if (kind === "contacts") {
+        setContactTargets(targets);
+        return;
+      }
       if (["edit", "move", "delete"].includes(kind)) { setActiveAdminAction({ kind: kind as "edit" | "move" | "delete", accounts: targets }); return; }
       setActiveOperation({ kind: kind as OperationKind, accounts: targets });
     } catch (requestError) { notify("error", (requestError as Error).message); }
@@ -189,7 +198,7 @@ function App() {
         <header className="topbar"><button type="button" className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={20} /></button><div className="breadcrumbs"><span>Workspace</span><ArrowRight size={14} /><strong>Accounts</strong></div><div className="topbar-actions"><div className="connection-state"><span className="pulse-dot" /> API connected</div><div className="avatar-button" role="img" aria-label="Signed in as Alex Morgan">AM</div></div></header>
 
         <div className="page-content">
-          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT OPERATIONS</div><h1>Account registry</h1><p>Operate the fleet from one control surface. Select accounts, choose a scope, and dispatch the next approved action.</p></div><div className="heading-actions"><button type="button" className="button secondary" onClick={() => setOnboardingOpen(true)}><Plus size={17} /> Add account</button><button type="button" className="button primary" onClick={() => setOnboardingOpen(true)}><ClipboardCheck size={17} /> Import accounts</button></div></section>
+          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT OPERATIONS</div><h1>Account registry</h1><p>Operate the fleet from one control surface. Select accounts, choose a scope, and dispatch the next approved action.</p></div><div className="heading-actions"><button type="button" className="button secondary" onClick={() => setContactLibraryOpen(true)}><AddressBook size={17} /> Contact files</button><button type="button" className="button secondary" onClick={() => setOnboardingOpen(true)}><Plus size={17} /> Add account</button><button type="button" className="button primary" onClick={() => setOnboardingOpen(true)}><ClipboardCheck size={17} /> Import accounts</button></div></section>
           <section className="handoff-banner" aria-label="Phase 1 boundary"><div className="handoff-rail" /><div className="handoff-icon"><ShieldCheck size={19} /></div><div className="handoff-copy"><strong>Safe hand-off to Phase 2</strong><span>New records are encrypted, deduplicated, and ready for a profile-backed automatic login session.</span></div><span className="handoff-state">BOUNDARY LOCKED</span></section>
 
           <AttentionStrip accounts={attentionAccounts} onOpen={setActiveAccount} />
@@ -208,11 +217,13 @@ function App() {
         </div>
       </main>
       {isOnboardingOpen && <OnboardingModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} onClose={() => setOnboardingOpen(false)} onSuccess={(message) => { setOnboardingOpen(false); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
+      {isContactLibraryOpen && <ContactsImportModal accounts={[]} onClose={() => setContactLibraryOpen(false)} onPrepared={(message) => notify("success", message)} onError={(message) => notify("error", message)} />}
       {activeAccount && <AccountDetail account={activeAccount} groups={groups} onClose={() => setActiveAccount(null)} onSessionOpened={setActiveSession} onUpdated={() => { setActiveAccount(null); reload(); }} onPrepared={(message) => notify("info", message)} onError={(message) => notify("error", message)} />}
       {credentialAccount && <CredentialEditor account={credentialAccount} onClose={() => setCredentialAccount(null)} onSaved={() => { setCredentialAccount(null); notify("success", "Credentials updated and the account is ready for a fresh login."); reload(); }} onError={(message) => notify("error", message)} />}
       {activeSession && <SessionWorkspace session={activeSession} onUpdate={(session) => { setActiveSession(session); reload(); }} onClose={() => { setActiveSession(null); reload(); }} onError={(message) => notify("error", message)} />}
       {isBatchOpen && <LoginBatchModal groups={groups} initialGroup={selectedGroup !== "all" ? selectedGroup : groups[0]?.id ?? ""} accountIds={batchAccountIds} onClose={() => { setBatchOpen(false); setBatchAccountIds([]); }} onStarted={(job) => { setBatchOpen(false); setBatchAccountIds([]); setActiveJob(job); notify("success", `${job.running_count} profile sessions opened`); reload(); }} onError={(message) => notify("error", message)} />}
       {activeOperation && <BulkOperationDesigner accounts={activeOperation.accounts} kind={activeOperation.kind} onClose={() => setActiveOperation(null)} onSaved={(message) => { setActiveOperation(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
+      {contactTargets && <ContactsImportModal accounts={contactTargets} onClose={() => setContactTargets(null)} onStarted={(session) => setActiveSession(session)} onPrepared={(message) => { setContactTargets(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeAdminAction && <BulkAdminDesigner accounts={activeAdminAction.accounts} groups={groups} kind={activeAdminAction.kind} onClose={() => setActiveAdminAction(null)} onSaved={(message) => { setActiveAdminAction(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
       {activeJob && <LoginJobWorkspace job={activeJob} onUpdate={(job) => { setActiveJob(job); reload(); }} onClose={() => { setActiveJob(null); reload(); }} onError={(message) => notify("error", message)} />}
       <ToastRegion toasts={toasts} />
@@ -360,7 +371,8 @@ function AccountDetail({ account, groups, onClose, onSessionOpened, onUpdated, o
       </section>
     </div>
     {editingCredentials && <CredentialEditor account={account} onClose={() => setEditingCredentials(false)} onSaved={() => { setEditingCredentials(false); onUpdated(); }} onError={onError} />}
-    {operation && <OperationDesigner account={account} kind={operation} onClose={() => setOperation(null)} onSaved={(message) => { setOperation(null); onPrepared(message); }} onError={onError} />}
+    {operation && operation !== "contacts" && <OperationDesigner account={account} kind={operation} onClose={() => setOperation(null)} onSaved={(message) => { setOperation(null); onPrepared(message); }} onError={onError} />}
+    {operation === "contacts" && <ContactsImportModal accounts={[account]} onClose={() => setOperation(null)} onPrepared={onPrepared} onError={onError} />}
     {adminAction && <AccountAdminDesigner account={account} groups={groups} kind={adminAction} onClose={() => setAdminAction(null)} onSaved={(message) => { setAdminAction(null); onPrepared(message); onUpdated(); }} onError={onError} />}
   </>;
 }
@@ -376,6 +388,102 @@ const operationCopy: Record<OperationKind, { title: string; eyebrow: string; des
 };
 
 function OperationCard({ icon, title, note, onClick }: { icon: React.ReactNode; title: string; note: string; onClick: () => void }) { return <button type="button" className="operation-card" onClick={onClick}><span className="operation-icon">{icon}</span><span><strong>{title}</strong><small>{note}</small></span><ArrowRight size={14} /></button>; }
+
+function ContactsImportModal({ accounts, onClose, onPrepared, onError, onStarted }: { accounts: Account[]; onClose: () => void; onPrepared: (message: string) => void; onError: (message: string) => void; onStarted?: (session: Session) => void }) {
+  const [files, setFiles] = useState<ContactFile[]>([]);
+  const [selectedFileId, setSelectedFileId] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState("");
+  const libraryOnly = accounts.length === 0;
+
+  const loadFiles = async () => {
+    try { setFiles(await api<ContactFile[]>("/api/v1/contact-files?limit=100")); setError(""); }
+    catch (err) { setError((err as Error).message || "Could not load the contact file library."); }
+  };
+
+  useEffect(() => { void loadFiles(); }, []);
+
+  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setUploading(true); setError("");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const created = await api<ContactFile>("/api/v1/contact-files", { method: "POST", body: formData });
+      setFiles((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+      setSelectedFileId(created.id);
+      onPrepared(`${created.original_filename} is ready with ${created.contact_count} contacts.`);
+    } catch (err) { setError((err as Error).message || "The contact file could not be added."); }
+    finally { setUploading(false); }
+  };
+
+  const handleDelete = async (file: ContactFile) => {
+    if (!window.confirm(`Remove ${file.original_filename} from the contact file library?`)) return;
+    try { await api<void>(`/api/v1/contact-files/${file.id}`, { method: "DELETE" }); setFiles((current) => current.filter((item) => item.id !== file.id)); if (selectedFileId === file.id) setSelectedFileId(""); onPrepared(`${file.original_filename} removed from the library.`); }
+    catch (err) { setError((err as Error).message || "The contact file could not be removed."); }
+  };
+
+  const handleImport = async () => {
+    if (!selectedFileId) { setError("Choose a ready contact file first."); return; }
+    setPending(true);
+    setError(""); setProgress("");
+    let started = 0;
+    const failures: string[] = [];
+    let firstSession: Session | null = null;
+    for (const account of accounts) {
+      setProgress(`Starting ${started + failures.length + 1} of ${accounts.length}…`);
+      try {
+        const result = await api<{ session_id: string; email_count: number; contact_file_id: string; status: string }>(`/api/v1/accounts/${account.id}/contacts-import`, { method: "POST", body: JSON.stringify({ file_id: selectedFileId }) });
+        started += 1;
+        if (accounts.length === 1) firstSession = await api<Session>(`/api/v1/sessions/${result.session_id}`);
+      } catch { failures.push(account.email); }
+    }
+    setPending(false); setProgress("");
+    if (firstSession && onStarted) onStarted(firstSession);
+    if (started) onPrepared(`Contact import started for ${started} ${started === 1 ? "account" : "accounts"}${failures.length ? ` · ${failures.length} could not start` : ""}.`);
+    if (failures.length && !started) setError(`No imports started. ${failures[0]} could not open an authenticated profile.`);
+    if (started || libraryOnly) onClose();
+  };
+
+  const title = libraryOnly ? "Contact file library" : accounts.length === 1 ? "Choose a contact file" : `Choose a contact file · ${accounts.length} accounts`;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <section className="modal contact-library-modal" role="dialog" aria-modal="true" aria-labelledby="contacts-title">
+        <div className="modal-header">
+          <div>
+            <div className="eyebrow"><span className="eyebrow-line" /> CONTACTS · GOOGLE CONTACTS</div>
+            <h2 id="contacts-title">{title}</h2>
+            <p>{libraryOnly ? "Keep reusable CSV or vCard files ready for a later account import." : "Select one prepared file. The isolated profile will open contacts.google.com and upload it."}</p>
+          </div>
+          <button type="button" className="icon-button" aria-label="Close contact file library" onClick={onClose} disabled={pending || uploading}><X size={18} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="security-callout">
+            <AddressBook size={17} />
+            <div>
+              <strong>{libraryOnly ? "Reusable import assets" : "Browser-automated import"}</strong>
+              <span>{libraryOnly ? "Upload a contact file once, then select it from the Contacts action for one account, selected accounts, or a whole group." : "The selected file is uploaded through the account’s isolated saved profile. No file contents are copied into account metadata or audit events."}</span>
+            </div>
+          </div>
+          {error && <div className="form-error" role="alert"><XCircle size={17} /><span>{error}</span></div>}
+          <div className="contact-library-head"><div><span className="detail-label">Ready files</span><strong>{files.length} reusable {files.length === 1 ? "file" : "files"}</strong></div><label className="button secondary small upload-file-button"><Plus size={15} /> {uploading ? "Uploading…" : "Add file"}<input type="file" accept=".csv,.vcf,.txt,text/csv,text/vcard,text/plain" onChange={handleUpload} disabled={pending || uploading} /></label></div>
+          {files.length ? <div className="contact-file-list">{files.map((file) => <div className={`contact-file-row ${selectedFileId === file.id ? "selected" : ""}`} key={file.id}><label className="contact-file-select"><input type="radio" name="contact-file" value={file.id} checked={selectedFileId === file.id} onChange={() => setSelectedFileId(file.id)} disabled={pending} /><span className="file-type">{file.original_filename.split(".").pop()?.toUpperCase() ?? "FILE"}</span><span className="contact-file-copy"><strong>{file.original_filename}</strong><small>{file.contact_count} contacts · {formatBytes(file.size_bytes)} · added {formatDate(file.created_at)}{file.last_used_at ? ` · used ${formatDate(file.last_used_at)}` : ""}</small></span></label><button type="button" className="icon-button file-delete" aria-label={`Remove ${file.original_filename}`} onClick={() => void handleDelete(file)} disabled={pending || uploading}><Trash2 size={15} /></button></div>)}</div> : <div className="detail-empty">No ready contact files yet. Add a CSV, VCF, or TXT file to make it available here.</div>}
+          {progress && <div className="contact-progress" role="status"><span className="spinner" />{progress}</div>}
+          {!libraryOnly && <small className="contact-selection-note">{selectedFileId ? "The selected file will be pushed to each account in this scope, one account at a time." : "Choose a ready file to enable the import."}</small>}
+        </div>
+        <div className="modal-footer">
+          <button type="button" className="button secondary" onClick={onClose} disabled={pending || uploading}>Close</button>
+          {!libraryOnly && <button type="button" className="button primary" onClick={() => void handleImport()} disabled={pending || uploading || !selectedFileId}>{pending ? "Starting import…" : `Import to ${accounts.length === 1 ? "account" : `${accounts.length} accounts`}`}</button>}
+        </div>
+      </section>
+    </div>
+  );
+}
 
 function OperationDesigner({ account, kind, onClose, onSaved, onError }: { account: Account; kind: OperationKind; onClose: () => void; onSaved: (message: string) => void; onError: (message: string) => void }) {
   const copy = operationCopy[kind];

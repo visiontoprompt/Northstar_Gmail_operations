@@ -78,6 +78,8 @@ class BrowserObserver:
         interval: float = 1.0,
         settle_seconds: float = 5.0,
         connect_timeout: float = 12.0,
+        purpose: str = "login",
+        contacts_csv_path: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.profile_id = profile_id
@@ -94,6 +96,14 @@ class BrowserObserver:
         self._interval = interval
         self._settle_seconds = settle_seconds
         self._connect_timeout = connect_timeout
+        self.purpose = purpose
+        self.contacts_csv_path = contacts_csv_path
+        self._contacts_imported = False
+        self._contacts_uploaded = False
+        self._contacts_confirm_clicked = False
+        self._contacts_open_clicked = False
+        self._contacts_tick_count = 0
+        self._contacts_upload_tick = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_observation: tuple[str, str, str, str] | None = None
@@ -233,6 +243,9 @@ class BrowserObserver:
 
         if _is_safe_interstitial(url, signal.value) and _can_click_consent(page):
             _click_consent(page)
+
+        if self.purpose == "contacts" and not self._contacts_imported:
+            _handle_contacts_tick(self, page, host, signal)
 
         state_key = (signal.value, url)
         if state_key in self._logged_states:
@@ -598,3 +611,154 @@ def _click_consent(page: "Page") -> None:
                     continue
     except Exception:  # noqa: BLE001
         return
+
+
+_CONTACTS_IMPORT_LABELS = (
+    "import contacts",
+    "import",
+    "importer les contacts",
+    "importer des contacts",
+    "importer",
+    "importar contactos",
+    "importar contatos",
+    "kontakte importieren",
+    "importieren",
+    "импорт контактов",
+    "импорт",
+)
+_CONTACTS_FILE_BUTTON_LABELS = (
+    "select a file",
+    "select file",
+    "choose file",
+    "choose a file",
+    "browse",
+    "sélectionnez un fichier",
+    "choisir un fichier",
+    "parcourir",
+)
+_CONTACTS_CONFIRM_LABELS = (
+    "import",
+    "import now",
+    "upload",
+    "open",
+    "ok",
+    "importer",
+    "ouvrir",
+    "importer les contacts",
+)
+_CONTACTS_SETTINGS_LABELS = (
+    "settings and help",
+    "settings",
+    "paramètres",
+    "ajustes",
+    "configuración",
+    "einstellungen",
+)
+_CONTACTS_DONE_MARKERS = (
+    "contacts imported",
+    "contact imported",
+    "imported successfully",
+    "successfully imported",
+    "import complete",
+    "import terminée",
+    "importation terminée",
+    "importation réussie",
+    "contacts importés",
+    "import terminé",
+    "your import is complete",
+    "the import is complete",
+    "votre importation est terminée",
+)
+_CONTACTS_MAX_TICKS = 90  # ~90 x 1.25s ≈ 2 minutes until the flow gives up
+
+
+def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, signal) -> None:
+    """Drive the Google Contacts import inside a contacts-purpose session.
+
+    Flow: click the import entry point, upload the rendered CSV through the
+    dialog's file input, then wait for the success copy before stopping the
+    observer. Any stop releases the browser so the session closes cleanly.
+    """
+    observer._contacts_tick_count += 1
+    if observer._contacts_tick_count > _CONTACTS_MAX_TICKS:
+        observer._emit("contacts.failed", "import flow timed out before completion", result="failure")
+        observer._stop.set()
+        return
+    if host not in {"contacts.google.com"}:
+        return
+    if not observer._contacts_uploaded:
+        _contacts_advance_file_flow(observer, page)
+        return
+    # Two-step dialogs stay open after the file is picked and need an explicit
+    # "Import" confirmation; a single-attempt click covers that without looping.
+    if not observer._contacts_confirm_clicked and observer._contacts_tick_count - observer._contacts_upload_tick >= 2:
+        if _contacts_click_label(page, _CONTACTS_CONFIRM_LABELS):
+            observer._contacts_confirm_clicked = True
+            observer._emit("contacts.confirmed", "confirmed the contacts import dialog")
+    if signal.value == "CONTACTS_IMPORT_DONE" or _visible_text_mentions_done(page):
+        observer._contacts_imported = True
+        observer._emit("contacts.imported", f"Google Contacts import completed for {observer.contacts_csv_path or 'uploaded file'}")
+        observer._stop.set()
+
+
+def _contacts_advance_file_flow(observer: "BrowserObserver", page: "Page") -> None:
+    """Progress the import toward the file upload: open the importer when it
+    is closed, then pick a file when the importer is asking for one."""
+    if not observer._contacts_open_clicked:
+        if _contacts_click_label(page, _CONTACTS_IMPORT_LABELS):
+            observer._contacts_open_clicked = True
+            observer._emit("contacts.dialog_opened", "contacts import dialog opened")
+            return
+        if observer._contacts_tick_count >= 4:
+            # The import entry can sit under the settings menu in recent UIs;
+            # open settings once, then retry the import label next tick.
+            if _contacts_click_label(page, _CONTACTS_SETTINGS_LABELS):
+                observer._emit("contacts.settings_opened", "opened contacts settings menu")
+        return
+    if not observer.contacts_csv_path or not Path(observer.contacts_csv_path).exists():
+        observer._emit("contacts.failed", "upload CSV file is missing from disk", result="failure")
+        observer._stop.set()
+        return
+    try:
+        file_input = page.locator("input[type=file]").first
+        if file_input.count():
+            observer._contacts_uploaded = True
+            observer._contacts_upload_tick = observer._contacts_tick_count
+            file_input.set_input_files(observer.contacts_csv_path)
+            observer._emit("contacts.file_uploaded", "uploaded contacts CSV for import")
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    _contacts_click_label(page, _CONTACTS_FILE_BUTTON_LABELS)
+
+
+def _contacts_click_label(page: "Page", labels: tuple[str, ...]) -> bool:
+    """Click the first visible element whose text matches one of the labels.
+
+    Scans a broad set of clickable/selectable containers because Google's
+    contacts UI renders the import entry as a button, menu item, or link
+    depending on the build and locale.
+    """
+    wanted = tuple(label.strip().lower() for label in labels)
+    try:
+        for candidate in page.locator("button, [role=button], [role=menuitem], [role=tab], a, li, div").all():
+            try:
+                label = (candidate.inner_text() or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if any(w in label[:120] for w in wanted):
+                try:
+                    if not candidate.is_visible():
+                        continue
+                    candidate.click(timeout=1500)
+                    return True
+                except Exception:  # noqa: BLE001 - hidden/disabled; keep scanning
+                    continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _visible_text_mentions_done(page: "Page") -> bool:
+    text = _visible_text(page).lower()
+    return any(marker in text for marker in _CONTACTS_DONE_MARKERS)

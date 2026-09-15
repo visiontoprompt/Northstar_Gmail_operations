@@ -11,8 +11,9 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, joinedload
 
 from .config import get_settings
+from .contacts import build_google_contacts_csv, contact_file_checksum, new_contact_file_id, parse_emails, validate_contact_file, write_contact_file, write_contacts_upload
 from .db import SessionLocal
-from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, remove_local_profile, resolve_browser_executable
@@ -504,7 +505,7 @@ def _locks() -> RedisLocks:
 _observers: dict[str, BrowserObserver] = {}
 
 
-def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login") -> bool:
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login", contacts_csv_path: str | None = None) -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
         logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
@@ -519,7 +520,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         0,
         profile_dir=str((Path(settings.profile_root) / profile_id).resolve()),
         executable=resolve_browser_executable(),
-        start_url="https://mail.google.com/" if purpose == "reuse" else None,
+        start_url="https://contacts.google.com/" if purpose == "contacts" else ("https://mail.google.com/" if purpose == "reuse" else None),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
@@ -527,6 +528,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         on_browser_closed=_on_observer_browser_closed,
         interval=settings.browser_observe_interval,
         settle_seconds=settings.browser_observe_settle_seconds,
+        purpose=purpose,
+        contacts_csv_path=contacts_csv_path,
     )
     _observers[session_id] = observer
     observer.start()
@@ -995,17 +998,19 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
     return [session_response(item) for item in db.scalars(query).unique().all()]
 
 
-def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str, purpose: str = "login") -> BrowserSession:
+def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str, purpose: str = "login", contacts_csv_path: str | None = None) -> BrowserSession:
     account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
-    if purpose not in {"login", "reuse"}:
-        raise ImportValidationError("Session purpose must be 'login' or 'reuse'")
-    if purpose == "reuse" and profile.authenticated_at is None:
+    if purpose not in {"login", "reuse", "contacts"}:
+        raise ImportValidationError("Session purpose must be 'login', 'reuse', or 'contacts'")
+    if purpose in {"reuse", "contacts"} and profile.authenticated_at is None:
         raise ImportValidationError("No authenticated profile saved for this account — complete a login session first so the profile gets saved")
+    if purpose == "contacts" and not contacts_csv_path:
+        raise ImportValidationError("A contacts CSV file is required for a contacts session")
     if profile.active_session_id:
         active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
         if active:
@@ -1021,7 +1026,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         # Nothing is persisted for this attempt, so the account/profile stay
         # clean and a later attempt can retry without a zombie session blocking it.
         raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id})
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path})
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
@@ -1031,9 +1036,104 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.commit()
-    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose)
+    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose, contacts_csv_path=contacts_csv_path)
     logger.info("session %s: observer started=%s", session.id, observer_started)
     return get_session(db, organization_id, session.id)
+
+
+def contact_file_response(contact_file: ContactFile) -> dict:
+    return {
+        "id": contact_file.id,
+        "original_filename": contact_file.original_filename,
+        "media_type": contact_file.media_type,
+        "size_bytes": contact_file.size_bytes,
+        "contact_count": contact_file.contact_count,
+        "status": contact_file.status,
+        "last_used_at": contact_file.last_used_at,
+        "created_at": contact_file.created_at,
+        "updated_at": contact_file.updated_at,
+    }
+
+
+def list_contact_files(db: Session, organization_id: str, limit: int = 100) -> list[dict]:
+    query = select(ContactFile).where(ContactFile.organization_id == organization_id).order_by(ContactFile.created_at.desc()).limit(limit)
+    return [contact_file_response(item) for item in db.scalars(query).all()]
+
+
+def add_contact_file(db: Session, organization_id: str, actor_id: str, filename: str, media_type: str | None, content: bytes) -> ContactFile:
+    try:
+        safe_name, contact_count, detected_type = validate_contact_file(filename, content)
+    except ValueError as exc:
+        raise ImportValidationError(str(exc)) from exc
+    checksum = contact_file_checksum(content)
+    duplicate = db.scalar(select(ContactFile).where(ContactFile.organization_id == organization_id, ContactFile.checksum == checksum))
+    if duplicate:
+        raise ImportValidationError("This contact file is already in the library")
+    file_id = new_contact_file_id()
+    path = write_contact_file(organization_id, file_id, safe_name, content)
+    contact_file = ContactFile(id=file_id, organization_id=organization_id, original_filename=safe_name, storage_reference=str(path.relative_to(Path(get_settings().profile_root))), media_type=detected_type, size_bytes=len(content), contact_count=contact_count, checksum=checksum, status="READY", created_by=actor_id)
+    try:
+        db.add(contact_file)
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="contact_file.uploaded", target_type="contact_file", target_id=file_id, result="success", metadata_json={"filename": safe_name, "size_bytes": len(content), "contact_count": contact_count}))
+        db.commit()
+    except Exception:
+        db.rollback()
+        path.unlink(missing_ok=True)
+        raise
+    return contact_file
+
+
+def delete_contact_file(db: Session, organization_id: str, actor_id: str, file_id: str) -> None:
+    contact_file = db.scalar(select(ContactFile).where(ContactFile.organization_id == organization_id, ContactFile.id == file_id))
+    if not contact_file:
+        raise ImportValidationError("Contact file not found")
+    active_sessions = db.scalars(select(BrowserSession).where(BrowserSession.organization_id == organization_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))).all()
+    if any((session.metadata_json or {}).get("contact_file_id") == file_id for session in active_sessions):
+        raise ImportValidationError("This contact file is being used by an active import")
+    path = Path(get_settings().profile_root) / contact_file.storage_reference
+    path.unlink(missing_ok=True)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="contact_file.deleted", target_type="contact_file", target_id=file_id, result="success", metadata_json={"filename": contact_file.original_filename}))
+    db.delete(contact_file)
+    db.commit()
+
+
+def start_contacts_import(db: Session, organization_id: str, actor_id: str, account_id: str, contact_file_id: str | None = None, raw_emails: str | None = None) -> tuple[BrowserSession, ContactFile | None, int]:
+    """Open a profile-backed Google Contacts import for a library asset.
+
+    ``raw_emails`` remains a compatibility path for older clients; the UI uses
+    the reusable contact-file library and never sends inline contact data.
+    """
+    contact_file: ContactFile | None = None
+    temporary_path: Path | None = None
+    if contact_file_id:
+        contact_file = db.scalar(select(ContactFile).where(ContactFile.organization_id == organization_id, ContactFile.id == contact_file_id))
+        if not contact_file or contact_file.status != "READY":
+            raise ImportValidationError("Choose a ready contact file")
+        csv_path = Path(get_settings().profile_root) / contact_file.storage_reference
+        email_count = contact_file.contact_count
+        if not csv_path.is_file():
+            raise ImportValidationError("The selected contact file is missing from storage")
+    elif raw_emails:
+        emails = parse_emails(raw_emails)
+        temporary_path = write_contacts_upload(account_id, build_google_contacts_csv(emails))
+        csv_path = temporary_path
+        email_count = len(emails)
+    else:
+        raise ImportValidationError("Choose a ready contact file")
+    try:
+        session = start_login_session(db, organization_id, actor_id, account_id, purpose="contacts", contacts_csv_path=str(csv_path))
+    except Exception:
+        if temporary_path:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    metadata = {**(session.metadata_json or {}), "contact_count": email_count}
+    if contact_file:
+        metadata.update({"contact_file_id": contact_file.id, "contact_file_name": contact_file.original_filename})
+        contact_file.last_used_at = utcnow()
+    session.metadata_json = metadata
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="contact_import.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account_id, "contact_file_id": contact_file.id if contact_file else None, "contact_count": email_count}))
+    db.commit()
+    return get_session(db, organization_id, session.id), contact_file, email_count
 
 
 def record_session_event(db: Session, organization_id: str, actor_id: str, session_id: str, event_type: str, detail: str | None = None) -> BrowserSession:
@@ -1082,6 +1182,22 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.metadata_json = metadata
         if not observer_stopped:
             _prune_unsaved_profile_folder(session)
+    elif event_type == "CONTACTS_IMPORTED":
+        close_local_browser(session.id)
+        _stop_observer(session.id)
+        session.state = "CLOSED"
+        session.login_state = "CONTACTS_IMPORTED"
+        session.account.login_status = "AUTHENTICATED"
+        session.account.profile_status = "SAVED"
+        session.closed_at = now
+        session.profile.status = "RESERVED"
+        session.profile.lock_state = "UNLOCKED"
+        session.profile.active_session_id = None
+        session.profile.last_closed_at = now
+        metadata = dict(session.metadata_json or {})
+        metadata["browser_opened"] = False
+        metadata["terminal_result"] = "CONTACTS_IMPORTED"
+        session.metadata_json = metadata
     elif event_type == "HEARTBEAT":
         pass
     job = None

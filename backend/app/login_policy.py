@@ -11,6 +11,9 @@ class PageSignal(StrEnum):
     CAPTCHA = "CAPTCHA"
     MFA_OR_SECURITY_CHECK = "MFA_OR_SECURITY_CHECK"
     ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
+    CONTACTS_HOME = "CONTACTS_HOME"
+    CONTACTS_IMPORT_DIALOG = "CONTACTS_IMPORT_DIALOG"
+    CONTACTS_IMPORT_DONE = "CONTACTS_IMPORT_DONE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -90,4 +93,29 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             return PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE
         if any(marker in haystack for marker in ("continue", "welcome", "terms of service", "privacy", "review settings")):
             return PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE
+    if host == "contacts.google.com":
+        if any(marker in haystack for marker in (
+            "contacts imported",
+            "successfully imported",
+            "imported successfully",
+            "import terminée",
+            "importation terminée",
+            "contacts importés",
+        )):
+            return PageSignal.CONTACTS_IMPORT_DONE, PageAction.SAFE_TO_OBSERVE
+        if any(marker in haystack for marker in (
+            # English.
+            "import contacts",
+            "imported contacts",
+            "choose a file",
+            "select a file",
+            "select contacts file",
+            # French.
+            "importer les contacts",
+            "importer des contacts",
+            "sélectionnez un fichier",
+            "choisir un fichier",
+        )):
+            return PageSignal.CONTACTS_IMPORT_DIALOG, PageAction.SAFE_TO_OBSERVE
+        return PageSignal.CONTACTS_HOME, PageAction.SAFE_TO_OBSERVE
     return PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION

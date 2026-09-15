@@ -3,7 +3,7 @@ import secrets
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, or_, select
@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
-from .service import ImportValidationError, account_response, add_account, archive_account, cleanup_unsaved_invalid_profiles, close_session, create_login_job, create_operation_draft, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_login_session, update_account_metadata, update_credentials, update_login_job_state
+from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
+from .service import ImportValidationError, account_response, add_account, add_contact_file, archive_account, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_contact_files, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_contacts_import, start_login_session, update_account_metadata, update_credentials, update_login_job_state
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
@@ -310,6 +310,45 @@ def open_login_session(account_id: str, payload: SessionStartRequest | None = No
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/accounts/{account_id}/contacts-import", response_model=ContactsImportResponse, status_code=status.HTTP_201_CREATED)
+def contacts_import(account_id: str, payload: ContactsImportRequest, db: Session = Depends(get_db)) -> dict:
+    try:
+        session, contact_file, email_count = start_contacts_import(db, settings.demo_org_id, "admin_demo", account_id, payload.file_id, payload.emails)
+        return {
+            "session_id": session.id,
+            "account_id": account_id,
+            "contact_file_id": contact_file.id if contact_file else None,
+            "email_count": email_count,
+            "status": session.login_state,
+        }
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/contact-files", response_model=list[ContactFileResponse])
+def contact_files(limit: int = Query(default=100, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
+    return list_contact_files(db, settings.demo_org_id, limit)
+
+
+@app.post("/api/v1/contact-files", response_model=ContactFileResponse, status_code=status.HTTP_201_CREATED)
+def upload_contact_file(file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+    try:
+        content = file.file.read()
+        return contact_file_response(add_contact_file(db, settings.demo_org_id, "admin_demo", file.filename or "contacts.csv", file.content_type, content))
+    except ImportValidationError as exc:
+        message = str(exc).lower()
+        raise HTTPException(status_code=409 if "already" in message else 422, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/contact-files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_contact_file(file_id: str, db: Session = Depends(get_db)) -> None:
+    try:
+        delete_contact_file(db, settings.demo_org_id, "admin_demo", file_id)
+    except ImportValidationError as exc:
+        message = str(exc).lower()
+        raise HTTPException(status_code=404 if "not found" in message else 409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/sessions/{session_id}/events", response_model=BrowserSessionResponse)

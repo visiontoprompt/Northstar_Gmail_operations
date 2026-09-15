@@ -39,6 +39,9 @@ the account detail modal.
 - `Entire group` applies to every account in the selected group, not only the
   currently loaded page.
 - Login uses the existing controlled batch flow and its concurrency setting.
+- Contacts opens the Contact File Library. A reusable CSV, VCF, or TXT file is
+  uploaded once, selected from the library, and then sent through the
+  authenticated account profile to `contacts.google.com`.
 - Non-login operations save one audited plan per account until their execution
   worker is available.
 - Credential revision remains limited to exactly one selected account because
@@ -65,6 +68,9 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
 - Search/filter changes reset the page to 1 and preserve state in URL parameters when the frontend is connected to a router.
 - Rows link to an account detail panel that re-fetches the account, sessions, and audit events when opened and refreshes the live record while it remains visible. Overview, Sessions, and Audit are functional tabs; the panel shows current server state rather than relying on the registry row snapshot.
 - Account detail is a focused read surface: phase, login, Gmail observation, lifecycle, vault, proxy, profile, metadata, session history, and audit history each have a dedicated place. Registry actions remain in the registry action rail.
+- Contact files are reusable organization assets. The library displays filename,
+  format, contact count, size, and usage time without returning file contents;
+  imports reference the selected asset by ID.
 - Account detail exposes server-backed edit metadata, move group, and guarded archive controls. The API validates, audits, and reloads the registry after success.
 - Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer saves a versioned, non-secret plan; no external action occurs when a plan is saved.
 - Archive is exposed only through the guarded Delete action because it affects account, secret, session, and profile records.

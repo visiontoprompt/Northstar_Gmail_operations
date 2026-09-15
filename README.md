@@ -13,6 +13,7 @@ This phase can:
 - queue a whole group for concurrency-controlled isolated profile dispatch;
 - version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
+- keep reusable CSV/VCF/TXT contact files in an organization library and launch profile-backed imports at Google Contacts.
 
 The complete product direction and delivery sequence are defined in [ROADMAP.md](ROADMAP.md). The system topology, domain ownership, state model, and module boundaries are defined in [docs/architecture.md](docs/architecture.md).
 
@@ -77,6 +78,8 @@ The Vite proxy sends `/api` requests to `http://localhost:8000`.
 ## Security boundary
 
 The raw import line is accepted only at the API boundary, parsed in memory, encrypted before persistence, and never returned, logged, placed in an audit event, or written to browser storage. The UI only shows masked recovery metadata and a `Configured` marker for 2FA. Production deployments must provide a managed `SECRET_KEY`/KMS-backed key and PostgreSQL; the development key fallback is not suitable for production.
+
+Contact import files are stored separately from account records under the configured profile root. The registry Contacts action asks the operator to select a ready library file, then starts the import only for an authenticated profile. File contents are not returned by the API or written to audit metadata.
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 

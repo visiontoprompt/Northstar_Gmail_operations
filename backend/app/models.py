@@ -184,6 +184,27 @@ class OperationDraft(Base):
     account: Mapped[GmailAccount] = relationship(back_populates="operation_drafts")
 
 
+class ContactFile(Base):
+    """Reusable, organization-scoped contact import asset."""
+
+    __tablename__ = "contact_files"
+    __table_args__ = (UniqueConstraint("organization_id", "checksum", name="uq_contact_file_org_checksum"),)
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(120), nullable=False, default="text/csv")
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    contact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="READY", index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(96), default="admin_demo", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class LoginJob(Base):
     __tablename__ = "login_jobs"
 
