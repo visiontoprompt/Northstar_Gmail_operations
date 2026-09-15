@@ -34,7 +34,34 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
         return PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN
     if any(marker in haystack for marker in ("2-step verification", "two-step verification", "security key", "verify it's you", "phone verification", "security check", "enter the code", "enter your code", "google authenticator", "one-time code")):
         return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
-    if any(marker in haystack for marker in ("couldn't find your google account", "couldn't find your account", "no google account found", "no account found with that email", "no account found", "find your google account", "did you mean", "that email address doesn't", "this email address doesn't", "isn't associated with a google account", "no account exists")):
+    if any(marker in haystack for marker in (
+        # English Google sign-in copy.
+        "couldn't find your google account",
+        "couldn't find your account",
+        "no google account found",
+        "no account found with that email",
+        "no account found",
+        "find your google account",
+        "did you mean",
+        "that email address doesn't",
+        "this email address doesn't",
+        "isn't associated with a google account",
+        "no account exists",
+        # French Google sign-in copy, including the exact text shown in the
+        # reported production failure: "Impossible de trouver ce compte".
+        "impossible de trouver ce compte",
+        "impossible de trouver votre compte",
+        "impossible de trouver votre compte google",
+        "aucun compte google trouvé",
+        "aucun compte trouvé",
+        "aucun compte google n'a été trouvé",
+        "cette adresse e-mail n'est associée à aucun compte google",
+        "cette adresse e-mail n’est associée à aucun compte google",
+        "n'est associée à aucun compte google",
+        "n’est associée à aucun compte google",
+        "ce compte google n'existe pas",
+        "ce compte google n’existe pas",
+    )):
         return PageSignal.ACCOUNT_NOT_FOUND, PageAction.NEEDS_ATTENTION
     if host in {"mail.google.com", "inbox.google.com"}:
         mailbox_markers = ("inbox", "compose", "sent mail", "drafts", "primary")

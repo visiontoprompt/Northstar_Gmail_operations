@@ -9,14 +9,21 @@ This phase can:
 - validate and deduplicate accounts inside an organization;
 - keep credential material in an encrypted secrets table, separate from operational metadata;
 - reserve dedicated proxy and persistent browser-profile metadata for later provisioning;
-- open a durable, profile-backed human login hand-off and record its lifecycle;
+- open a durable, profile-backed login session and record its lifecycle;
 - queue a whole group for concurrency-controlled isolated profile dispatch;
 - version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
 
 The complete product direction and delivery sequence are defined in [ROADMAP.md](ROADMAP.md). The system topology, domain ownership, state model, and module boundaries are defined in [docs/architecture.md](docs/architecture.md).
 
-The current session hand-off deliberately does not solve or bypass Gmail CAPTCHA/MFA/security challenges, use browser stealth, or use Gmail API/OAuth. It persists profile reservations, credential revisions, and concurrency-controlled session queues so a reviewed browser worker can attach safely. Imported accounts end in `READY_FOR_LOGIN`, which is the hand-off boundary for login.
+The local session observer may enter credentials already stored in the encrypted
+vault only on Google's own sign-in host. It does not solve or bypass CAPTCHA,
+MFA, or security challenges, use Gmail API/OAuth, or claim success from a login
+form alone. A profile is marked saved only after a Gmail mailbox is observed.
+Definitive account-not-found results are recorded as `NONEXISTENT`, the browser
+session is closed, and the unsaved profile directory is removed. Imported
+accounts still end in `READY_FOR_LOGIN`, which is the hand-off boundary for
+login.
 
 ## Repository layout
 
@@ -73,7 +80,7 @@ The raw import line is accepted only at the API boundary, parsed in memory, encr
 
 Session records contain only account/profile references, lifecycle state, timestamps, and controlled runtime metadata. They never contain imported credential material. See [docs/phase-2-session.md](docs/phase-2-session.md) for the hand-off contract.
 
-Login page handling is observation-first: normal Google interstitials can be classified, while CAPTCHA, MFA, and security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
+Login page handling is observation-first: normal Google interstitials can be classified, account-not-found copy is recognized in English and French, and CAPTCHA/MFA/security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
 
 ## Verification
 

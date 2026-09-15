@@ -828,6 +828,7 @@ def _sync_job_item_for_session(db: Session, session_id: str, session_state: str)
     if not item or item.state != "RUNNING":
         return None
     job = db.get(LoginJob, item.job_id)
+    session = db.get(BrowserSession, session_id)
     # Pause the affected account whenever Google posed a challenge or the
     # worker hit an unknown page; the profile stays reserved for a human.
     if session_state == "RUNNING":
@@ -837,6 +838,9 @@ def _sync_job_item_for_session(db: Session, session_id: str, session_state: str)
         item.paused_reason = "Challenge or unknown page raised for operator attention"
         return _finalize_item(db, item, "ATTENTION")
     elif session_state == "CLOSED":
+        if session is not None and session.login_state == "ACCOUNT_NOT_FOUND":
+            item.paused_reason = "Google confirmed that this account does not exist"
+            return _finalize_item(db, item, "ATTENTION", error=session.failure_reason)
         _release_item_lease(db, item)
         item.state = "QUEUED"
         item.session_id = None
@@ -1000,11 +1004,27 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.login_state = "UNKNOWN_PAGE"
         session.failure_reason = "The worker encountered an unrecognized page"
     elif event_type == "ACCOUNT_NOT_FOUND":
-        session.state = "NEEDS_ATTENTION"
+        # This is a definitive terminal result, not a human challenge. Close
+        # the dedicated browser, release the profile lock, and remove the
+        # unsaved scratch directory immediately. The durable session remains
+        # in history as CLOSED with ACCOUNT_NOT_FOUND for audit/status views.
+        close_local_browser(session.id)
+        _stop_observer(session.id)
+        session.state = "CLOSED"
         session.login_state = "ACCOUNT_NOT_FOUND"
         session.account.login_status = "NONEXISTENT"
         session.account.readiness_status = "SETUP_ERROR"
         session.failure_reason = "Google reports that no account exists for this email address"
+        session.closed_at = now
+        session.profile.status = "RESERVED"
+        session.profile.lock_state = "UNLOCKED"
+        session.profile.active_session_id = None
+        session.profile.last_closed_at = now
+        metadata = dict(session.metadata_json or {})
+        metadata["browser_opened"] = False
+        metadata["terminal_result"] = "ACCOUNT_NOT_FOUND"
+        session.metadata_json = metadata
+        _prune_unsaved_profile_folder(session)
     elif event_type == "HEARTBEAT":
         pass
     job = None

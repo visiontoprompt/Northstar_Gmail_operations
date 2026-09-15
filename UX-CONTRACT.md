@@ -49,7 +49,7 @@ the account detail modal.
 
 ## State vocabulary
 
-Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALID`, and `ARCHIVED`. The session hand-off owns `LOGIN_REQUIRED`, `AUTHENTICATED`, `VERIFICATION_REQUIRED`, `NEEDS_ATTENTION`, and `CLOSED`; these are session/browser observations, not proof that a healthy Gmail worker is running.
+Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALID`, and `ARCHIVED`. The session hand-off owns `LOGIN_REQUIRED`, `AUTHENTICATED`, `VERIFICATION_REQUIRED`, `NEEDS_ATTENTION`, and `CLOSED`; these are session/browser observations, not proof that a healthy Gmail worker is running. `ACCOUNT_NOT_FOUND` is terminal: the account becomes `NONEXISTENT`, the browser closes, the profile lock is released, and the unsaved local profile directory is removed.
 
 ## Validation and sensitive values
 

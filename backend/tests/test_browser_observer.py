@@ -390,3 +390,10 @@ def test_observer_stop_joins_thread():
         assert observer._thread is not None and observer._thread.is_alive()
         observer.stop()
     assert not observer._thread.is_alive()
+
+
+def test_observer_stop_from_its_own_thread_does_not_try_to_join_itself():
+    observer = BrowserObserver("s1", "p1", 9222)
+    observer._thread = __import__("threading").current_thread()
+    observer.stop()
+    assert observer._stop.is_set()

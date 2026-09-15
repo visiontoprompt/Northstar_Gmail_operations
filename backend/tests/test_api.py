@@ -218,8 +218,11 @@ def test_nonexistent_account_is_detected_and_reported() -> None:
         body = response.json()
         assert body["signal"] == "ACCOUNT_NOT_FOUND"
         assert body["action"] == "NEEDS_ATTENTION"
-        assert body["session"]["state"] == "NEEDS_ATTENTION"
+        assert body["session"]["state"] == "CLOSED"
         assert body["session"]["login_state"] == "ACCOUNT_NOT_FOUND"
+        assert body["session"]["browser_opened"] is False
+        assert body["session"]["profile_status"] == "RESERVED"
+        assert body["session"]["profile_saved"] is False
         assert "secret" not in response.text
         ghost = next(a for a in client.get("/api/v1/accounts").json()["items"] if a["email"] == "ghost@example.com")
         assert ghost["login_status"] == "NONEXISTENT"
@@ -232,6 +235,8 @@ def test_classifier_detects_google_account_not_found_copy() -> None:
     assert signal.value == "ACCOUNT_NOT_FOUND"
     assert action.value == "NEEDS_ATTENTION"
     signal, action = classify_page(PageObservation(url="https://accounts.google.com/", title="Sign in - Google Accounts", text="No Google Account found with this email address"))
+    assert signal.value == "ACCOUNT_NOT_FOUND"
+    signal, action = classify_page(PageObservation(url="https://accounts.google.com/signin/v2/identifier", title="Connexion - Google", text="Impossible de trouver ce compte"))
     assert signal.value == "ACCOUNT_NOT_FOUND"
 
 

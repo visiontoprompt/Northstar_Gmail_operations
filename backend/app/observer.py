@@ -118,7 +118,10 @@ class BrowserObserver:
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
-        if self._thread and self._thread.is_alive():
+        # Account-not-found cleanup is triggered from the observer callback
+        # itself. Never join the current thread; setting the stop event lets
+        # the loop leave and the persistent context close in _run's finally.
+        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=timeout)
 
     def _emit(self, event: str, detail: str = "", result: str = "success") -> None:
