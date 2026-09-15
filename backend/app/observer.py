@@ -753,7 +753,12 @@ def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, 
             if _contacts_click_final_import(page) or _contacts_click_label(page, ("import", "importar", "importer")):
                 observer._contacts_confirm_retries += 1
                 observer._emit("contacts.confirm_retry", "retried the exact contacts import action text")
-    if signal.value == "CONTACTS_IMPORT_DONE" or _visible_text_mentions_done(page) or _contacts_dialog_closed_after_confirm(observer, page):
+    if (
+        signal.value == "CONTACTS_IMPORT_DONE"
+        or _visible_text_mentions_done(page)
+        or _contacts_dialog_closed_after_confirm(observer, page)
+        or _contacts_import_result_route(observer, page)
+    ):
         observer._contacts_imported = True
         observer._emit("contacts.imported", f"Google Contacts import completed for {observer.contacts_csv_path or 'uploaded file'}")
         observer._stop.set()
@@ -896,6 +901,27 @@ def _contacts_dialog_closed_after_confirm(observer: "BrowserObserver", page: "Pa
     if _contacts_import_dialog_visible(page):
         return False
     return not _contacts_has_visible_exact_text(page, ("import", "importar", "importer"))
+
+
+def _contacts_import_result_route(observer: "BrowserObserver", page: "Page") -> bool:
+    """Recognize Google's durable post-import route when the toast is gone.
+
+    The completion toast is transient and is not consistently exposed through
+    Playwright's accessible body text. After the final Import action succeeds,
+    Google navigates to the imported label (``/label/<id>``). Requiring the
+    confirmation click and a short settle window makes this route a safe,
+    durable completion signal without treating the initial Contacts page as
+    success.
+    """
+    if not observer._contacts_confirm_clicked or observer._contacts_post_confirm_ticks < 2:
+        return False
+    try:
+        parsed = urlparse(page.url or "")
+    except Exception:  # noqa: BLE001 - a closing page is not a success signal
+        return False
+    if parsed.hostname != "contacts.google.com":
+        return False
+    return bool(re.fullmatch(r"/label/[^/]+/?", parsed.path or ""))
 
 
 def _contacts_import_dialog_visible(page: "Page") -> bool:

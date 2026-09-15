@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _is_safe_interstitial
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _is_safe_interstitial
 
 
 class _FakeButton:
@@ -386,6 +386,15 @@ def test_login_policy_classifies_french_contacts_completion_to_close_session():
     signal, action = classify_page(PageObservation("https://contacts.google.com/label/import", "Contacts", "Le processus est terminé."))
     assert signal is PageSignal.CONTACTS_IMPORT_DONE
     assert action is PageAction.SAFE_TO_OBSERVE
+
+
+def test_contacts_import_result_route_is_completion_after_confirm():
+    observer = BrowserObserver("s1", "p1", 9222, purpose="contacts")
+    observer._contacts_confirm_clicked = True
+    observer._contacts_post_confirm_ticks = 2
+    page = _FakePage("https://contacts.google.com/label/274fc7528c1cc1f0")
+
+    assert _contacts_import_result_route(observer, page) is True
 
 
 def test_observer_clicks_use_another_account_on_chooser():
