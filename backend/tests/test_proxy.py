@@ -130,7 +130,7 @@ def test_observer_passes_account_proxy_to_playwright(tmp_path) -> None:
     assert kwargs["proxy"] == expected
 
 
-def test_observer_passes_start_url_to_chromium_launch(tmp_path) -> None:
+def test_observer_keeps_normal_chrome_window_for_in_context_navigation(tmp_path) -> None:
     playwright = MagicMock()
     start_url = "https://myaccount.google.com/account-enhanced-safe-browsing"
     observer = BrowserObserver("s1", "account@example.com__org", 0, profile_dir=str(tmp_path), executable="fake-browser", headless=True, start_url=start_url)
@@ -138,7 +138,7 @@ def test_observer_passes_start_url_to_chromium_launch(tmp_path) -> None:
     _launch_profile_context(playwright, observer)
 
     kwargs = playwright.chromium.launch_persistent_context.call_args.kwargs
-    assert kwargs["args"][-1] == f"--app={start_url}"
+    assert all(not argument.startswith("--app=") for argument in kwargs["args"])
 
 
 def test_proxy_inventory_can_reassign_edit_and_remove_accounts() -> None:

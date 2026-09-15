@@ -352,19 +352,16 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
             launch_kwargs["proxy"] = proxy
     if not observer.headless:
         launch_kwargs["no_viewport"] = True
-    # Chromium rejects a raw page URL in Playwright's launch args, but its
-    # supported --app= form opens that URL as the initial page. This prevents
-    # a visible fresh window from presenting about:blank while the first
-    # observer tick starts. The observer still performs an explicit navigation
-    # after the context is ready and keeps the normal operation page behavior.
+    # Playwright owns the initial page and requires navigation through the Page
+    # API. Keep the normal Chrome window here so the account session retains
+    # its address bar and in-window Google navigation; the observer performs
+    # the explicit target navigation immediately after the context is ready.
     launch_args = [
         "--disable-blink-features=AutomationControlled",
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
     ]
-    if observer.start_url and not observer.start_url.startswith(_BLANK_URL_PREFIXES):
-        launch_args.append(f"--app={observer.start_url}")
     try:
         return pw.chromium.launch_persistent_context(
             user_data_dir=str(profile_path),
@@ -839,8 +836,13 @@ _SAFE_BROWSING_ACTIVATE_LABELS = (
     "turn on",
     "enable",
     "activate",
+    "keep on",
+    "keep it on",
     "activer",
+    "garder activé",
+    "maintenir activé",
     "activar",
+    "mantener activado",
     "habilitar",
 )
 _GMAIL_MARKER_SECTION_LABELS = (
@@ -1071,7 +1073,7 @@ def _set_enhanced_safe_browsing(page: "Page") -> str | None:
             """config => {
                 const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const terms = config.terms.map(normalize);
-                const action = ['turn on', 'enable', 'activate', 'activer', 'activa', 'activar', 'habilitar'];
+                const action = ['turn on', 'enable', 'activate', 'keep on', 'keep it on', 'activer', 'garder active', 'maintenir active', 'activa', 'activar', 'mantener activado', 'habilitar'];
                 const controls = [...document.querySelectorAll('input[type="checkbox"], [role="switch"], [role="checkbox"], button')];
                 const textOf = node => normalize([node?.innerText, node?.textContent, node?.getAttribute?.('aria-label'), node?.getAttribute?.('title')].filter(Boolean).join(' '));
                 const hasTerm = value => terms.some(term => value.includes(term));
