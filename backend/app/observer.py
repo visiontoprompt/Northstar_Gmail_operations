@@ -352,17 +352,25 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
             launch_kwargs["proxy"] = proxy
     if not observer.headless:
         launch_kwargs["no_viewport"] = True
+    # Chromium rejects a raw page URL in Playwright's launch args, but its
+    # supported --app= form opens that URL as the initial page. This prevents
+    # a visible fresh window from presenting about:blank while the first
+    # observer tick starts. The observer still performs an explicit navigation
+    # after the context is ready and keeps the normal operation page behavior.
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--start-maximized",
+    ]
+    if observer.start_url and not observer.start_url.startswith(_BLANK_URL_PREFIXES):
+        launch_args.append(f"--app={observer.start_url}")
     try:
         return pw.chromium.launch_persistent_context(
             user_data_dir=str(profile_path),
             executable_path=executable,
             headless=observer.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--start-maximized",
-            ],
+            args=launch_args,
             ignore_default_args=["--enable-automation"],
             **launch_kwargs,
         )
