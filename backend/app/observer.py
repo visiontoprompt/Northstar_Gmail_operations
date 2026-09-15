@@ -35,6 +35,7 @@ cleared.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
@@ -635,6 +636,10 @@ _CONTACTS_FILE_BUTTON_LABELS = (
     "sélectionnez un fichier",
     "choisir un fichier",
     "parcourir",
+    "seleccionar un archivo",
+    "seleccionar archivo",
+    "elegir un archivo",
+    "examinar",
 )
 _CONTACTS_CONFIRM_LABELS = (
     "import",
@@ -752,20 +757,51 @@ def _contacts_advance_file_flow(observer: "BrowserObserver", page: "Page") -> No
 
 
 def _contacts_click_label(page: "Page", labels: tuple[str, ...]) -> bool:
-    """Click the first visible element whose text matches one of the labels.
+    """Click the visible localized label itself, then use an element fallback.
 
-    Scans a broad set of clickable/selectable containers because Google's
-    contacts UI renders the import entry as a button, menu item, or link
-    depending on the build and locale.
+    Google renders the final Contacts action as a text label inside a
+    clickable control. Targeting the exact text first avoids accidentally
+    selecting the dialog title (for example, ``Importar contactos`` when the
+    action is ``Importar``). The semantic-control scan remains a fallback for
+    builds where the label is not exposed as a separate text node.
     """
-    wanted = tuple(label.strip().lower() for label in labels)
+    wanted = tuple(dict.fromkeys(label.strip() for label in labels if label.strip()))
+
+    # Prefer the literal visible action text. The regex keeps matching
+    # case-insensitive while retaining exact text boundaries and whitespace
+    # normalization, and the clickable-ancestor check excludes dialog titles.
+    try:
+        get_by_text = getattr(page, "get_by_text")
+        for label in wanted:
+            text_locator = get_by_text(re.compile(rf"^\s*{re.escape(label)}\s*$", re.IGNORECASE))
+            for candidate in text_locator.all():
+                try:
+                    if not candidate.is_visible():
+                        continue
+                    is_clickable = candidate.evaluate(
+                        """el => Boolean(el.closest(
+                            'button, a, [role="button"], [role="menuitem"],
+                            [role="tab"], input[type="button"], input[type="submit"],
+                            [tabindex]:not([tabindex="-1"])
+                        ))"""
+                    )
+                    if not is_clickable:
+                        continue
+                    candidate.click(timeout=1500)
+                    return True
+                except Exception:  # noqa: BLE001 - keep scanning visible matches
+                    continue
+    except Exception:  # noqa: BLE001 - older/fake pages may not expose get_by_text
+        pass
+
+    # Fallback for Google builds that expose only the surrounding control.
     try:
         for candidate in page.locator("button, input[type=button], input[type=submit], [role=button], [role=menuitem], [role=tab], a, li").all():
             try:
                 label = (candidate.inner_text() or "").strip().lower()
             except Exception:  # noqa: BLE001
                 continue
-            if any(w in label[:120] for w in wanted):
+            if any(w.lower() in label[:120] for w in wanted):
                 try:
                     if not candidate.is_visible():
                         continue

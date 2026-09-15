@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _is_safe_interstitial
+from app.observer import BrowserObserver, _contacts_click_label, _is_safe_interstitial
 
 
 class _FakeButton:
@@ -96,6 +96,39 @@ class _FakeLocator:
         if self._elements:
             self._elements[0].click(timeout=timeout)
         return self
+
+
+class _FakeText(_FakeButton):
+    def __init__(self, label: str, clickable: bool = True):
+        super().__init__(label)
+        self._clickable = clickable
+
+    def is_visible(self) -> bool:
+        return True
+
+    def evaluate(self, _script: str) -> bool:
+        return self._clickable
+
+
+class _FakeTextPage:
+    def __init__(self, *texts: _FakeText):
+        self._texts = list(texts)
+
+    def get_by_text(self, pattern):
+        return _FakeLocator([text for text in self._texts if pattern.search(text.inner_text())])
+
+    def locator(self, _selector: str):
+        return _FakeLocator([])
+
+
+def test_contacts_clicks_exact_visible_action_text_before_title_or_container():
+    title = _FakeText("Importar contactos", clickable=False)
+    action = _FakeText("Importar", clickable=True)
+    page = _FakeTextPage(title, action)
+
+    assert _contacts_click_label(page, ("importar", "importar contactos")) is True
+    assert getattr(action, "clicked", False) is True
+    assert getattr(title, "clicked", False) is not True
 
 
 def _fake_browser(pages: list) -> MagicMock:
