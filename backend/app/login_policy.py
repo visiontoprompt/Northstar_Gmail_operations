@@ -107,6 +107,21 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             "import terminée",
             "importation terminée",
             "contacts importés",
+            "contactos importados",
+            "contacto importado",
+            "importado correctamente",
+            "importación completada",
+            "importación finalizada",
+            "se importaron",
+            "le processus est terminé",
+            "processus terminé",
+            "a été importé",
+            "importé avec succès",
+            "the process is complete",
+            "the process has finished",
+            "process completed",
+            "el proceso ha terminado",
+            "el proceso se completó",
         )):
             return PageSignal.CONTACTS_IMPORT_DONE, PageAction.SAFE_TO_OBSERVE
         if any(marker in haystack for marker in (
@@ -121,6 +136,11 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             "importer des contacts",
             "sélectionnez un fichier",
             "choisir un fichier",
+            # Spanish.
+            "importar contactos",
+            "seleccionar un archivo",
+            "seleccionar archivo",
+            "elegir un archivo",
         )):
             return PageSignal.CONTACTS_IMPORT_DIALOG, PageAction.SAFE_TO_OBSERVE
         return PageSignal.CONTACTS_HOME, PageAction.SAFE_TO_OBSERVE

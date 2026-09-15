@@ -155,3 +155,28 @@ def test_contact_file_library_upload_list_and_start_import(monkeypatch) -> None:
         refreshed = client.get(f"/api/v1/accounts/{account['id']}").json()
         assert refreshed["login_status"] == "AUTHENTICATED"
         assert refreshed["profile"]["status"] == "SAVED"
+
+
+def test_contacts_import_completion_closes_browser_session(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="contacts_complete@example.com")
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/close")
+
+        started = client.post(
+            f"/api/v1/accounts/{account['id']}/contacts-import",
+            json={"emails": "alice@test.com"},
+        )
+        assert started.status_code == 201
+        session_id = started.json()["session_id"]
+
+        service._report_observer_event(session_id, "contacts.imported", "Google confirmed the import")
+        finished = client.get(f"/api/v1/sessions/{session_id}").json()
+        assert finished["state"] == "CLOSED"
+        assert finished["login_state"] == "CONTACTS_IMPORTED"
+        assert finished["browser_opened"] is False
+        assert finished["profile_status"] == "RESERVED"

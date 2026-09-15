@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _contacts_click_label, _is_safe_interstitial
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _is_safe_interstitial
 
 
 class _FakeButton:
@@ -84,6 +84,9 @@ class _FakeLocator:
     def inner_text(self, timeout: int = 1000) -> str:
         return self._elements[0].inner_text(timeout=timeout) if self._elements else ""
 
+    def is_visible(self) -> bool:
+        return bool(self._elements) and getattr(self._elements[0], "is_visible", lambda: True)()
+
     def input_value(self, timeout: int = 1000) -> str:
         return getattr(self._elements[0], "value", "") if self._elements else ""
 
@@ -121,6 +124,27 @@ class _FakeTextPage:
         return _FakeLocator([])
 
 
+class _FakeFinalImportPage:
+    def __init__(self):
+        self.button = _FakeText("Importar", clickable=True)
+
+    def locator(self, _selector: str):
+        return _FakeLocator([self.button])
+
+    def evaluate(self, _script: str, selector: str):
+        self.evaluated_selector = selector
+        self.button.click()
+        return True
+
+
+def test_contacts_clicks_the_configured_final_import_button_selector():
+    page = _FakeFinalImportPage()
+
+    assert _contacts_click_final_import(page) is True
+    assert getattr(page.button, "clicked", False) is True
+    assert page.evaluated_selector == _CONTACTS_FINAL_IMPORT_SELECTOR
+
+
 def test_contacts_clicks_exact_visible_action_text_before_title_or_container():
     title = _FakeText("Importar contactos", clickable=False)
     action = _FakeText("Importar", clickable=True)
@@ -129,6 +153,26 @@ def test_contacts_clicks_exact_visible_action_text_before_title_or_container():
     assert _contacts_click_label(page, ("importar", "importar contactos")) is True
     assert getattr(action, "clicked", False) is True
     assert getattr(title, "clicked", False) is not True
+
+
+def test_contacts_import_waits_for_dialog_to_disappear_after_click():
+    observer = BrowserObserver("s1", "p1", 9222)
+    observer._contacts_confirm_clicked = True
+    observer._contacts_post_confirm_ticks = 2
+
+    # The page has returned to Contacts and only the non-clickable page title
+    # remains; the import dialog and its final action are gone.
+    page = _FakeTextPage(_FakeText("Importar contactos", clickable=False))
+    assert _contacts_dialog_closed_after_confirm(observer, page) is True
+
+
+def test_contacts_import_does_not_finish_while_final_action_is_visible():
+    observer = BrowserObserver("s1", "p1", 9222)
+    observer._contacts_confirm_clicked = True
+    observer._contacts_post_confirm_ticks = 2
+    page = _FakeTextPage(_FakeText("Importar", clickable=True))
+
+    assert _contacts_dialog_closed_after_confirm(observer, page) is False
 
 
 def _fake_browser(pages: list) -> MagicMock:
@@ -334,6 +378,14 @@ def test_login_policy_classifies_text_sparse_totp_route_as_mfa():
     signal, action = classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/totp", "Google", "Privacy policy"))
     assert signal is PageSignal.MFA_OR_SECURITY_CHECK
     assert action is PageAction.WAIT_FOR_HUMAN
+
+
+def test_login_policy_classifies_french_contacts_completion_to_close_session():
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation("https://contacts.google.com/label/import", "Contacts", "Le processus est terminé."))
+    assert signal is PageSignal.CONTACTS_IMPORT_DONE
+    assert action is PageAction.SAFE_TO_OBSERVE
 
 
 def test_observer_clicks_use_another_account_on_chooser():

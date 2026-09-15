@@ -73,6 +73,7 @@ Onboarding owns `NEW`, `SETUP_REQUIRED`, `READY_FOR_LOGIN`, `DUPLICATE`, `INVALI
   imports reference the selected asset by ID.
 - Account detail exposes server-backed edit metadata, move group, and guarded archive controls. The API validates, audits, and reloads the registry after success.
 - Account detail also exposes preparation-only operation designers for contacts, browser security, markers and labels, Google apps, send and reply, add-ons, and Google Alerts. Each designer saves a versioned, non-secret plan; no external action occurs when a plan is saved.
+- Profile-backed operation sessions poll their server state while the workspace is open. When an automated operation reaches a terminal result, the browser is closed, the profile lock is released, and the session workspace closes after the latest state is refreshed. Failed operations remain visible in session history and audit events.
 - Archive is exposed only through the guarded Delete action because it affects account, secret, session, and profile records.
 
 ## Accessibility and responsive behavior

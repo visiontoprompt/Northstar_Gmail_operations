@@ -654,7 +654,31 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
         session = db.get(BrowserSession, session_id)
         if not session:
             return
+        if event in {"contacts.failed", "contacts.imported"} and session.state in ACTIVE_SESSION_STATES:
+            # The observer owns the browser-close operation and will release
+            # the process in its finally block. Finalize the durable session
+            # here so a timeout cannot leave the UI showing a dead RUNNING
+            # session or hold the profile lock indefinitely.
+            now = utcnow()
+            session.state = "CLOSED"
+            session.login_state = "CONTACTS_IMPORTED" if event == "contacts.imported" else session.login_state
+            session.closed_at = now
+            session.last_event_at = now
+            session.failure_reason = None if event == "contacts.imported" else (detail[:300] or "Contacts import failed before completion")
+            if event == "contacts.imported":
+                session.account.login_status = "AUTHENTICATED"
+                session.account.profile_status = "SAVED"
+            session.profile.status = "RESERVED"
+            session.profile.lock_state = "UNLOCKED"
+            session.profile.active_session_id = None
+            session.profile.last_closed_at = now
+            metadata = dict(session.metadata_json or {})
+            metadata["browser_opened"] = False
+            metadata["terminal_result"] = "CONTACTS_IMPORTED" if event == "contacts.imported" else "CONTACTS_IMPORT_FAILED"
+            session.metadata_json = metadata
         db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action=f"session.auto_login.{event}", target_type="browser_session", target_id=session.id, result=result, metadata_json={"detail": detail[:300], "account_id": session.account_id}))
+        if event in {"contacts.failed", "contacts.imported"}:
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=session.organization_id, actor_id="system", action="session.closed", target_type="browser_session", target_id=session.id, result="failure" if event == "contacts.failed" else "success", metadata_json={"account_id": session.account_id, "reason": detail[:300], "terminal_result": "CONTACTS_IMPORTED" if event == "contacts.imported" else "CONTACTS_IMPORT_FAILED"}))
         db.commit()
         logger.info("session %s: auto-login %s %s", session_id, event, result)
     finally:
@@ -698,6 +722,31 @@ def cleanup_unsaved_invalid_profiles(db: Session, organization_id: str) -> int:
     if rows:
         logger.info("startup cleanup removed %s unsaved nonexistent-account profile director%s", len(rows), "y" if len(rows) == 1 else "ies")
     return len(rows)
+
+
+def recover_orphaned_sessions(db: Session, organization_id: str, actor_id: str = "system") -> int:
+    """Close active session rows whose dedicated browser is already gone.
+
+    A process restart cannot run the old observer's close callback. Recovering
+    these rows during startup prevents a dead contacts/login session from
+    holding the account profile lock or appearing as RUNNING in the UI.
+    """
+    rows = db.scalars(
+        select(BrowserSession)
+        .options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile))
+        .where(BrowserSession.organization_id == organization_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES))
+    ).unique().all()
+    recovered = 0
+    for session in rows:
+        browser_opened = bool((session.metadata_json or {}).get("browser_opened"))
+        if browser_opened and local_browser_is_alive(session.profile_id, session.id):
+            continue
+        _recover_stale_session(db, organization_id, actor_id, session)
+        recovered += 1
+    if recovered:
+        db.commit()
+        logger.info("startup recovered %s orphaned active session%s", recovered, "" if recovered == 1 else "s")
+    return recovered
 
 
 def _recover_stale_session(db: Session, organization_id: str, actor_id: str, session: BrowserSession) -> None:

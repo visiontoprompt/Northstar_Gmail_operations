@@ -618,6 +618,22 @@ function JobStat({ label, value, tone }: { label: string; value: number; tone: s
 
 function SessionWorkspace({ session, onUpdate, onClose, onError }: { session: Session; onUpdate: (session: Session) => void; onClose: () => void; onError: (message: string) => void }) {
   const [pending, setPending] = useState<"complete" | "verify" | "close" | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    const pollSession = async () => {
+      try {
+        const current = await api<Session>(`/api/v1/sessions/${session.id}`);
+        if (!mounted) return;
+        onUpdate(current);
+        if (current.state === "CLOSED") onClose();
+      } catch {
+        // Keep the current workspace visible during a transient refresh error.
+        // The explicit close control remains available to the operator.
+      }
+    };
+    const timer = window.setInterval(() => void pollSession(), 1500);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [session.id]);
   const updateEvent = async (eventType: "LOGIN_COMPLETED" | "VERIFICATION_REQUIRED") => {
     setPending(eventType === "LOGIN_COMPLETED" ? "complete" : "verify");
     try { onUpdate(await api<Session>(`/api/v1/sessions/${session.id}/events`, { method: "POST", body: JSON.stringify({ event_type: eventType }) })); } catch (error) { onError((error as Error).message); } finally { setPending(null); }

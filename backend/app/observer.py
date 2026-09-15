@@ -102,6 +102,8 @@ class BrowserObserver:
         self._contacts_imported = False
         self._contacts_uploaded = False
         self._contacts_confirm_clicked = False
+        self._contacts_post_confirm_ticks = 0
+        self._contacts_confirm_retries = 0
         self._contacts_open_clicked = False
         self._contacts_tick_count = 0
         self._contacts_upload_tick = 0
@@ -692,8 +694,21 @@ _CONTACTS_DONE_MARKERS = (
     "your import is complete",
     "the import is complete",
     "votre importation est terminée",
+    "le processus est terminé",
+    "processus terminé",
+    "a été importé",
+    "importé avec succès",
+    "the process is complete",
+    "the process has finished",
+    "process completed",
+    "el proceso ha terminado",
+    "el proceso se completó",
 )
 _CONTACTS_MAX_TICKS = 90  # ~90 x 1.25s ≈ 2 minutes until the flow gives up
+_CONTACTS_FINAL_IMPORT_SELECTOR = (
+    "#yDmH0d > div.uW2Fw-Sx9Kwc.uW2Fw-Sx9Kwc-OWXEXe-n2to0e.uW2Fw-qON5Qe-FoKg4d-Sx9Kwc-fZiSAe.yaahMe.GaqAuc."
+    "uW2Fw-Sx9Kwc-OWXEXe-FNFY6c > div.uW2Fw-wzTsW > div > div.uW2Fw-T0kwCb > div:nth-child(2) > button"
+)
 
 
 def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, signal) -> None:
@@ -716,10 +731,29 @@ def _handle_contacts_tick(observer: "BrowserObserver", page: "Page", host: str, 
     # Two-step dialogs stay open after the file is picked and need an explicit
     # "Import" confirmation; a single-attempt click covers that without looping.
     if not observer._contacts_confirm_clicked and observer._contacts_tick_count - observer._contacts_upload_tick >= 2:
-        if _contacts_click_label(page, _CONTACTS_CONFIRM_LABELS):
+        if _contacts_click_final_import(page) or _contacts_click_label(page, _CONTACTS_CONFIRM_LABELS):
             observer._contacts_confirm_clicked = True
             observer._emit("contacts.confirmed", "confirmed the contacts import dialog")
-    if signal.value == "CONTACTS_IMPORT_DONE" or _visible_text_mentions_done(page):
+    if observer._contacts_confirm_clicked:
+        observer._contacts_post_confirm_ticks += 1
+        if observer._contacts_post_confirm_ticks in {2, 5, 10, 20}:
+            logger.info(
+                "session %s: contacts import settle tick=%s dialog_visible=%s final_text_visible=%s done_marker_visible=%s",
+                observer.session_id,
+                observer._contacts_post_confirm_ticks,
+                _contacts_import_dialog_visible(page),
+                _contacts_has_visible_exact_text(page, ("import", "importar", "importer")),
+                _visible_text_mentions_done(page),
+            )
+        # A Google dialog can re-render the action node immediately after the
+        # file upload. Retry the exact visible action text a small number of
+        # times if it is still present; this remains bounded and does not
+        # submit any other control.
+        if observer._contacts_post_confirm_ticks in {5, 10, 20} and observer._contacts_confirm_retries < 3:
+            if _contacts_click_final_import(page) or _contacts_click_label(page, ("import", "importar", "importer")):
+                observer._contacts_confirm_retries += 1
+                observer._emit("contacts.confirm_retry", "retried the exact contacts import action text")
+    if signal.value == "CONTACTS_IMPORT_DONE" or _visible_text_mentions_done(page) or _contacts_dialog_closed_after_confirm(observer, page):
         observer._contacts_imported = True
         observer._emit("contacts.imported", f"Google Contacts import completed for {observer.contacts_csv_path or 'uploaded file'}")
         observer._stop.set()
@@ -754,6 +788,40 @@ def _contacts_advance_file_flow(observer: "BrowserObserver", page: "Page") -> No
     except Exception:  # noqa: BLE001
         pass
     _contacts_click_label(page, _CONTACTS_FILE_BUTTON_LABELS)
+
+
+def _contacts_click_final_import(page: "Page") -> bool:
+    """Click the exact final Google Contacts import button when available.
+
+    The selector is intentionally executed through the page's own
+    ``document.querySelector(...).click()`` path because this is the control
+    Google renders for the final action. A locator click remains a compatibility
+    fallback for test doubles and alternate Playwright page implementations.
+    """
+    try:
+        clicked = page.evaluate(
+            """selector => {
+                const button = document.querySelector(selector);
+                if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+                    return false;
+                }
+                button.click();
+                return true;
+            }""",
+            _CONTACTS_FINAL_IMPORT_SELECTOR,
+        )
+        if clicked:
+            return True
+    except Exception:  # noqa: BLE001 - use locator fallback below
+        pass
+    try:
+        candidate = page.locator(_CONTACTS_FINAL_IMPORT_SELECTOR).first
+        if candidate.count() and candidate.is_visible():
+            candidate.click(timeout=1500)
+            return True
+    except Exception:  # noqa: BLE001 - use localized text fallback below
+        return False
+    return False
 
 
 def _contacts_click_label(page: "Page", labels: tuple[str, ...]) -> bool:
@@ -810,6 +878,52 @@ def _contacts_click_label(page: "Page", labels: tuple[str, ...]) -> bool:
                 except Exception:  # noqa: BLE001 - hidden/disabled; keep scanning
                     continue
     except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _contacts_dialog_closed_after_confirm(observer: "BrowserObserver", page: "Page") -> bool:
+    """Treat a disappeared import dialog as success after the click settles.
+
+    Google often displays the success toast only briefly (and it may not be
+    exposed through Playwright's visible-text snapshot). Requiring two ticks
+    after the exact action-text click and confirming that no import dialog or
+    final action remains prevents a click acknowledgement from being mistaken
+    for a completed import.
+    """
+    if not observer._contacts_confirm_clicked or observer._contacts_post_confirm_ticks < 2:
+        return False
+    if _contacts_import_dialog_visible(page):
+        return False
+    return not _contacts_has_visible_exact_text(page, ("import", "importar", "importer"))
+
+
+def _contacts_import_dialog_visible(page: "Page") -> bool:
+    try:
+        for selector in ('[role="dialog"]', '[aria-modal="true"]'):
+            for dialog in page.locator(selector).all():
+                try:
+                    if dialog.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001 - continue checking other dialog candidates
+                    continue
+    except Exception:  # noqa: BLE001 - fall back to the exact action check
+        pass
+    return False
+
+
+def _contacts_has_visible_exact_text(page: "Page", labels: tuple[str, ...]) -> bool:
+    try:
+        get_by_text = getattr(page, "get_by_text")
+        for label in labels:
+            locator = get_by_text(re.compile(rf"^\s*{re.escape(label)}\s*$", re.IGNORECASE))
+            for candidate in locator.all():
+                try:
+                    if candidate.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001 - keep scanning matches
+                    continue
+    except Exception:  # noqa: BLE001 - old/fake pages do not expose get_by_text
         return False
     return False
 
