@@ -19,6 +19,12 @@ Open an account from the registry to access:
 
 These endpoints now back the UI. Production authentication/authorization should replace the current demo actor before deployment:
 
+| Infrastructure inventory | Endpoint | Behavior |
+|---|---|---|
+| Browser profiles | `GET /api/v1/browser-profiles` | Return account-owned profile metadata, lock state, storage reference, and authenticated evidence. Profile contents and cookies are never returned. |
+| Proxies | `GET /api/v1/proxies` | Return deduplicated account-scoped proxy assignments and safe usage counts. Proxy usernames and passwords are never returned. |
+| Sessions | `GET /api/v1/sessions?limit=100` | Return the safe session ledger used by the Sessions page; session history includes state and timestamps only. |
+
 | UI action | Endpoint | Required behavior |
 |---|---|---|
 | Edit metadata | `PATCH /api/v1/accounts/{account_id}` | Validate metadata, preserve immutable email identity, write an audit event, return a safe account summary. |

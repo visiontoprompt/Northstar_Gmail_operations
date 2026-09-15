@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
-from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_contact_files, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, resume_login_job, session_response, start_contacts_import, start_labels_markers_operation, start_login_session, update_account_metadata, update_credentials, update_login_job_state
+from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, ProxyResponse, SessionEventCreate, SessionStartRequest
+from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, cleanup_unsaved_invalid_profiles, close_session, contact_file_response, create_login_job, create_operation_draft, credential_revisions, delete_contact_file, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_browser_profiles, list_contact_files, list_login_jobs, list_operation_drafts, list_proxies, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, resume_login_job, session_response, start_contacts_import, start_labels_markers_operation, start_login_session, update_account_metadata, update_credentials, update_login_job_state
 from .worker.worker import start_login_worker, stop_login_worker
 
 settings = get_settings()
@@ -295,6 +295,16 @@ def audit_events(account_id: str | None = None, limit: int = Query(default=25, g
 @app.get("/api/v1/sessions", response_model=list[BrowserSessionResponse])
 def sessions(account_id: str | None = None, limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
     return list_sessions(db, settings.demo_org_id, account_id, limit)
+
+
+@app.get("/api/v1/browser-profiles", response_model=list[BrowserProfileResponse])
+def browser_profiles(q: str | None = Query(default=None, max_length=320), status_filter: str | None = Query(default=None, alias="status"), limit: int = Query(default=100, ge=1, le=500), db: Session = Depends(get_db)) -> list[dict]:
+    return list_browser_profiles(db, settings.demo_org_id, q, status_filter, limit)
+
+
+@app.get("/api/v1/proxies", response_model=list[ProxyResponse])
+def proxies(q: str | None = Query(default=None, max_length=320), status_filter: str | None = Query(default=None, alias="status"), db: Session = Depends(get_db)) -> list[dict]:
+    return list_proxies(db, settings.demo_org_id, q, status_filter)
 
 
 @app.get("/api/v1/sessions/{session_id}", response_model=BrowserSessionResponse)

@@ -141,6 +141,37 @@ class AccountListResponse(BaseModel):
     total: int
 
 
+class BrowserProfileResponse(BaseModel):
+    id: str
+    account_id: str
+    account_email: str
+    storage_reference: str
+    status: str
+    lock_state: str
+    active_session_id: str | None
+    last_opened_at: datetime | None
+    last_closed_at: datetime | None
+    authenticated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProxyAccountReference(BaseModel):
+    id: str
+    email: str
+
+
+class ProxyResponse(BaseModel):
+    id: str
+    label: str | None
+    region: str | None
+    status: str
+    account_count: int
+    authenticated_count: int
+    account_emails: list[str]
+    account_refs: list[ProxyAccountReference]
+
+
 class ImportSummary(BaseModel):
     imported: int
     duplicates: int

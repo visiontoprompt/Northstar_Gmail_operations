@@ -260,7 +260,8 @@ def account_response(account: GmailAccount) -> dict:
     profile = account.browser_profile
     if login_status in {"NOT_STARTED", "REQUIRED"} and profile and profile.authenticated_at and not profile.active_session_id:
         login_status = "AUTHENTICATED"
-    return {"id": account.id, "email": account.email, "group_id": account.group_id, "group_name": account.group.name, "lifecycle_status": account.lifecycle_status, "readiness_status": account.readiness_status, "login_status": login_status, "gmail_status": account.gmail_status, "secret_status": "STORED_ENCRYPTED" if account.secret else "MISSING", "recovery_masked": account.recovery_hint, "two_fa_configured": account.two_fa_configured, "proxy": {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status}, "profile": {"id": account.profile_id, "storage_reference": account.profile_storage_ref, "status": account.profile_status}, "created_at": account.created_at, "updated_at": account.updated_at}
+    profile_status = "SAVED" if profile and profile.authenticated_at and not profile.active_session_id else account.profile_status
+    return {"id": account.id, "email": account.email, "group_id": account.group_id, "group_name": account.group.name, "lifecycle_status": account.lifecycle_status, "readiness_status": account.readiness_status, "login_status": login_status, "gmail_status": account.gmail_status, "secret_status": "STORED_ENCRYPTED" if account.secret else "MISSING", "recovery_masked": account.recovery_hint, "two_fa_configured": account.two_fa_configured, "proxy": {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status}, "profile": {"id": account.profile_id, "storage_reference": account.profile_storage_ref, "status": profile_status}, "created_at": account.created_at, "updated_at": account.updated_at}
 
 
 def list_accounts(db: Session, organization_id: str, q: str | None, group_id: str | None, status: str | None, page: int, page_size: int) -> dict:
@@ -1157,6 +1158,78 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
     if account_id:
         query = query.where(BrowserSession.account_id == account_id)
     return [session_response(item) for item in db.scalars(query).unique().all()]
+
+
+def browser_profile_response(profile: BrowserProfile) -> dict:
+    """Return safe profile inventory metadata; never expose browser contents."""
+    profile_status = "SAVED" if profile.authenticated_at and not profile.active_session_id else profile.status
+    return {
+        "id": profile.id,
+        "account_id": profile.account_id,
+        "account_email": profile.account.email,
+        "storage_reference": profile.storage_reference,
+        "status": profile_status,
+        "lock_state": profile.lock_state,
+        "active_session_id": profile.active_session_id,
+        "last_opened_at": profile.last_opened_at,
+        "last_closed_at": profile.last_closed_at,
+        "authenticated_at": profile.authenticated_at,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
+    }
+
+
+def list_browser_profiles(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None, limit: int = 100) -> list[dict]:
+    query = (
+        select(BrowserProfile)
+        .join(BrowserProfile.account)
+        .options(joinedload(BrowserProfile.account))
+        .where(BrowserProfile.organization_id == organization_id)
+        .order_by(BrowserProfile.updated_at.desc())
+        .limit(limit)
+    )
+    if query_text:
+        term = f"%{query_text.strip().lower()}%"
+        query = query.where(or_(func.lower(GmailAccount.email).like(term), BrowserProfile.id.ilike(term), BrowserProfile.storage_reference.ilike(term)))
+    if status_filter:
+        if status_filter == "SAVED":
+            query = query.where(or_(BrowserProfile.status == "SAVED", (BrowserProfile.authenticated_at.is_not(None) & BrowserProfile.active_session_id.is_(None))))
+        else:
+            query = query.where(BrowserProfile.status == status_filter)
+    return [browser_profile_response(item) for item in db.scalars(query).unique().all()]
+
+
+def list_proxies(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None) -> list[dict]:
+    """Build a safe proxy inventory from account-scoped assignments.
+
+    Proxy credentials remain encrypted in AccountSecret and are intentionally
+    not part of this read model. A proxy is grouped by its deterministic id so
+    one endpoint can be assigned to several accounts without a second secret
+    store or a misleading duplicate resource.
+    """
+    query = select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)
+    if query_text:
+        term = f"%{query_text.strip().lower()}%"
+        query = query.where(or_(func.lower(GmailAccount.email).like(term), func.lower(GmailAccount.proxy_label).like(term), func.lower(GmailAccount.proxy_region).like(term), GmailAccount.proxy_id.ilike(term)))
+    if status_filter:
+        query = query.where(GmailAccount.proxy_status == status_filter)
+    accounts = db.scalars(query).all()
+    grouped: dict[str, dict] = {}
+    for account in accounts:
+        if not account.proxy_id:
+            continue
+        item = grouped.setdefault(account.proxy_id, {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status, "account_count": 0, "authenticated_count": 0, "account_emails": [], "account_refs": []})
+        item["account_count"] += 1
+        item["authenticated_count"] += int(account.login_status == "AUTHENTICATED" or bool(account.browser_profile and account.browser_profile.authenticated_at))
+        item["account_emails"].append(account.email)
+        item["account_refs"].append({"id": account.id, "email": account.email})
+        if item["label"] is None and account.proxy_label:
+            item["label"] = account.proxy_label
+        if item["region"] is None and account.proxy_region:
+            item["region"] = account.proxy_region
+        if item["status"] == "UNASSIGNED" and account.proxy_status != "UNASSIGNED":
+            item["status"] = account.proxy_status
+    return list(grouped.values())
 
 
 def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str, purpose: str = "login", contacts_csv_path: str | None = None) -> BrowserSession:

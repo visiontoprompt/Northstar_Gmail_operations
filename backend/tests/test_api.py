@@ -72,6 +72,24 @@ def test_bulk_import_persists_metadata_separately_from_encrypted_secret() -> Non
         assert account_list["items"][0]["profile"]["status"] == "RESERVED"
 
 
+def test_infrastructure_inventory_endpoints_are_safe_and_account_scoped() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "inventory@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "proxy": "proxy-user:proxy-pass:198.51.100.12:8080", "group_id": group_id}).json()
+
+        profiles = client.get("/api/v1/browser-profiles").json()
+        assert profiles[0]["account_id"] == account["id"]
+        assert profiles[0]["status"] == "RESERVED"
+        assert "proxy-pass" not in client.get("/api/v1/browser-profiles").text
+
+        proxies = client.get("/api/v1/proxies").json()
+        assert len(proxies) == 1
+        assert proxies[0]["account_count"] == 1
+        assert proxies[0]["account_refs"] == [{"id": account["id"], "email": "inventory@example.com"}]
+        assert "proxy-user" not in client.get("/api/v1/proxies").text
+        assert "proxy-pass" not in client.get("/api/v1/proxies").text
+
+
 def test_deduplicates_case_insensitively_and_reports_invalid_rows() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
