@@ -712,7 +712,7 @@ def _recover_stale_session(db: Session, organization_id: str, actor_id: str, ses
     session.profile.lock_state = "UNLOCKED"
     session.profile.active_session_id = None
     session.profile.last_closed_at = now
-    if session.login_state == "REQUIRED":
+    if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
         session.account.login_status = "NOT_STARTED"
     if not observer_stopped:
         _prune_unsaved_profile_folder(session)
@@ -1026,12 +1026,14 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         # Nothing is persisted for this attempt, so the account/profile stay
         # clean and a later attempt can retry without a zombie session blocking it.
         raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path})
+    existing_auth = purpose in {"reuse", "contacts"}
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path})
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
     profile.last_opened_at = utcnow()
-    account.login_status = "REQUIRED"
+    if not existing_auth:
+        account.login_status = "REQUIRED"
     db.add(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
@@ -1226,7 +1228,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.lock_state = "UNLOCKED"
     session.profile.active_session_id = None
     session.profile.last_closed_at = now
-    if session.login_state == "REQUIRED":
+    if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
         session.account.login_status = "NOT_STARTED"
     if not observer_stopped:
         _prune_unsaved_profile_folder(session)

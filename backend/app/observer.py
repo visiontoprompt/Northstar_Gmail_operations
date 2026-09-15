@@ -639,9 +639,19 @@ _CONTACTS_FILE_BUTTON_LABELS = (
 _CONTACTS_CONFIRM_LABELS = (
     "import",
     "import now",
+    "import contacts",
+    "importar",
+    "importar ahora",
+    "importar contactos",
     "upload",
+    "subir",
     "open",
+    "abrir",
     "ok",
+    "accept",
+    "aceptar",
+    "confirm",
+    "confirmar",
     "importer",
     "ouvrir",
     "importer les contacts",
@@ -664,7 +674,16 @@ _CONTACTS_DONE_MARKERS = (
     "importation terminée",
     "importation réussie",
     "contacts importés",
+    "contacts importés avec succès",
     "import terminé",
+    "contactos importados",
+    "contacto importado",
+    "importado correctamente",
+    "importados correctamente",
+    "importación completa",
+    "importación completada",
+    "importación finalizada",
+    "se importaron",
     "your import is complete",
     "the import is complete",
     "votre importation est terminée",
@@ -741,7 +760,7 @@ def _contacts_click_label(page: "Page", labels: tuple[str, ...]) -> bool:
     """
     wanted = tuple(label.strip().lower() for label in labels)
     try:
-        for candidate in page.locator("button, [role=button], [role=menuitem], [role=tab], a, li, div").all():
+        for candidate in page.locator("button, input[type=button], input[type=submit], [role=button], [role=menuitem], [role=tab], a, li").all():
             try:
                 label = (candidate.inner_text() or "").strip().lower()
             except Exception:  # noqa: BLE001

@@ -119,7 +119,7 @@ def test_contacts_import_starts_session_with_saved_profile(monkeypatch) -> None:
         body = resp.json()
         assert body["email_count"] == 2
         assert body["account_id"] == account["id"]
-        assert body["status"] == "REQUIRED"
+        assert body["status"] == "AUTHENTICATED"
 
 
 def test_contact_file_library_upload_list_and_start_import(monkeypatch) -> None:
@@ -152,3 +152,6 @@ def test_contact_file_library_upload_list_and_start_import(monkeypatch) -> None:
         assert started.status_code == 201
         assert started.json()["contact_file_id"] == file_body["id"]
         assert started.json()["email_count"] == 2
+        refreshed = client.get(f"/api/v1/accounts/{account['id']}").json()
+        assert refreshed["login_status"] == "AUTHENTICATED"
+        assert refreshed["profile"]["status"] == "SAVED"
