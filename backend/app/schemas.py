@@ -248,6 +248,10 @@ class LoginJobProgressResponse(BaseModel):
     items: list[LoginJobProgressItem]
 
 
+class SessionStartRequest(BaseModel):
+    purpose: Literal["login", "reuse"] = "login"
+
+
 class AuditEventResponse(BaseModel):
     id: str
     action: str
@@ -276,6 +280,8 @@ class BrowserSessionResponse(BaseModel):
     profile_id: str
     profile_storage_reference: str
     profile_status: str
+    profile_saved: bool = False
+    profile_authenticated_at: datetime | None = None
     state: str
     login_state: str
     runtime_type: str

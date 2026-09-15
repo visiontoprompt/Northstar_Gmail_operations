@@ -15,7 +15,7 @@ from .db import SessionLocal
 from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
-from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, resolve_browser_executable
+from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, remove_local_profile, resolve_browser_executable
 from .observer import BrowserObserver
 from .login_policy import PageObservation, classify_page
 from .worker.locks import RedisLocks, account_lock_key
@@ -91,7 +91,7 @@ def preview_import(db: Session, organization_id: str, group_id: str, raw_lines: 
     group = db.scalar(select(AccountGroup).where(AccountGroup.id == group_id, AccountGroup.organization_id == organization_id))
     if not group:
         raise ImportValidationError("Choose a valid destination group")
-    existing = set(db.scalars(select(GmailAccount.normalized_email).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email.in_([line.email for line in parsed]))).all())
+    existing = set(db.scalars(select(GmailAccount.normalized_email).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email.in_([line.email for line in parsed]), GmailAccount.lifecycle_status != "ARCHIVED")).all())
     seen: set[str] = set()
     for row in rows:
         if not row.valid or not row.email:
@@ -110,8 +110,65 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:20]}"
 
 
+def profile_folder_name(organization_id: str, email: str) -> str:
+    """Permission-directory name for an account's saved Chrome profile.
+
+    The on-disk profile lives under ``PROFILE_ROOT/<profile_folder_name>`` so
+    engineers can find a saved session by the account name. The org id is
+    appended so the same inbox in two organizations never shares a folder.
+    """
+    local = (email or "").strip().lower()
+    local = re.sub(r"[^a-z0-9@._+\-]", "_", local)
+    local = re.sub(r"_+", "_", local).strip("._@+-")
+    if len(local) > 100:
+        local = local[:100].rstrip("._@+-")
+    org = re.sub(r"[^a-z0-9]", "_", organization_id.lower()).strip("_")
+    if len(org) > 24:
+        org = org[:24].rstrip("_")
+    if not org:
+        return local
+    return f"{local}__{org}"
+
+
 def _add_credential_revision(db: Session, organization_id: str, account_id: str, payload: dict[str, str], recovery_hint: str, two_fa_configured: bool, actor_id: str, version: int = 1) -> None:
     db.add(CredentialRevision(id=_new_id("credrev"), organization_id=organization_id, account_id=account_id, version=version, secret_ref=f"secret://account/{account_id}/v{version}", encrypted_payload=SecretCipher().encrypt(payload), recovery_hint=recovery_hint, two_fa_configured=two_fa_configured, status="ACTIVE", created_by=actor_id))
+
+
+def _next_secret_version(db: Session, organization_id: str, account_id: str) -> int:
+    return (db.scalar(select(func.max(CredentialRevision.version)).where(CredentialRevision.organization_id == organization_id, CredentialRevision.account_id == account_id)) or 0) + 1
+
+
+def _reactivate_account(db: Session, organization_id: str, actor_id: str, account: GmailAccount, group: AccountGroup, email: str, password: str, recovery: str, two_fa: str, proxy_label: str | None, proxy_region: str | None) -> None:
+    """Revive an ARCHIVED account (soft-deleted row is retained for policy)
+    with fresh credential material and a reset profile for a clean login."""
+    account.group_id = group.id
+    account.lifecycle_status = "SETUP_REQUIRED"
+    account.readiness_status = "READY_FOR_LOGIN"
+    account.login_status = "NOT_STARTED"
+    account.gmail_status = "NOT_CHECKED"
+    account.recovery_hint = mask_recovery(recovery)
+    account.two_fa_configured = bool(two_fa)
+    account.proxy_label = proxy_label
+    account.proxy_region = proxy_region
+    account.proxy_status = "UNASSIGNED"
+    account.profile_status = "RESERVED"
+    payload = {"password": password, "recovery": recovery, "2fa": two_fa}
+    secret = account.secret
+    if secret is None:
+        secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary")
+    secret.encrypted_payload = SecretCipher().encrypt(payload)
+    db.add(secret)
+    _add_credential_revision(db, organization_id, account.id, payload, account.recovery_hint, account.two_fa_configured, actor_id, version=_next_secret_version(db, organization_id, account.id))
+    profile = account.browser_profile
+    if profile:
+        profile.status = "RESERVED"
+        profile.lock_state = "UNLOCKED"
+        profile.active_session_id = None
+        profile.authenticated_at = None
+        profile.last_opened_at = None
+        profile.last_closed_at = None
+        db.add(profile)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="account.reactivated", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"group_id": group.id, "email_domain": email.split("@", 1)[1], "source": "re_add", "credentials_renewed": True}))
 
 
 def add_account(db: Session, organization_id: str, actor_id: str, data: AccountStructuredInput) -> GmailAccount:
@@ -121,10 +178,16 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     email = data.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise ImportValidationError("Enter a valid email address")
-    if db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email == email)):
+    existing = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email == email).with_for_update())
+    if existing and existing.lifecycle_status != "ARCHIVED":
         raise ImportValidationError("An account with this email already exists")
+    if existing:
+        _reactivate_account(db, organization_id, actor_id, existing, group, email, data.password, data.recovery, data.two_fa, data.proxy_label, data.proxy_region)
+        db.commit()
+        db.refresh(existing)
+        return existing
     account_id = _new_id("acct")
-    account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group.id, email=email, normalized_email=email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(data.recovery), two_fa_configured=bool(data.two_fa), proxy_label=data.proxy_label, proxy_region=data.proxy_region, proxy_status="UNASSIGNED", profile_id=f"profile_{uuid.uuid4().hex[:12]}", profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
+    account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group.id, email=email, normalized_email=email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(data.recovery), two_fa_configured=bool(data.two_fa), proxy_label=data.proxy_label, proxy_region=data.proxy_region, proxy_status="UNASSIGNED", profile_id=profile_folder_name(organization_id, email), profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
     secret = AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=SecretCipher().encrypt({"password": data.password, "recovery": data.recovery, "2fa": data.two_fa}))
     db.add(account)
     db.add(secret)
@@ -149,8 +212,15 @@ def import_accounts(db: Session, organization_id: str, actor_id: str, group_id: 
     for line in parsed:
         if line.row_number not in valid_row_numbers:
             continue
+        existing = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email == line.email).with_for_update())
+        if existing:
+            if existing.lifecycle_status != "ARCHIVED":
+                continue
+            _reactivate_account(db, organization_id, actor_id, existing, db.get(AccountGroup, group_id), line.email, line.password, line.recovery, line.two_fa, None, None)
+            imported_ids.append(existing.id)
+            continue
         account_id = _new_id("acct")
-        account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group_id, email=line.email, normalized_email=line.email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(line.recovery), two_fa_configured=bool(line.two_fa), login_status="NOT_STARTED", gmail_status="NOT_CHECKED", proxy_status="UNASSIGNED", profile_id=f"profile_{uuid.uuid4().hex[:12]}", profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
+        account = GmailAccount(id=account_id, organization_id=organization_id, group_id=group_id, email=line.email, normalized_email=line.email, lifecycle_status="SETUP_REQUIRED", readiness_status="READY_FOR_LOGIN", recovery_hint=mask_recovery(line.recovery), two_fa_configured=bool(line.two_fa), login_status="NOT_STARTED", gmail_status="NOT_CHECKED", proxy_status="UNASSIGNED", profile_id=profile_folder_name(organization_id, line.email), profile_storage_ref=f"profiles/{organization_id}/{account_id}", profile_status="RESERVED")
         db.add(account)
         db.add(BrowserProfile(id=account.profile_id, organization_id=organization_id, account_id=account_id, storage_reference=account.profile_storage_ref, status="RESERVED", lock_state="UNLOCKED"))
         db.add(AccountSecret(id=_new_id("secret"), account_id=account_id, secret_ref=f"secret://account/{account_id}/primary", encrypted_payload=cipher.encrypt({"password": line.password, "recovery": line.recovery, "2fa": line.two_fa})))
@@ -408,6 +478,7 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
                     session.profile.lock_state = "UNLOCKED"
                     session.profile.active_session_id = None
                     session.profile.last_closed_at = now
+                    _prune_unsaved_profile_folder(session)
                     item.session_id = None
             if item.state == "RUNNING":
                 _release_item_lease(db, item)
@@ -433,7 +504,7 @@ def _locks() -> RedisLocks:
 _observers: dict[str, BrowserObserver] = {}
 
 
-def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str) -> bool:
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login") -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
         logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
@@ -448,6 +519,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         0,
         profile_dir=str((Path(settings.profile_root) / profile_id).resolve()),
         executable=resolve_browser_executable(),
+        start_url="https://mail.google.com/" if purpose == "reuse" else None,
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
         resolve_credentials=lambda sid: _resolve_login_credentials(sid),
         resolve_otp_secret=lambda sid: _resolve_login_otp_secret(sid),
@@ -555,6 +627,21 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
         db.close()
 
 
+def _prune_unsaved_profile_folder(session: BrowserSession) -> None:
+    """Discard the on-disk profile unless the account is fully connected.
+
+    A profile dir is only persisted once Google confirms the sign-in. Sessions
+    that close before authentication remove their scratch user-data dir so no
+    profile lingers for accounts that were never connected (previously saved
+    profiles are always kept).
+    """
+    if session.profile is not None and session.profile.authenticated_at is not None:
+        return
+    if session.login_state == "AUTHENTICATED":
+        return
+    remove_local_profile(session.profile_id)
+
+
 def _recover_stale_session(db: Session, organization_id: str, actor_id: str, session: BrowserSession) -> None:
     """Release a durable session row whose dedicated browser is gone."""
     close_local_browser(session.id)
@@ -569,6 +656,7 @@ def _recover_stale_session(db: Session, organization_id: str, actor_id: str, ses
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
+    _prune_unsaved_profile_folder(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.stale_recovered", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id, "reason": "dedicated_browser_not_running"}))
     logger.warning("session %s: recovered stale profile lock because its browser is not running", session.id)
 
@@ -795,6 +883,8 @@ def session_response(session: BrowserSession) -> dict:
         "profile_id": session.profile_id,
         "profile_storage_reference": session.profile.storage_reference,
         "profile_status": session.profile.status,
+        "profile_saved": bool(session.profile.authenticated_at),
+        "profile_authenticated_at": session.profile.authenticated_at,
         "state": session.state,
         "login_state": session.login_state,
         "runtime_type": session.runtime_type,
@@ -845,13 +935,17 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
     return [session_response(item) for item in db.scalars(query).unique().all()]
 
 
-def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str) -> BrowserSession:
+def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str, purpose: str = "login") -> BrowserSession:
     account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
+    if purpose not in {"login", "reuse"}:
+        raise ImportValidationError("Session purpose must be 'login' or 'reuse'")
+    if purpose == "reuse" and profile.authenticated_at is None:
+        raise ImportValidationError("No authenticated profile saved for this account — complete a login session first so the profile gets saved")
     if profile.active_session_id:
         active = db.scalar(select(BrowserSession).where(BrowserSession.id == profile.active_session_id, BrowserSession.state.in_(ACTIVE_SESSION_STATES)))
         if active:
@@ -867,7 +961,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
         # Nothing is persisted for this attempt, so the account/profile stay
         # clean and a later attempt can retry without a zombie session blocking it.
         raise BrowserLaunchError("Browser could not be launched (check BROWSER_LAUNCH_ENABLED and BROWSER_EXECUTABLE)")
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "browser_opened": True, "process_id": process_id})
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="LOGIN_REQUIRED", login_state="REQUIRED", runtime_type="LOCAL_CHROME", metadata_json={"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id})
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
@@ -877,7 +971,7 @@ def start_login_session(db: Session, organization_id: str, actor_id: str, accoun
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.commit()
-    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id)
+    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose)
     logger.info("session %s: observer started=%s", session.id, observer_started)
     return get_session(db, organization_id, session.id)
 
@@ -894,6 +988,8 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.state = "RUNNING"
         session.login_state = "AUTHENTICATED"
         session.account.login_status = "AUTHENTICATED"
+        session.profile.authenticated_at = now
+        session.account.profile_status = "SAVED"
     elif event_type == "VERIFICATION_REQUIRED":
         session.state = "NEEDS_ATTENTION"
         session.login_state = "VERIFICATION_REQUIRED"
@@ -903,10 +999,16 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
         session.state = "NEEDS_ATTENTION"
         session.login_state = "UNKNOWN_PAGE"
         session.failure_reason = "The worker encountered an unrecognized page"
+    elif event_type == "ACCOUNT_NOT_FOUND":
+        session.state = "NEEDS_ATTENTION"
+        session.login_state = "ACCOUNT_NOT_FOUND"
+        session.account.login_status = "NONEXISTENT"
+        session.account.readiness_status = "SETUP_ERROR"
+        session.failure_reason = "Google reports that no account exists for this email address"
     elif event_type == "HEARTBEAT":
         pass
     job = None
-    if event_type in {"LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE"}:
+    if event_type in {"LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE", "ACCOUNT_NOT_FOUND"}:
         job = _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"session.{event_type.lower()}", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id}))
     db.commit()
@@ -933,6 +1035,7 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED":
         session.account.login_status = "NOT_STARTED"
+    _prune_unsaved_profile_folder(session)
     job = _sync_job_item_for_session(db, session.id, session.state)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
@@ -960,6 +1063,10 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     if signal == "UNKNOWN":
         logger.warning("session %s: unknown page %s -> NEEDS_ATTENTION", session_id, url)
         updated = record_session_event(db, organization_id, actor_id, session_id, "UNKNOWN_PAGE")
+        return signal.value, action.value, updated
+    if signal == "ACCOUNT_NOT_FOUND":
+        logger.warning("session %s: Google reports the account does not exist (%s) -> NEEDS_ATTENTION", session_id, url)
+        updated = record_session_event(db, organization_id, actor_id, session_id, "ACCOUNT_NOT_FOUND")
         return signal.value, action.value, updated
     if signal == "GMAIL_HOME" and session.login_state != "AUTHENTICATED":
         logger.info("session %s: Gmail reached on %s -> login completed", session_id, url)

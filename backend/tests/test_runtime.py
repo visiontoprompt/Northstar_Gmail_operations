@@ -54,3 +54,36 @@ def test_resolve_browser_executable_falls_back_across_browsers() -> None:
             assert runtime.resolve_browser_executable() == "/usr/bin/brave-browser"
     finally:
         settings.browser_executable = original
+
+
+def test_launch_local_browser_does_not_create_profile_dir_before_connection(tmp_path) -> None:
+    original_launch = settings.browser_launch_enabled
+    original_profile_root = settings.profile_root
+    settings.browser_launch_enabled = True
+    settings.profile_root = str(tmp_path)
+    try:
+        with patch("app.runtime.resolve_browser_executable", return_value="/usr/bin/google-chrome"), patch("app.runtime._terminate_stale_browser"):
+            launched, _pid = runtime.launch_local_browser("notyet@example.com__org_demo", "session_1")
+        assert launched is True
+        assert not (tmp_path / "notyet@example.com__org_demo").exists(), "a profile dir must only appear once the account is connected"
+    finally:
+        settings.browser_launch_enabled = original_launch
+        settings.profile_root = original_profile_root
+
+
+def test_remove_local_profile_deletes_only_within_the_profile_root(tmp_path) -> None:
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path)
+    try:
+        folder = tmp_path / "ghost@example.com__org_demo"
+        folder.mkdir(parents=True)
+        (folder / "Cookies").write_text("scratch")
+        runtime.remove_local_profile("ghost@example.com__org_demo")
+        assert not folder.exists()
+
+        outside = tmp_path / ".." / "escaped" / "profile"
+        outside.mkdir(parents=True, exist_ok=True)
+        runtime.remove_local_profile("../../escaped/profile")
+        assert outside.exists(), "paths escaping the profile root must be refused"
+    finally:
+        settings.profile_root = original_profile_root

@@ -9,6 +9,7 @@ class PageSignal(StrEnum):
     ORDINARY_INTERSTITIAL = "ORDINARY_INTERSTITIAL"
     CAPTCHA = "CAPTCHA"
     MFA_OR_SECURITY_CHECK = "MFA_OR_SECURITY_CHECK"
+    ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
     UNKNOWN = "UNKNOWN"
 
 
@@ -33,6 +34,8 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
         return PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN
     if any(marker in haystack for marker in ("2-step verification", "two-step verification", "security key", "verify it's you", "phone verification", "security check", "enter the code", "enter your code", "google authenticator", "one-time code")):
         return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
+    if any(marker in haystack for marker in ("couldn't find your google account", "couldn't find your account", "no google account found", "no account found with that email", "no account found", "find your google account", "did you mean", "that email address doesn't", "this email address doesn't", "isn't associated with a google account", "no account exists")):
+        return PageSignal.ACCOUNT_NOT_FOUND, PageAction.NEEDS_ATTENTION
     if host in {"mail.google.com", "inbox.google.com"}:
         mailbox_markers = ("inbox", "compose", "sent mail", "drafts", "primary")
         if parsed.path.startswith("/mail/") and any(marker in haystack for marker in mailbox_markers):

@@ -236,6 +236,7 @@ browser boundary:
   (items are requeued, nothing is persisted).
 - `BROWSER_EXECUTABLE` — Chrome binary resolved on `PATH` (`google-chrome` default).
 - `PROFILE_ROOT` — directory holding the persistent per-account user-data folders.
+  Defaults to `<project-root>/data/browser-profiles` (at the SaaS project root).
 - `BROWSER_OBSERVER_ENABLED` — defaults `true` when a browser is launched; `false`
   selects a pure human hand-off.
 - `BROWSER_CDP_PORT` — deprecated compatibility setting; the runtime always asks

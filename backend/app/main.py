@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, engine, get_db
 from .models import AccountGroup, AuditEvent, GmailAccount, Organization
-from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate
+from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountResponse, AccountStructuredInput, AuditEventResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, CredentialRevisionResponse, CredentialUpdate, GroupCreate, GroupMoveRequest, GroupResponse, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, SessionEventCreate, SessionStartRequest
 from .service import ImportValidationError, account_response, add_account, archive_account, close_session, create_login_job, create_operation_draft, credential_revisions, dispatch_login_job, get_account, get_login_job, get_session, import_accounts, list_accounts, list_login_jobs, list_operation_drafts, list_sessions, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_stale_locks, resume_login_job, session_response, start_login_session, update_account_metadata, update_credentials, update_login_job_state
 from .worker.worker import start_login_worker, stop_login_worker
 
@@ -301,9 +301,9 @@ def session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/api/v1/accounts/{account_id}/sessions", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def open_login_session(account_id: str, db: Session = Depends(get_db)) -> dict:
+def open_login_session(account_id: str, payload: SessionStartRequest | None = None, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_login_session(db, settings.demo_org_id, "admin_demo", account_id))
+        return session_response(start_login_session(db, settings.demo_org_id, "admin_demo", account_id, purpose=payload.purpose if payload else "login"))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc

@@ -208,6 +208,33 @@ def test_unknown_page_is_stopped_for_operator_attention() -> None:
         assert response.json()["session"]["state"] == "NEEDS_ATTENTION"
 
 
+def test_nonexistent_account_is_detected_and_reported() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "ghost@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        response = client.post(f"/api/v1/sessions/{session['id']}/observations", json={"url": "https://accounts.google.com/signin/v2/identifier", "title": "Sign in - Google Accounts", "text": "Couldn't find your Google Account"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["signal"] == "ACCOUNT_NOT_FOUND"
+        assert body["action"] == "NEEDS_ATTENTION"
+        assert body["session"]["state"] == "NEEDS_ATTENTION"
+        assert body["session"]["login_state"] == "ACCOUNT_NOT_FOUND"
+        assert "secret" not in response.text
+        ghost = next(a for a in client.get("/api/v1/accounts").json()["items"] if a["email"] == "ghost@example.com")
+        assert ghost["login_status"] == "NONEXISTENT"
+        assert ghost["readiness_status"] == "SETUP_ERROR"
+
+
+def test_classifier_detects_google_account_not_found_copy() -> None:
+    from app.login_policy import PageObservation, classify_page
+    signal, action = classify_page(PageObservation(url="https://accounts.google.com/signin/v2/identifier", title="Sign in - Google Accounts", text="We couldn't find your Google Account"))
+    assert signal.value == "ACCOUNT_NOT_FOUND"
+    assert action.value == "NEEDS_ATTENTION"
+    signal, action = classify_page(PageObservation(url="https://accounts.google.com/", title="Sign in - Google Accounts", text="No Google Account found with this email address"))
+    assert signal.value == "ACCOUNT_NOT_FOUND"
+
+
 def test_credential_update_creates_encrypted_revision_and_requires_reauth() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
@@ -316,3 +343,117 @@ def test_delete_archives_account_closes_session_and_removes_it_from_registry() -
         audit = client.get("/api/v1/audit-events", params={"account_id": account["id"], "limit": 20}).json()
         assert any(event["action"] == "account.archived" for event in audit)
         assert "hidden-password" not in str(audit)
+
+
+def test_readded_account_is_reactivated_with_fresh_credentials() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        payload = {"email": "re-add@example.com", "password": "old-secret", "recovery": "old@example.com", "2fa": "old-totp", "group_id": group_id}
+        first = client.post("/api/v1/accounts/single", json=payload).json()
+        deleted = client.request("DELETE", f"/api/v1/accounts/{first['id']}", json={"confirmation_email": "re-add@example.com"})
+        assert deleted.status_code == 200
+        assert deleted.json()["lifecycle_status"] == "ARCHIVED"
+
+        refreshed = dict(payload, password="new-secret", recovery="new@example.com", two_fa="new-totp", **{"2fa": "new-totp"})
+        readded = client.post("/api/v1/accounts/single", json=refreshed)
+        assert readded.status_code == 201
+        body = readded.json()
+        assert body["id"] == first["id"]
+        assert body["lifecycle_status"] == "SETUP_REQUIRED"
+        assert body["secret_status"] == "STORED_ENCRYPTED"
+        assert body["profile"]["status"] == "RESERVED"
+        assert "new-secret" not in readded.text
+
+        listed = client.get("/api/v1/accounts", params={"q": "re-add@example.com"}).json()
+        assert listed["total"] == 1
+
+        audit = client.get("/api/v1/audit-events", params={"account_id": first["id"], "limit": 20}).json()
+        assert any(event["action"] == "account.reactivated" for event in audit)
+
+        from sqlalchemy import select
+        from app.db import SessionLocal
+        from app.security import SecretCipher
+        from app.models import GmailAccount, CredentialRevision
+
+        db = SessionLocal()
+        try:
+            account = db.get(GmailAccount, first["id"])
+            secrets = SecretCipher().decrypt(account.secret.encrypted_payload)
+            assert secrets["password"] == "new-secret"
+            assert secrets["2fa"] == "new-totp"
+            latest = db.scalar(select(CredentialRevision).where(CredentialRevision.account_id == first["id"]).order_by(CredentialRevision.version.desc()))
+            assert latest is not None and latest.version >= 2
+            assert account.browser_profile.authenticated_at is None
+        finally:
+            db.close()
+
+
+def test_bulk_reimport_reactivates_archived_account() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        raw = "bulk-readd@example.com:old-s:pw@example.com:oldt"
+        first = client.post("/api/v1/accounts/bulk/import", json={"raw_lines": raw, "group_id": group_id, "idempotency_key": "bulk-readd-1"}).json()
+        assert first["imported"] == 1
+        account_id = first["account_ids"][0]
+        client.request("DELETE", f"/api/v1/accounts/{account_id}", json={"confirmation_email": "bulk-readd@example.com"})
+
+        while_archived = client.post("/api/v1/accounts/bulk/preview", json={"raw_lines": raw, "group_id": group_id}).json()
+        assert while_archived["valid_rows"] == 1
+        assert while_archived["duplicate_rows"] == 0
+
+        second = client.post("/api/v1/accounts/bulk/import", json={"raw_lines": raw, "group_id": group_id, "idempotency_key": "bulk-readd-2"}).json()
+        assert second["imported"] == 1
+        assert second["account_ids"] == first["account_ids"]
+
+
+def test_active_account_still_rejects_duplicate_email() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        payload = {"email": "still-active@example.com", "password": "s", "recovery": "r@example.com", "2fa": "t", "group_id": group_id}
+        client.post("/api/v1/accounts/single", json=payload)
+        duplicate = client.post("/api/v1/accounts/single", json=payload)
+        assert duplicate.status_code == 422
+        assert "already exists" in duplicate.json()["detail"]
+
+
+def test_profile_folder_is_named_after_the_account_email() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        created = client.post("/api/v1/accounts/single", json={"email": "Jane.Doe+ops@Example.com", "password": "s", "recovery": "r@example.com", "2fa": "t", "group_id": group_id})
+        assert created.status_code == 201
+        body = created.json()
+        assert body["profile"]["id"] == "jane.doe+ops@example.com__org_demo"
+        assert body["profile"]["status"] == "RESERVED"
+        listed = client.get("/api/v1/accounts").json()["items"]
+        assert any(a["profile"]["id"] == "jane.doe+ops@example.com__org_demo" for a in listed)
+
+
+def test_closed_unauthenticated_session_discards_its_profile_folder(tmp_path, monkeypatch) -> None:
+    from app.main import settings as app_settings
+    monkeypatch.setattr(app_settings, "profile_root", str(tmp_path))
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "unconnected@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        folder = tmp_path / account["profile"]["id"]
+        folder.mkdir(parents=True)
+        (folder / "Cookies").write_text("scratch")
+        client.post(f"/api/v1/sessions/{session['id']}/close").json()
+        assert not folder.exists(), "an unconnected account must not keep a saved profile"
+        assert (tmp_path / account["profile"]["id"]).exists() is False
+
+
+def test_completed_login_keeps_its_saved_profile_folder(tmp_path, monkeypatch) -> None:
+    from app.main import settings as app_settings
+    monkeypatch.setattr(app_settings, "profile_root", str(tmp_path))
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "connected@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        folder = tmp_path / account["profile"]["id"]
+        folder.mkdir(parents=True)
+        (folder / "Cookies").write_text("session-cookies")
+        client.post(f"/api/v1/sessions/{session['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{session['id']}/close").json()
+        assert folder.exists(), "a fully connected account keeps its saved profile"
+        assert (folder / "Cookies").read_text() == "session-cookies"

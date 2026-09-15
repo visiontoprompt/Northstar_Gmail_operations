@@ -167,6 +167,14 @@ tbody tr:hover { background: #fbfdfc; }
 .status-mark { display: grid; width: 15px; height: 15px; place-items: center; border-radius: 50%; }
 .ready .status-mark { background: #c9ebdf; }
 .setup .status-mark { background: #ffe8b4; }
+.status-badge.login { color: #3b4a5a; background: var(--color-surface-muted); }
+.status-badge.login.ok { color: #14705e; background: var(--color-success-soft); }
+.status-badge.login.warning { color: #94600d; background: var(--color-accent-soft); }
+.status-badge.login.danger { color: #b42318; background: var(--color-danger-soft); }
+.status-badge.login.ok .status-mark { background: #c9ebdf; }
+.status-badge.login.warning .status-mark { background: #ffe8b4; }
+.status-badge.login.danger .status-mark { background: #ffd3cf; }
+.status-badge.login.neutral .status-mark { background: #d9e1df; }
 .security-cell, .metadata-cell { display: inline-flex; align-items: center; gap: 6px; color: #697975; font-size: 10px; white-space: nowrap; }
 .security-cell svg { color: var(--color-primary); }
 .status-dot.neutral { background: #a9b7b3; }

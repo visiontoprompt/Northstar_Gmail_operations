@@ -79,6 +79,7 @@ class BrowserProfile(Base):
     active_session_id: Mapped[str | None] = mapped_column(String(96))
     last_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     account: Mapped[GmailAccount] = relationship(back_populates="browser_profile")

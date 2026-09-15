@@ -1,6 +1,9 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -13,7 +16,7 @@ class Settings(BaseSettings):
     demo_org_id: str = "org_demo"
     browser_launch_enabled: bool = False
     browser_executable: str = "google-chrome"
-    profile_root: str = "data/browser-profiles"
+    profile_root: str = str(PROJECT_ROOT / "data" / "browser-profiles")
     # Local mode launches each account's saved profile as a normal Chrome window
     # via Playwright's persistent context; the observer drives sign-in and the
     # saved profile/cookies persist for future no-login sessions. These flags

@@ -1,10 +1,32 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine
+import logging
+
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
+
+_authenticated_ensured = False
+
+
+def _ensure_profile_authenticated_column() -> None:
+    """Add browser_profiles.authenticated_at to databases created before the column existed."""
+    global _authenticated_ensured
+    if _authenticated_ensured:
+        return
+    try:
+        with engine.connect() as conn:
+            columns = {col["name"] for col in inspect(conn).get_columns("browser_profiles")}
+            if "authenticated_at" not in columns:
+                conn.execute(text("ALTER TABLE browser_profiles ADD COLUMN authenticated_at TIMESTAMP"))
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Could not ensure browser_profiles.authenticated_at column: %s", exc)
+    _authenticated_ensured = True
 
 
 class Base(DeclarativeBase):
@@ -22,6 +44,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 
 def get_db() -> Generator[Session, None, None]:
+    _ensure_profile_authenticated_column()
     db = SessionLocal()
     try:
         yield db

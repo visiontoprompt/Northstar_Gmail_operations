@@ -62,10 +62,13 @@ def launch_local_browser(profile_id: str, session_id: str) -> tuple[bool, int | 
         logger.warning("browser launch failed for session %s: no Chromium-family executable found (set BROWSER_EXECUTABLE)", session_id)
         return False, None
     profile_path = (Path(settings.profile_root) / profile_id).resolve()
-    profile_path.mkdir(parents=True, exist_ok=True)
+    # Do not create the profile dir ahead of a real login: a profile is only
+    # persisted once the account is fully connected. Chrome itself creates the
+    # user-data dir the first time the observer launches the browser.
     active_port_file = profile_path / "DevToolsActivePort"
     try:
-        active_port_file.unlink(missing_ok=True)
+        if profile_path.exists():
+            active_port_file.unlink(missing_ok=True)
     except OSError:
         return False, None
     _terminate_stale_browser(profile_path)
@@ -123,6 +126,23 @@ def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bo
     """
     profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
     return bool(_find_chrome_pids_for_profile(profile_path))
+
+
+def remove_local_profile(profile_id: str) -> None:
+    """Delete the on-disk profile for an account that never fully connected.
+
+    A profile is only kept once the account is fully signed in; sessions that
+    close before authentication discard their scratch user-data dir so no
+    half-created profile lingers for accounts that were never connected.
+    """
+    root = Path(get_settings().profile_root).resolve()
+    target = (root / profile_id).resolve()
+    if not target.is_relative_to(root) or target == root:
+        logger.warning("refusing to remove profile outside the profile root: %s", target)
+        return
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+        logger.info("removed unsaved profile dir %s", target)
 
 
 def close_local_browser(session_id: str) -> None:
