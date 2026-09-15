@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -148,6 +148,12 @@ class _FakeSecurityPage:
 
     def evaluate(self, _script: str, _config: dict):
         return "already"
+
+
+def test_start_page_navigation_uses_commit_and_exact_target():
+    page = _FakeSecurityPage("about:blank")
+    _open_start_page(page, "https://myaccount.google.com/account-enhanced-safe-browsing")
+    assert page.goto_calls == ["https://myaccount.google.com/account-enhanced-safe-browsing"]
 
 
 def test_security_operation_navigates_to_exact_page_and_waits_for_verified_completion():

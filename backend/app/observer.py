@@ -117,6 +117,7 @@ class BrowserObserver:
         self._security_clicked = False
         self._security_tick_count = 0
         self._security_completion_ticks = 0
+        self._start_navigation_attempts = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_observation: tuple[str, str, str, str] | None = None
@@ -179,6 +180,7 @@ class BrowserObserver:
                 return
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                self._start_navigation_attempts = 1
                 _open_start_page(page, self.start_url)
                 page_count = len(context.pages)
                 logger.info("AUTOMATION ACTIVE: observer launched the isolated browser for session %s (%d page target(s))", self.session_id, page_count)
@@ -218,6 +220,16 @@ class BrowserObserver:
                 self._reported_no_page = True
             return
         url = page.url or ""
+        if not url or url.startswith(_BLANK_URL_PREFIXES):
+            if self._start_navigation_attempts < 4:
+                self._start_navigation_attempts += 1
+                logger.info("session %s: retrying initial navigation attempt %d to %s", self.session_id, self._start_navigation_attempts, self.start_url)
+                _open_start_page(page, self.start_url)
+                return
+            if self.purpose == "security":
+                self._emit("security.failed", "The isolated browser could not navigate to Google Account security", result="failure")
+                self._stop.set()
+            return
         title = page.title() or ""
         text = _visible_text(page)
         signal, action = classify_page(PageObservation(url=url, title=title, text=text))
@@ -351,7 +363,10 @@ def _open_start_page(page: "Page", start_url: str) -> None:
         current = ""
     try:
         if not current or current.startswith(_BLANK_URL_PREFIXES) or (urlparse(current).hostname or "") not in _LOGIN_HOSTS:
-            page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+            # Google pages can keep network connections open through a proxy;
+            # waiting for the document commit gives the observer a usable URL
+            # without requiring every subresource to finish first.
+            page.goto(start_url, wait_until="commit", timeout=15000)
     except Exception:  # noqa: BLE001 - a load failure must not kill the observer
         logger.warning("observer could not open %s; the session page may still settle", start_url, exc_info=True)
 

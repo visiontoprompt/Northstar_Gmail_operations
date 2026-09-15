@@ -1164,6 +1164,9 @@ def _session_operation_status(session: BrowserSession) -> tuple[str, str | None]
     successful_states = {"AUTHENTICATED", "CONTACTS_IMPORTED", "LABELS_MARKERS_COMPLETED", "SECURITY_COMPLETED"}
     failed_states = {"ACCOUNT_NOT_FOUND", "FAILED", "LAUNCH_FAILED", "SECURITY_FAILED"}
     interrupted_states = {"VERIFICATION_REQUIRED", "SECURITY_CHALLENGE", "CAPTCHA", "MFA_REQUIRED"}
+    purpose = (session.metadata_json or {}).get("purpose", "login")
+    if purpose in {"contacts", "labels_markers", "security"} and session.login_state == "AUTHENTICATED":
+        return "NOT_FINISHED", "The profile is authenticated, but this operation has not reached its verified completion event."
     if session.login_state in successful_states:
         return "COMPLETED", "The operation reached its recorded completion state."
     if session.login_state in failed_states:
