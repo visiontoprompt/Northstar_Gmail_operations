@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "ok", "i understand", "understand")
+_SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "continuer", "continuar", "next", "got it", "ok", "i understand", "understand")
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
@@ -133,6 +133,7 @@ class BrowserObserver:
         self._otp_secret_tried = False
         self._auto_attempted_urls: set[str] = set()
         self._chooser_clicked_urls: set[str] = set()
+        self._continue_clicked_urls: set[str] = set()
         self._submitted_urls: set[str] = set()
         self._fill_failed_urls: dict[str, int] = defaultdict(int)
         self._otp_attempted_urls: set[str] = set()
@@ -277,6 +278,8 @@ class BrowserObserver:
                     _fill_sign_in_form(page, self, url)
             elif url not in self._chooser_clicked_urls and _handle_account_chooser(page, self, url):
                 self._chooser_clicked_urls.add(url)
+            elif url not in self._continue_clicked_urls and _handle_google_account_continue(page, self, url):
+                self._continue_clicked_urls.add(url)
             if _has_otp_input(page) and self._resolve_otp_secret is not None and url not in self._otp_attempted_urls:
                 _fill_otp_code(page, self, url)
 
@@ -565,12 +568,51 @@ def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str)
     """The dedicated profile may already remember an account, so Google shows a
     "Choose an account" page without any input field. Expand it by clicking
     "Use another account"; the identifier form then appears on the same URL."""
-    if page.locator(_CREDENTIAL_FIELD_SELECTOR).count():
+    if _has_credential_input(page):
         return False
     clicked = _click_element_with_text(page, ("use another account",))
     if clicked:
         observer._emit("chooser_expanded", url)
     return clicked
+
+
+_CONTINUE_HANDOFF_LABELS = ("continue", "continuer", "continuar")
+
+
+def _handle_google_account_continue(page: "Page", observer: "BrowserObserver", url: str) -> bool:
+    """Advance Google's post-login account hand-off page.
+
+    Google may retain hidden sign-in inputs after authentication and show a
+    visible button such as ``Continue`` / ``Continuer`` / ``Continuar`` before
+    handing the profile to Gmail. This is restricted to Google's login hosts,
+    requires no visible credential or OTP field, and only clicks an exact
+    Continue-labelled control.
+    """
+    if _has_credential_input(page) or _has_otp_input(page):
+        return False
+    try:
+        body_text = _visible_text(page).lower()
+    except Exception:  # noqa: BLE001
+        return False
+    if not any(label in body_text for label in _CONTINUE_HANDOFF_LABELS):
+        return False
+    try:
+        for candidate in page.locator("button, [role=button], a").all():
+            try:
+                label = (candidate.inner_text() or "").strip().lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if label in _CONTINUE_HANDOFF_LABELS:
+                try:
+                    candidate.click(timeout=1500)
+                    observer._emit("account_continue_clicked", url)
+                    logger.info("advanced Google account hand-off on %s", url)
+                    return True
+                except Exception:  # noqa: BLE001 - hidden/disabled; keep scanning
+                    continue
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _click_element_with_text(page: "Page", labels: tuple[str, ...]) -> bool:
@@ -648,7 +690,7 @@ def _is_safe_interstitial(url: str, signal: str) -> bool:
 
 def _can_click_consent(page: "Page") -> bool:
     try:
-        if page.locator("input[type=password], input[type=email]").count():
+        if _has_credential_input(page) or _has_otp_input(page):
             return False
         text = _visible_text(page)
         return any(word in text.lower() for word in ("terms", "privacy", "consent", "welcome", "understand", "continue"))
@@ -663,7 +705,7 @@ def _click_consent(page: "Page") -> None:
                 label = (button.inner_text() or "").strip().lower()
             except Exception:  # noqa: BLE001
                 continue
-            if label in _SAFE_CONSENT_LABELS or any(word in label for word in ("i agree", "accept all", "i understand", "understand")):
+            if label in _SAFE_CONSENT_LABELS or any(word in label for word in ("i agree", "accept all", "i understand", "understand", "continuer", "continuar")):
                 try:
                     button.click(timeout=1500)
                     logger.info("advanced consent on %s", page.url)

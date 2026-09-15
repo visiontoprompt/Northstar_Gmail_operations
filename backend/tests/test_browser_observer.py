@@ -469,6 +469,25 @@ def test_observer_fills_identifier_after_chooser_is_expanded():
     assert page.cred_fields["email"].value == "alice@example.com"
 
 
+def test_observer_clicks_post_login_continue_handoff():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://accounts.google.com/v3/signin/continue", "Google", "Continue to Gmail", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, report_event=lambda *a: None)
+    with patch("app.observer.classify_page", return_value=(PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is True
+    assert "https://accounts.google.com/v3/signin/continue" in observer._continue_clicked_urls
+
+
+def test_observer_clicks_localized_post_login_continue_handoff():
+    button = _FakeButton("Continuer")
+    page = _FakePage("https://consent.google.com/continue", "Google", "Continuer vers Gmail", buttons=[button])
+    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, report_event=lambda *a: None)
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is True
+
+
 def test_observer_ignores_transient_unknown_during_cold_page_load():
     seen = []
     observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: seen.append(a), interval=0.05, settle_seconds=5.0)
