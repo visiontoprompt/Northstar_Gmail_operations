@@ -73,21 +73,51 @@ def test_bulk_import_persists_metadata_separately_from_encrypted_secret() -> Non
 
 
 def test_infrastructure_inventory_endpoints_are_safe_and_account_scoped() -> None:
+    from app.main import settings as app_settings
+    import tempfile
+
+    original_profile_root = app_settings.profile_root
+    with tempfile.TemporaryDirectory() as profile_root:
+        app_settings.profile_root = profile_root
+        try:
+            with TestClient(app) as client:
+                group_id = client.get("/api/v1/groups").json()[0]["id"]
+                account = client.post("/api/v1/accounts/single", json={"email": "inventory@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "proxy": "proxy-user:proxy-pass:198.51.100.12:8080", "group_id": group_id}).json()
+
+                # A reserved onboarding row is not a real profile until its
+                # persistent user-data directory exists.
+                assert client.get("/api/v1/browser-profiles").json() == []
+                from pathlib import Path
+                (Path(profile_root) / account["profile"]["id"]).mkdir(parents=True)
+                profiles = client.get("/api/v1/browser-profiles").json()
+                assert profiles[0]["account_id"] == account["id"]
+                assert profiles[0]["status"] == "RESERVED"
+                assert "proxy-pass" not in client.get("/api/v1/browser-profiles").text
+
+                proxies = client.get("/api/v1/proxies").json()
+                assert len(proxies) == 1
+                assert proxies[0]["account_count"] == 1
+                assert proxies[0]["account_refs"] == [{"id": account["id"], "email": "inventory@example.com"}]
+                assert "proxy-user" not in client.get("/api/v1/proxies").text
+                assert "proxy-pass" not in client.get("/api/v1/proxies").text
+        finally:
+            app_settings.profile_root = original_profile_root
+
+
+def test_latest_sessions_endpoint_returns_one_record_per_account_and_supports_group_scope() -> None:
     with TestClient(app) as client:
-        group_id = client.get("/api/v1/groups").json()[0]["id"]
-        account = client.post("/api/v1/accounts/single", json={"email": "inventory@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "proxy": "proxy-user:proxy-pass:198.51.100.12:8080", "group_id": group_id}).json()
+        groups = client.get("/api/v1/groups").json()
+        account = client.post("/api/v1/accounts/single", json={"email": "latest@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": groups[0]["id"]}).json()
+        first = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        client.post(f"/api/v1/sessions/{first['id']}/close")
+        second = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
 
-        profiles = client.get("/api/v1/browser-profiles").json()
-        assert profiles[0]["account_id"] == account["id"]
-        assert profiles[0]["status"] == "RESERVED"
-        assert "proxy-pass" not in client.get("/api/v1/browser-profiles").text
-
-        proxies = client.get("/api/v1/proxies").json()
-        assert len(proxies) == 1
-        assert proxies[0]["account_count"] == 1
-        assert proxies[0]["account_refs"] == [{"id": account["id"], "email": "inventory@example.com"}]
-        assert "proxy-user" not in client.get("/api/v1/proxies").text
-        assert "proxy-pass" not in client.get("/api/v1/proxies").text
+        latest = client.get("/api/v1/sessions?latest_per_account=true&limit=100").json()
+        matching = [session for session in latest if session["account_id"] == account["id"]]
+        assert len(matching) == 1
+        assert matching[0]["id"] == second["id"]
+        scoped = client.get(f"/api/v1/sessions?latest_per_account=true&group_id={groups[0]['id']}").json()
+        assert any(session["account_id"] == account["id"] for session in scoped)
 
 
 def test_deduplicates_case_insensitively_and_reports_invalid_rows() -> None:

@@ -2,6 +2,10 @@ import os
 import re
 import socket
 import uuid
+import base64
+import json
+import time
+from urllib.request import ProxyHandler, Request, build_opener
 from dataclasses import dataclass
 from datetime import timedelta
 from logging import getLogger
@@ -13,7 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 from .config import get_settings
 from .contacts import build_google_contacts_csv, contact_file_checksum, new_contact_file_id, parse_emails, validate_contact_file, write_contact_file, write_contacts_upload
 from .db import SessionLocal
-from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, utcnow
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialRevision, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, OperationDraft, ProxyInventory, utcnow
 from .schemas import AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, remove_local_profile, resolve_browser_executable
@@ -1153,10 +1157,15 @@ def get_session(db: Session, organization_id: str, session_id: str) -> BrowserSe
     return db.scalar(select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.id == session_id))
 
 
-def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25) -> list[dict]:
+def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25, group_id: str | None = None, latest_per_account: bool = False) -> list[dict]:
     query = select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id).order_by(BrowserSession.created_at.desc()).limit(limit)
     if account_id:
         query = query.where(BrowserSession.account_id == account_id)
+    if group_id:
+        query = query.join(BrowserSession.account).where(GmailAccount.group_id == group_id)
+    if latest_per_account:
+        ranked = select(BrowserSession.id, func.row_number().over(partition_by=BrowserSession.account_id, order_by=(BrowserSession.created_at.desc(), BrowserSession.id.desc())).label("session_rank")).where(BrowserSession.organization_id == organization_id).subquery()
+        query = query.join(ranked, BrowserSession.id == ranked.c.id).where(ranked.c.session_rank == 1)
     return [session_response(item) for item in db.scalars(query).unique().all()]
 
 
@@ -1196,29 +1205,44 @@ def list_browser_profiles(db: Session, organization_id: str, query_text: str | N
             query = query.where(or_(BrowserProfile.status == "SAVED", (BrowserProfile.authenticated_at.is_not(None) & BrowserProfile.active_session_id.is_(None))))
         else:
             query = query.where(BrowserProfile.status == status_filter)
-    return [browser_profile_response(item) for item in db.scalars(query).unique().all()]
+    # A database row can be a reservation created during account onboarding.
+    # The inventory page is intentionally a physical-profile inventory: do not
+    # expose reservations as profiles until the persistent user-data directory
+    # actually exists on the configured browser host.
+    profile_root = Path(get_settings().profile_root).resolve()
+    real_profiles = []
+    for item in db.scalars(query).unique().all():
+        profile_path = (profile_root / item.id).resolve()
+        if profile_path.is_relative_to(profile_root) and profile_path.is_dir():
+            real_profiles.append(browser_profile_response(item))
+    return real_profiles
+
+
+def _safe_secret_payload(account: GmailAccount) -> dict:
+    if not account.secret:
+        return {}
+    try:
+        payload = SecretCipher().decrypt(account.secret.encrypted_payload)
+    except Exception as exc:  # noqa: BLE001
+        raise ImportValidationError("The encrypted account vault could not be opened") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _proxy_inventory_item(observation: ProxyInventory | None) -> dict:
+    if not observation:
+        return {"provider": None, "country": None, "city": None, "public_ip": None, "test_status": "NOT_TESTED", "test_error": None, "latency_ms": None, "last_tested_at": None}
+    return {"provider": observation.provider, "country": observation.country, "city": observation.city, "public_ip": observation.public_ip, "test_status": observation.test_status, "test_error": observation.test_error, "latency_ms": observation.latency_ms, "last_tested_at": observation.last_tested_at}
 
 
 def list_proxies(db: Session, organization_id: str, query_text: str | None = None, status_filter: str | None = None) -> list[dict]:
-    """Build a safe proxy inventory from account-scoped assignments.
-
-    Proxy credentials remain encrypted in AccountSecret and are intentionally
-    not part of this read model. A proxy is grouped by its deterministic id so
-    one endpoint can be assigned to several accounts without a second secret
-    store or a misleading duplicate resource.
-    """
-    query = select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)
-    if query_text:
-        term = f"%{query_text.strip().lower()}%"
-        query = query.where(or_(func.lower(GmailAccount.email).like(term), func.lower(GmailAccount.proxy_label).like(term), func.lower(GmailAccount.proxy_region).like(term), GmailAccount.proxy_id.ilike(term)))
-    if status_filter:
-        query = query.where(GmailAccount.proxy_status == status_filter)
-    accounts = db.scalars(query).all()
+    """Build a safe proxy inventory from account-scoped assignments."""
+    accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)).all()
+    observations = {item.id: item for item in db.scalars(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id)).all()}
     grouped: dict[str, dict] = {}
     for account in accounts:
         if not account.proxy_id:
             continue
-        item = grouped.setdefault(account.proxy_id, {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status, "account_count": 0, "authenticated_count": 0, "account_emails": [], "account_refs": []})
+        item = grouped.setdefault(account.proxy_id, {"id": account.proxy_id, "label": account.proxy_label, "region": account.proxy_region, "status": account.proxy_status, "account_count": 0, "authenticated_count": 0, "account_emails": [], "account_refs": [], **_proxy_inventory_item(observations.get(account.proxy_id))})
         item["account_count"] += 1
         item["authenticated_count"] += int(account.login_status == "AUTHENTICATED" or bool(account.browser_profile and account.browser_profile.authenticated_at))
         item["account_emails"].append(account.email)
@@ -1227,9 +1251,134 @@ def list_proxies(db: Session, organization_id: str, query_text: str | None = Non
             item["label"] = account.proxy_label
         if item["region"] is None and account.proxy_region:
             item["region"] = account.proxy_region
-        if item["status"] == "UNASSIGNED" and account.proxy_status != "UNASSIGNED":
-            item["status"] = account.proxy_status
+    if query_text:
+        needle = query_text.strip().lower()
+        grouped = {key: item for key, item in grouped.items() if needle in " ".join([str(item.get("id") or ""), str(item.get("label") or ""), str(item.get("region") or ""), str(item.get("provider") or ""), str(item.get("country") or ""), *item["account_emails"]]).lower()}
+    if status_filter:
+        grouped = {key: item for key, item in grouped.items() if item["status"] == status_filter or item["test_status"] == status_filter}
     return list(grouped.values())
+
+
+def _proxy_account(db: Session, organization_id: str, proxy_id: str) -> GmailAccount | None:
+    return db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email))
+
+
+def _proxy_config_for_id(db: Session, organization_id: str, proxy_id: str):
+    account = _proxy_account(db, organization_id, proxy_id)
+    if not account:
+        raise ImportValidationError("Proxy assignment not found")
+    proxy = proxy_from_payload(_safe_secret_payload(account).get("proxy"))
+    if not proxy:
+        raise ImportValidationError("The proxy connection is not available for this assignment")
+    return proxy, account
+
+
+def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, account_ids: list[str], proxy_id: str | None = None, proxy_value: str | None = None, label: str | None | object = _UNSET, region: str | None | object = _UNSET) -> dict:
+    """Assign one existing or newly entered proxy to many accounts."""
+    if not account_ids:
+        raise ImportValidationError("Choose at least one account")
+    try:
+        proxy = parse_proxy(proxy_value) if proxy_value is not None and proxy_value.strip() else None
+    except ProxyValidationError as exc:
+        raise ImportValidationError(str(exc)) from exc
+    source_account = None
+    if proxy is None:
+        if not proxy_id:
+            raise ImportValidationError("Enter a proxy connection or choose an existing proxy")
+        proxy, source_account = _proxy_config_for_id(db, organization_id, proxy_id)
+    accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id.in_(account_ids), GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()).all()
+    if len(accounts) != len(set(account_ids)):
+        raise ImportValidationError("One or more selected accounts could not be found")
+    safe_label = (label.strip() if label and label.strip() else None) if label is not _UNSET else (source_account.proxy_label if source_account else proxy.display_endpoint)
+    safe_region = (region.strip() if region and region.strip() else None) if region is not _UNSET else (source_account.proxy_region if source_account else None)
+    for account in accounts:
+        payload = _safe_secret_payload(account)
+        payload["proxy"] = proxy.encrypted_payload()
+        if account.secret:
+            account.secret.encrypted_payload = SecretCipher().encrypt(payload)
+        else:
+            account.secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary", encrypted_payload=SecretCipher().encrypt(payload))
+        account.proxy_id = proxy.proxy_id
+        account.proxy_label = safe_label
+        account.proxy_region = safe_region
+        account.proxy_status = "ASSIGNED"
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.assigned", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_id": proxy.proxy_id, "proxy_authentication": "authenticated" if proxy.authenticated else "anonymous"}))
+    db.commit()
+    return {"proxy_id": proxy.proxy_id, "updated_count": len(accounts), "account_ids": [account.id for account in accounts]}
+
+
+def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, proxy_id: str, account_ids: list[str] | None = None) -> int:
+    query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()
+    if account_ids:
+        query = query.where(GmailAccount.id.in_(account_ids))
+    accounts = db.scalars(query).all()
+    for account in accounts:
+        account.proxy_id = None
+        account.proxy_label = None
+        account.proxy_region = None
+        account.proxy_status = "UNASSIGNED"
+        if account.secret:
+            payload = _safe_secret_payload(account)
+            payload.pop("proxy", None)
+            account.secret.encrypted_payload = SecretCipher().encrypt(payload)
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.unassigned", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_id": proxy_id}))
+    db.commit()
+    return len(accounts)
+
+
+def update_proxy(db: Session, organization_id: str, actor_id: str, proxy_id: str, proxy_value: str | None | object = _UNSET, label: str | None | object = _UNSET, region: str | None | object = _UNSET) -> dict:
+    current_accounts = db.scalars(select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email)).all()
+    if not current_accounts:
+        raise ImportValidationError("Proxy assignment not found")
+    if proxy_value is None:
+        remove_proxy_assignments(db, organization_id, actor_id, proxy_id)
+        return {"proxy_id": proxy_id, "updated_count": 0, "account_ids": []}
+    if proxy_value is _UNSET:
+        return assign_proxy_accounts(db, organization_id, actor_id, [account.id for account in current_accounts], proxy_id=proxy_id, label=label, region=region)
+    return assign_proxy_accounts(db, organization_id, actor_id, [account.id for account in current_accounts], proxy_value=proxy_value, label=label, region=region)
+
+
+def _probe_proxy(proxy) -> dict:
+    settings = get_settings()
+    request = Request(settings.proxy_test_url, headers={"User-Agent": "Northstar-Operations/1.0"})
+    if proxy.authenticated and proxy.username is not None and proxy.password is not None:
+        token = base64.b64encode(f"{proxy.username}:{proxy.password}".encode()).decode()
+        request.add_header("Proxy-Authorization", f"Basic {token}")
+    opener = build_opener(ProxyHandler({"http": proxy.server, "https": proxy.server}))
+    started = time.monotonic()
+    try:
+        with opener.open(request, timeout=settings.proxy_test_timeout_seconds) as response:
+            body = response.read(256_000)
+        payload = json.loads(body.decode("utf-8"))
+        connection = payload.get("connection") if isinstance(payload, dict) else {}
+        connection = connection if isinstance(connection, dict) else {}
+        if isinstance(payload, dict) and payload.get("success") is False:
+            raise ValueError("proxy provider returned an unsuccessful response")
+        return {"status": "HEALTHY", "public_ip": payload.get("ip"), "provider": connection.get("org") or connection.get("isp"), "country": payload.get("country"), "city": payload.get("city"), "latency_ms": max(0, round((time.monotonic() - started) * 1000))}
+    except Exception as exc:  # noqa: BLE001
+        logger.info("proxy health check failed (%s)", type(exc).__name__)
+        return {"status": "UNREACHABLE", "public_ip": None, "provider": None, "country": None, "city": None, "latency_ms": None}
+
+
+def test_proxy(db: Session, organization_id: str, actor_id: str, proxy_id: str) -> dict:
+    proxy, _ = _proxy_config_for_id(db, organization_id, proxy_id)
+    result = _probe_proxy(proxy)
+    now = utcnow()
+    observation = db.get(ProxyInventory, proxy_id)
+    if not observation:
+        observation = ProxyInventory(id=proxy_id, organization_id=organization_id)
+    observation.provider = result["provider"]
+    observation.country = result["country"]
+    observation.city = result["city"]
+    observation.public_ip = result["public_ip"]
+    observation.test_status = result["status"]
+    observation.test_error = None if result["status"] == "HEALTHY" else "Proxy did not respond to the health check"
+    observation.latency_ms = result["latency_ms"]
+    observation.last_tested_at = now
+    db.add(observation)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.tested", target_type="proxy", target_id=proxy_id, result="success" if result["status"] == "HEALTHY" else "attention", metadata_json={"status": result["status"], "country": result["country"], "city": result["city"], "provider": result["provider"], "latency_ms": result["latency_ms"]}))
+    db.commit()
+    return {"proxy_id": proxy_id, **result, "tested_at": now, "error": observation.test_error}
 
 
 def start_login_session(db: Session, organization_id: str, actor_id: str, account_id: str, purpose: str = "login", contacts_csv_path: str | None = None) -> BrowserSession:

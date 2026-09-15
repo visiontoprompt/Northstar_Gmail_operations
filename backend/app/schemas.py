@@ -170,6 +170,48 @@ class ProxyResponse(BaseModel):
     authenticated_count: int
     account_emails: list[str]
     account_refs: list[ProxyAccountReference]
+    provider: str | None
+    country: str | None
+    city: str | None
+    public_ip: str | None
+    test_status: str
+    test_error: str | None
+    latency_ms: int | None
+    last_tested_at: datetime | None
+
+
+class ProxyAssignmentRequest(BaseModel):
+    account_ids: list[str] = Field(min_length=1, max_length=300)
+    proxy_id: str | None = Field(default=None, max_length=96)
+    proxy: str | None = Field(default=None, max_length=512)
+    label: str | None = Field(default=None, max_length=160)
+    region: str | None = Field(default=None, max_length=80)
+
+
+class ProxyUpdate(BaseModel):
+    proxy: str | None = Field(default=None, max_length=512)
+    label: str | None = Field(default=None, max_length=160)
+    region: str | None = Field(default=None, max_length=80)
+
+
+class ProxyDeleteRequest(BaseModel):
+    confirmation: str = Field(min_length=6, max_length=20)
+
+
+class ProxyTestRequest(BaseModel):
+    proxy_ids: list[str] = Field(min_length=1, max_length=300)
+
+
+class ProxyTestResponse(BaseModel):
+    proxy_id: str
+    status: str
+    public_ip: str | None
+    provider: str | None
+    country: str | None
+    city: str | None
+    latency_ms: int | None
+    tested_at: datetime
+    error: str | None
 
 
 class ImportSummary(BaseModel):

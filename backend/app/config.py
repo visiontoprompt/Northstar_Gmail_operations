@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     worker_retry_limit: int = 3
     worker_max_active_profiles: int = 50
     worker_release_on_complete: bool = True
+    proxy_test_url: str = "https://ipwho.is/"
+    proxy_test_timeout_seconds: float = 8.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

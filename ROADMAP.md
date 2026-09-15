@@ -96,7 +96,7 @@ Exit criteria:
 
 **Status: Complete for the local single-node Phase 2 scope.** Dedicated fresh-window Chrome launch, persistent profile metadata, batch hand-off, locks, session lifecycle, launch-failure retry, visible end-to-end logging, the safe observer boundary, and account-scoped proxy launch are implemented and tested. Auto-driven sign-in (stored email/password entered into Google's own login host) is implemented behind `BROWSER_AUTO_LOGIN`; Google challenges (CAPTCHA, MFA, security checks) remain human-gated. Multi-node profile storage and employee assignment belong to later phases.
 
-The local admin console now also exposes dedicated **Sessions**, **Browser profiles**, and **Proxies** inventory pages. They are read models over the durable session/profile/account records, preserve the account → profile → session boundary, and never expose credential or proxy-password material.
+The local admin console now also exposes dedicated **Sessions**, **Browser profiles**, and **Proxies** inventory pages. Sessions show one latest record per account with group scope; profiles show only physical profile directories that exist; proxies support safe bulk testing, provider/location observations, assignment changes, editing, and removal. These pages preserve the account → profile → session boundary and never expose credential or proxy-password material.
 
 ## Phase 3 — Provisioning pipeline and resumable jobs
 

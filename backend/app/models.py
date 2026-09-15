@@ -67,6 +67,27 @@ class GmailAccount(Base):
     operation_drafts: Mapped[list["OperationDraft"]] = relationship(back_populates="account", cascade="all, delete-orphan")
 
 
+class ProxyInventory(Base):
+    """Safe, organization-scoped observations for a deterministic proxy id."""
+
+    __tablename__ = "proxy_inventory"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
+    label: Mapped[str | None] = mapped_column(String(160))
+    region: Mapped[str | None] = mapped_column(String(80))
+    provider: Mapped[str | None] = mapped_column(String(200))
+    country: Mapped[str | None] = mapped_column(String(120))
+    city: Mapped[str | None] = mapped_column(String(120))
+    public_ip: Mapped[str | None] = mapped_column(String(64))
+    test_status: Mapped[str] = mapped_column(String(32), default="NOT_TESTED", nullable=False)
+    test_error: Mapped[str | None] = mapped_column(String(240))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class BrowserProfile(Base):
     __tablename__ = "browser_profiles"
 

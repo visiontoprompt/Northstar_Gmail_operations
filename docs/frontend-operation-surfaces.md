@@ -21,9 +21,11 @@ These endpoints now back the UI. Production authentication/authorization should 
 
 | Infrastructure inventory | Endpoint | Behavior |
 |---|---|---|
-| Browser profiles | `GET /api/v1/browser-profiles` | Return account-owned profile metadata, lock state, storage reference, and authenticated evidence. Profile contents and cookies are never returned. |
-| Proxies | `GET /api/v1/proxies` | Return deduplicated account-scoped proxy assignments and safe usage counts. Proxy usernames and passwords are never returned. |
-| Sessions | `GET /api/v1/sessions?limit=100` | Return the safe session ledger used by the Sessions page; session history includes state and timestamps only. |
+| Browser profiles | `GET /api/v1/browser-profiles` | Return only physical profile directories that exist on the configured browser host, with account ownership, lock state, storage reference, and authentication evidence. Reserved onboarding rows are excluded; profile contents and cookies are never returned. |
+| Proxies | `GET /api/v1/proxies` | Return deduplicated account-scoped proxy assignments, safe usage counts, and the latest tested provider/location metadata. Proxy usernames and passwords are never returned. |
+| Sessions | `GET /api/v1/sessions?latest_per_account=true&group_id={id}&limit=100` | Return one latest safe session record per account, optionally scoped to a group. Historical sessions remain available from account detail. |
+| Test proxies | `POST /api/v1/proxies/test` | Test one or up to 300 selected assignments through the configured proxy and store only safe health, latency, public IP, provider, country, and city observations. |
+| Manage proxies | `POST /api/v1/proxies/assignments`, `PATCH /api/v1/proxies/{proxy_id}`, `DELETE /api/v1/proxies/{proxy_id}/assignments`, `DELETE /api/v1/proxies/{proxy_id}` | Reassign, edit, unassign, or remove account-scoped proxy assignments. Changes are encrypted, organization-scoped, audited, and applied to every selected account using the endpoint. |
 
 | UI action | Endpoint | Required behavior |
 |---|---|---|

@@ -128,3 +128,24 @@ def test_observer_passes_account_proxy_to_playwright(tmp_path) -> None:
 
     kwargs = playwright.chromium.launch_persistent_context.call_args.kwargs
     assert kwargs["proxy"] == expected
+
+
+def test_proxy_inventory_can_reassign_edit_and_remove_accounts() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        accounts = [client.post("/api/v1/accounts/single", json={"email": f"proxy-{index}@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json() for index in range(3)]
+        assigned = client.post("/api/v1/proxies/assignments", json={"account_ids": [accounts[0]["id"], accounts[1]["id"]], "proxy": "proxy-user:proxy-pass:203.0.113.10:8080", "label": "Primary egress", "region": "New York"})
+        assert assigned.status_code == 200
+        proxy_id = assigned.json()["proxy_id"]
+        assert client.get("/api/v1/proxies").json()[0]["account_count"] == 2
+
+        reassigned = client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [accounts[2]["id"]]})
+        assert reassigned.status_code == 200
+        assert client.get("/api/v1/proxies").json()[0]["account_count"] == 3
+        edited = client.patch(f"/api/v1/proxies/{proxy_id}", json={"label": "Updated egress", "region": "Paris"})
+        assert edited.status_code == 200
+        assert client.get("/api/v1/proxies").json()[0]["label"] == "Updated egress"
+
+        removed = client.request("DELETE", f"/api/v1/proxies/{proxy_id}", json={"confirmation": "REMOVE"})
+        assert removed.status_code == 200
+        assert client.get("/api/v1/proxies").json() == []
