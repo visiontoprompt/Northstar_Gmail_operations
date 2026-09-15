@@ -150,10 +150,21 @@ class _FakeSecurityPage:
         return "already"
 
 
+class _FakeBlankPage:
+    url = "about:blank"
+
+    def goto(self, _url: str, **_kwargs):
+        raise TimeoutError("navigation timed out")
+
+
 def test_start_page_navigation_uses_commit_and_exact_target():
     page = _FakeSecurityPage("about:blank")
     _open_start_page(page, "https://myaccount.google.com/account-enhanced-safe-browsing")
     assert page.goto_calls == ["https://myaccount.google.com/account-enhanced-safe-browsing"]
+
+
+def test_start_page_navigation_reports_blank_page_as_failure():
+    assert _open_start_page(_FakeBlankPage(), "https://myaccount.google.com/account-enhanced-safe-browsing") is False
 
 
 def test_security_operation_navigates_to_exact_page_and_waits_for_verified_completion():

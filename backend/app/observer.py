@@ -57,6 +57,11 @@ _SAFE_CONSENT_LABELS = ("i agree", "accept all", "continue", "next", "got it", "
 _SUBMIT_LABELS = ("sign in", "log in", "continue", "next")
 _LOGIN_HOSTS = {"accounts.google.com", "consent.google.com"}
 _BLANK_URL_PREFIXES = ("about:", "chrome:", "devtools:")
+_OPERATION_FAILURE_EVENTS = {
+    "contacts": "contacts.failed",
+    "labels_markers": "labels_markers.failed",
+    "security": "security.failed",
+}
 _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], input#password"
 _OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
 
@@ -181,7 +186,16 @@ class BrowserObserver:
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 self._start_navigation_attempts = 1
-                _open_start_page(page, self.start_url)
+                if not _open_start_page(page, self.start_url):
+                    failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose)
+                    if failure_event:
+                        self._emit(
+                            failure_event,
+                            "The isolated browser could not load the operation start page; verify the assigned proxy permits Google",
+                            result="failure",
+                        )
+                    self._stop.set()
+                    return
                 page_count = len(context.pages)
                 logger.info("AUTOMATION ACTIVE: observer launched the isolated browser for session %s (%d page target(s))", self.session_id, page_count)
                 try:
@@ -354,7 +368,7 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
         return None
 
 
-def _open_start_page(page: "Page", start_url: str) -> None:
+def _open_start_page(page: "Page", start_url: str) -> bool:
     """Make the fresh window land on Google sign-in unless it already has a
     usable target (e.g. a profile that already progressed to the form)."""
     try:
@@ -367,8 +381,15 @@ def _open_start_page(page: "Page", start_url: str) -> None:
             # waiting for the document commit gives the observer a usable URL
             # without requiring every subresource to finish first.
             page.goto(start_url, wait_until="commit", timeout=15000)
+            return True
+        return True
     except Exception:  # noqa: BLE001 - a load failure must not kill the observer
-        logger.warning("observer could not open %s; the session page may still settle", start_url, exc_info=True)
+        try:
+            after_failure = page.url or ""
+        except Exception:  # noqa: BLE001
+            after_failure = ""
+        logger.warning("observer could not open %s; current page=%s", start_url, after_failure or "about:blank", exc_info=True)
+        return bool(after_failure and not after_failure.startswith(_BLANK_URL_PREFIXES))
 
 
 def _open_page_url(page: "Page") -> str:
