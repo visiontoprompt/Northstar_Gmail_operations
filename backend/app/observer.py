@@ -1409,56 +1409,75 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
 
 
 def _click_gmail_get_addons(page: "Page") -> bool:
-    """Open Marketplace from the rail, including icon-only localized builds."""
+    """Open Marketplace from the revealed rail in any Gmail child frame."""
+    surfaces = [page]
     try:
-        clicked = page.evaluate(
-            """selector => {
-                const node = document.querySelector(selector);
-                if (!node) return false;
-                const style = window.getComputedStyle(node);
-                const rect = node.getBoundingClientRect();
-                if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) return false;
-                const target = node.closest('button, [role="button"]') || node;
-                target.click();
-                return true;
-            }""",
-            _GMAIL_ADDONS_GET_SELECTOR,
-        )
-        if clicked:
-            return True
-    except Exception:  # noqa: BLE001 - semantic fallbacks below
+        frames = getattr(page, "frames", [])
+        if callable(frames):
+            frames = frames()
+        surfaces.extend(frame for frame in list(frames or []) if frame is not page)
+    except Exception:  # noqa: BLE001 - a frame can detach during Gmail navigation
         pass
-    if _click_element_with_text(page, _ADDONS_GET_LABELS):
-        return True
-    try:
-        clicked = page.evaluate(
-            """labels => {
-                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                const wanted = labels.map(normalize);
-                const visible = node => {
+
+    # The user-provided selector is the most reliable signal for this build.
+    # It is checked in every frame because Gmail may render the new rail in an
+    # embedded panel rather than in the top-level document.
+    for surface in surfaces:
+        try:
+            clicked = surface.evaluate(
+                """selector => {
+                    const node = document.querySelector(selector);
                     if (!node) return false;
                     const style = window.getComputedStyle(node);
                     const rect = node.getBoundingClientRect();
-                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-                };
-                const textOf = node => normalize([
-                    node?.innerText,
-                    node?.textContent,
-                    node?.getAttribute?.('aria-label'),
-                    node?.getAttribute?.('data-tooltip'),
-                    node?.getAttribute?.('title'),
-                ].filter(Boolean).join(' '));
-                const control = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title]')]
-                    .find(node => visible(node) && wanted.some(label => textOf(node).includes(label)));
-                if (!control) return false;
-                control.click();
-                return true;
-            }""",
-            _ADDONS_GET_LABELS,
-        )
-        return bool(clicked)
-    except Exception:  # noqa: BLE001 - the observer retries after Gmail re-renders
-        return False
+                    if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) return false;
+                    const target = node.closest('button, [role="button"]') || node;
+                    target.click();
+                    return true;
+                }""",
+                _GMAIL_ADDONS_GET_SELECTOR,
+            )
+            if clicked:
+                return True
+        except Exception:  # noqa: BLE001 - try the next frame or fallback
+            continue
+
+    for surface in surfaces:
+        if _click_element_with_text(surface, _ADDONS_GET_LABELS):
+            return True
+
+    for surface in surfaces:
+        try:
+            clicked = surface.evaluate(
+                """labels => {
+                    const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const wanted = labels.map(normalize);
+                    const visible = node => {
+                        if (!node) return false;
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                    };
+                    const textOf = node => normalize([
+                        node?.innerText,
+                        node?.textContent,
+                        node?.getAttribute?.('aria-label'),
+                        node?.getAttribute?.('data-tooltip'),
+                        node?.getAttribute?.('title'),
+                    ].filter(Boolean).join(' '));
+                    const control = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title]')]
+                        .find(node => visible(node) && wanted.some(label => textOf(node).includes(label)));
+                    if (!control) return false;
+                    control.click();
+                    return true;
+                }""",
+                _ADDONS_GET_LABELS,
+            )
+            if clicked:
+                return True
+        except Exception:  # noqa: BLE001 - the observer retries after Gmail re-renders
+            continue
+    return False
 
 
 def _addons_search_marketplace(page: "Page", name: str) -> bool:

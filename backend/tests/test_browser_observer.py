@@ -175,6 +175,18 @@ class _FakeGetAddonsPage:
         return selector == _GMAIL_ADDONS_GET_SELECTOR
 
 
+class _FakeGmailWithGetAddonsFrame:
+    def __init__(self):
+        self.get_addons_frame = _FakeGetAddonsPage()
+        self.frames = [self.get_addons_frame]
+
+    def locator(self, _selector: str):
+        return _FakeLocator([])
+
+    def evaluate(self, _script: str, _argument):
+        return False
+
+
 class _FakeFrame:
     def __init__(self, url: str):
         self.url = url
@@ -278,6 +290,13 @@ def test_addons_clicks_the_explicit_get_addons_selector_after_rail_opens():
 
     assert _click_gmail_get_addons(page) is True
     assert page.selector == _GMAIL_ADDONS_GET_SELECTOR
+
+
+def test_addons_clicks_explicit_get_addons_selector_inside_revealed_sidebar_frame():
+    page = _FakeGmailWithGetAddonsFrame()
+
+    assert _click_gmail_get_addons(page) is True
+    assert page.get_addons_frame.selector == _GMAIL_ADDONS_GET_SELECTOR
 
 
 def test_addons_uses_embedded_marketplace_frame_from_gmail_side_panel():
