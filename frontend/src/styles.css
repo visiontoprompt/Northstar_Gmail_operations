@@ -399,6 +399,16 @@ tbody tr:hover { background: #fbfdfc; }
 .credential-choice small { margin-top: 3px; color: #849690; font-size: 10px; line-height: 1.4; }
 .credential-choice > svg { color: #86a39b; }
 .credential-reauth-note { margin-top: 17px; padding: 11px 12px; color: #876d3e; background: #fff9ed; border: 1px solid #f0dfbd; border-radius: 9px; font-size: 10px; line-height: 1.45; }
+.credential-checkbox-list { display: grid; gap: 9px; margin-top: 18px; }
+.credential-checkbox { display: grid; grid-template-columns: 16px 34px 1fr; align-items: center; gap: 10px; padding: 12px 13px; background: #fbfdfc; border: 1px solid #dfebe7; border-radius: 10px; cursor: pointer; }
+.credential-checkbox.selected { background: #f1faf7; border-color: #9fcfc1; }
+.credential-checkbox input { accent-color: var(--color-primary); }
+.credential-checkbox strong, .credential-checkbox small { display: block; }
+.credential-checkbox strong { color: #36574f; font-size: 11px; font-weight: 700; }
+.credential-checkbox small { margin-top: 3px; color: #849690; font-size: 10px; line-height: 1.4; }
+.credential-pool { margin-top: 18px; }
+.credential-pool textarea { min-height: 88px; }
+.credential-pool .field-error { display: block; margin-top: 5px; color: var(--color-danger); font-size: 10px; }
 .credential-handoff { display: grid; gap: 5px; margin-top: 18px; padding: 13px; color: #64745e; background: #fff9ed; border: 1px solid #f0dfbd; border-radius: 9px; }
 .credential-handoff .detail-label { color: #9b742e; }
 .credential-handoff strong { color: #6f5628; font-size: 11px; }
