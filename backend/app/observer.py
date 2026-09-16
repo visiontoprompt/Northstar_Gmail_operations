@@ -1148,6 +1148,11 @@ _ADDONS_AUTHORIZATION_LABELS = (
     "autoriser",
     "autorizar",
 )
+_ADDONS_MARKETPLACE_CONFIRM_LABELS = _ADDONS_AUTHORIZATION_LABELS + (
+    "continue",
+    "continuer",
+    "continuar",
+)
 
 
 def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:
@@ -1456,7 +1461,7 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
                 }
                 return null;
             }""",
-                {"context": _ADDONS_MARKETPLACE_CONTEXT_TERMS, "external": _ADDONS_EXTERNAL_CONSENT_TERMS, "labels": _ADDONS_AUTHORIZATION_LABELS, "name": name},
+                {"context": _ADDONS_MARKETPLACE_CONTEXT_TERMS, "external": _ADDONS_EXTERNAL_CONSENT_TERMS, "labels": _ADDONS_MARKETPLACE_CONFIRM_LABELS, "name": name},
             )
             if result in {"clicked", "pause"}:
                 return result
