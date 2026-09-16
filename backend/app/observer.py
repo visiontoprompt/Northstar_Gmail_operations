@@ -474,12 +474,17 @@ def _page_rank(url: str, purpose: str | None = None) -> int:
         return 3
     host = (urlparse(url).hostname or "").lower().rstrip(".")
     if purpose == "addons":
-        if host == "workspace.google.com":
+        # Marketplace installs can open Google's OAuth consent page as a
+        # separate popup. It must win over the still-open Marketplace tab so
+        # the observer can complete the install authorization there.
+        if host == "accounts.google.com" and "/signin/oauth" in urlparse(url).path.lower():
             return 0
-        if host == "mail.google.com":
+        if host == "workspace.google.com":
             return 1
-        if host in _LOGIN_HOSTS:
+        if host == "mail.google.com":
             return 2
+        if host in _LOGIN_HOSTS:
+            return 3
     if host in _LOGIN_HOSTS:
         return 0
     if host == "mail.google.com" or url.startswith(_BLANK_URL_PREFIXES):
@@ -1235,6 +1240,27 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
         observer._stop.set()
         return
 
+    candidate = observer.addon_candidates[observer._addons_current_index]
+    name = candidate.get("name", "approved add-on")
+
+    if host in _LOGIN_HOSTS:
+        # Marketplace opens the Google authorization screen in a child popup
+        # (accounts.google.com/signin/oauth). Handle only that exact OAuth
+        # context and only when the page visibly identifies an add-on. A
+        # normal login, MFA, or unrelated Google security page is left for the
+        # normal login-policy hand-off.
+        authorization = _addons_authorize_google_oauth(page, name)
+        if authorization == "clicked":
+            observer._addons_permission_reported = False
+            observer._addons_wait_ticks = 0
+            observer._emit("addons.oauth_authorized", f"approved Google's account authorization for {name}")
+        elif authorization == "pause":
+            observer._addons_wait_ticks += 1
+            if not observer._addons_permission_reported:
+                observer._addons_permission_reported = True
+                observer._emit("addons.permission_required", f"A non-install permission or paid account approval is required before completing {name}", result="attention")
+        return
+
     if host == "mail.google.com":
         if not observer._addons_sidebar_opened:
             if _click_gmail_addons_sidebar_toggle(page):
@@ -1290,8 +1316,6 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
         observer._stop.set()
         return
 
-    candidate = observer.addon_candidates[observer._addons_current_index]
-    name = candidate.get("name", "approved add-on")
     url = page.url or ""
     is_listing = "/marketplace/app/" in urlparse(url).path.lower()
 
@@ -1527,6 +1551,72 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
             if result in {"clicked", "pause"}:
                 return result
         except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
+            continue
+    return None
+
+
+def _addons_authorize_google_oauth(page: "Page", name: str) -> str | None:
+    """Approve the Google OAuth step spawned by a Marketplace install.
+
+    Marketplace commonly opens a small ``accounts.google.com/signin/oauth``
+    window and localizes the final action as Continue, Continuer, or
+    Continuar. This is intentionally narrower than a generic Google consent
+    click: the URL must be the OAuth route, the visible page must identify an
+    add-on/application, and the copy must describe access to the Google
+    account. Billing/subscription prompts are never accepted automatically.
+    """
+    try:
+        parsed = urlparse(getattr(page, "url", "") or "")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if host != "accounts.google.com" or "/signin/oauth" not in parsed.path.lower():
+            return None
+    except Exception:  # noqa: BLE001 - a popup can close between ticks
+        return None
+
+    for surface in _addons_surfaces(page):
+        try:
+            result = surface.evaluate(
+                """config => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const bodyText = textOf(document.body);
+                const hasAddonContext = config.addonTerms.some(term => bodyText.includes(normalize(term)))
+                    || (config.name && bodyText.includes(normalize(config.name)));
+                const hasAccountConsent = config.consentTerms.some(term => bodyText.includes(normalize(term)));
+                const blocked = config.blockedTerms.some(term => bodyText.includes(normalize(term)));
+                if (!hasAddonContext || !hasAccountConsent) return null;
+                if (blocked) return 'pause';
+                const controls = [...document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')].filter(visible);
+                const action = controls.find(control => {
+                    const label = textOf(control);
+                    return config.labels.some(value => label === normalize(value) || label.startsWith(normalize(value) + ' '));
+                });
+                if (!action) return 'pause';
+                action.click();
+                return 'clicked';
+            }""",
+                {
+                    "name": name,
+                    "addonTerms": ["add-on", "add ons", "addon", "complemento", "complementos", "module complémentaire", "modules complémentaires", "application"],
+                    "consentTerms": ["access your google account", "will allow", "allow this application", "acceda a la siguiente información", "accede a tu cuenta de google", "acceder a tu cuenta de google", "accéder à votre compte google", "autorisation d'accès", "google permitirá"],
+                    "blockedTerms": ["payment", "subscription", "paid plan", "paiement", "abonnement", "suscripción", "plan de pago"],
+                    "labels": ["continue", "continuer", "continuar", "next", "suivant", "siguiente"],
+                },
+            )
+            if result in {"clicked", "pause"}:
+                return result
+        except Exception:  # noqa: BLE001 - popup content can re-render during approval
             continue
     return None
 

@@ -321,6 +321,18 @@ def test_classifier_accepts_sparse_post_auth_google_account_root_in_supported_la
     assert action.value == "SAFE_TO_OBSERVE"
 
 
+def test_classifier_accepts_google_oauth_addon_consent_as_expected_interstitial() -> None:
+    from app.login_policy import PageObservation, classify_page
+
+    signal, action = classify_page(PageObservation(
+        url="https://accounts.google.com/signin/oauth/id?authuser=0",
+        title="Acceso: Cuentas de Google",
+        text="Accede a Any.do Gmail Add-on. Google permitirá que Any.do Gmail Add-on acceda a la siguiente información sobre ti. Continuar",
+    ))
+    assert signal.value == "ORDINARY_INTERSTITIAL"
+    assert action.value == "SAFE_TO_OBSERVE"
+
+
 def test_signed_in_google_account_home_marks_account_authenticated() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]

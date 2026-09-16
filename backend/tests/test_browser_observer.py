@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_google_oauth, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt, _page_rank
 
 
 class _FakeButton:
@@ -358,6 +358,17 @@ def test_addons_authorizes_localized_marketplace_install_confirmation():
     page = _FakeMarketplaceInstallPage("clicked")
 
     assert _addons_authorize_marketplace_install(page, "Any.do for Gmail") == "clicked"
+
+
+def test_addons_authorizes_spanish_google_oauth_popup():
+    page = _FakeMarketplaceInstallPage("clicked")
+    page.url = "https://accounts.google.com/signin/oauth/id?authuser=0"
+
+    assert _addons_authorize_google_oauth(page, "Any.do for Gmail") == "clicked"
+
+
+def test_addons_prioritizes_google_oauth_popup_over_marketplace_tab():
+    assert _page_rank("https://accounts.google.com/signin/oauth/id", "addons") < _page_rank("https://workspace.google.com/marketplace/app/1", "addons")
 
 
 def test_addons_clicks_first_card_install_using_localized_or_aria_label():

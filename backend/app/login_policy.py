@@ -83,6 +83,12 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
         # "privacy") can misclassify it and close an otherwise valid login.
         if host == "accounts.google.com" and any(marker in parsed.path.lower() for marker in ("/challenge/totp", "/challenge/otp")):
             return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
+        if host == "accounts.google.com" and "/signin/oauth" in parsed.path.lower():
+            # A Marketplace add-on may open Google's localized OAuth consent
+            # page in a separate popup. It is an expected install
+            # interstitial, not an unknown login page; the add-on observer
+            # decides whether the exact Continue action is safe to click.
+            return PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE
         if any(marker in haystack for marker in ("sign in", "email or phone", "enter your password")):
             return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE
         if host == "myaccount.google.com" and parsed.path.lower().rstrip("/") == "/account-enhanced-safe-browsing":
