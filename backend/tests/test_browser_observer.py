@@ -414,6 +414,21 @@ def test_addons_retries_a_crashed_marketplace_page():
     assert events[0][1] == "addons.popup_stalled"
 
 
+def test_addons_retries_a_localized_google_403_page():
+    events = []
+    observer = BrowserObserver("s1", "p1", 9222, purpose="addons", report_event=lambda *args: events.append(args))
+    page = _FakePage("https://workspace.google.com/marketplace/app/1", "Google", "403. Se trata de un error. Lo sentimos, no tienes acceso a esta página.")
+    observer._loading_signature = (page.url, "", page._text)
+    observer._loading_since = 0.0
+
+    with patch("app.observer.time.monotonic", return_value=3.0):
+        assert _handle_addons_loading_stall(observer, page) is True
+
+    assert observer._retry_requested is True
+    assert observer._stop.is_set()
+    assert events[0][1] == "addons.popup_error"
+
+
 def test_addons_clicks_first_card_install_using_localized_or_aria_label():
     page = _FakeInstallPage()
 

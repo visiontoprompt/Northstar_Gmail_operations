@@ -72,6 +72,7 @@ _OTP_MAX_RETRIES = 3
 _ADDONS_POPUP_STALL_SECONDS = 45.0
 _ADDONS_POPUP_MISSING_SECONDS = 6.0
 _ADDONS_POPUP_CRASH_SECONDS = 3.0
+_ADDONS_POPUP_ERROR_SECONDS = 2.0
 _ADDONS_POPUP_RETRY_LIMIT = 2
 _OTP_REJECTION_TERMS = (
     "wrong code",
@@ -586,6 +587,17 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             "la pagina se ha bloqueado",
             "la página no responde",
         ))
+        access_error = "403" in normalized_text or any(term in normalized_text for term in (
+            "forbidden",
+            "you don't have access to this page",
+            "you do not have access to this page",
+            "no tienes acceso a esta página",
+            "no tienes acceso a esta pagina",
+            "vous n'avez pas accès à cette page",
+            "vous n'avez pas acces a cette page",
+            "vous n’avez pas accès à cette page",
+            "vous n’avez pas acces a cette page",
+        ))
         loading_copy = any(term in normalized_text for term in (
             "loading",
             "chargement",
@@ -595,7 +607,7 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             "espera un momento",
             "espera mientras",
         ))
-        still_loading = crash_copy or ready_state in {"loading", "interactive"} or not text or loading_copy
+        still_loading = access_error or crash_copy or ready_state in {"loading", "interactive"} or not text or loading_copy
         if not still_loading:
             observer._loading_signature = None
             observer._loading_since = None
@@ -606,15 +618,18 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             observer._loading_signature = signature
             observer._loading_since = now
             return False
-        threshold = _ADDONS_POPUP_CRASH_SECONDS if crash_copy else _ADDONS_POPUP_STALL_SECONDS
+        threshold = _ADDONS_POPUP_ERROR_SECONDS if access_error else (_ADDONS_POPUP_CRASH_SECONDS if crash_copy else _ADDONS_POPUP_STALL_SECONDS)
         if observer._loading_since is None or now - observer._loading_since < threshold:
             return False
         observer._retry_requested = True
-        observer._emit(
-            "addons.popup_stalled",
-            f"The add-on popup stayed in a loading state for {_ADDONS_POPUP_STALL_SECONDS:.0f} seconds; closing the browser before retry",
-            result="attention",
-        )
+        if access_error:
+            observer._emit("addons.popup_error", "Google returned a 403 page for the add-on popup; closing the browser before retry", result="attention")
+        else:
+            observer._emit(
+                "addons.popup_stalled",
+                f"The add-on popup stayed in a loading state for {_ADDONS_POPUP_STALL_SECONDS:.0f} seconds; closing the browser before retry",
+                result="attention",
+            )
         observer._stop.set()
         return True
     except Exception:  # noqa: BLE001 - watchdog must never terminate observation itself
