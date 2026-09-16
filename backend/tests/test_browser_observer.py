@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _addons_authorize_marketplace_install, _click_gmail_addons_sidebar_toggle, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _addons_authorize_marketplace_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -166,6 +166,15 @@ class _FakeMarketplaceInstallPage:
         return self.result
 
 
+class _FakeGetAddonsPage:
+    def __init__(self):
+        self.selector = None
+
+    def evaluate(self, _script: str, selector: str):
+        self.selector = selector
+        return selector == _GMAIL_ADDONS_GET_SELECTOR
+
+
 class _FakeSecurityPage:
     def __init__(self, url: str):
         self.url = url
@@ -249,6 +258,13 @@ def test_addons_sidebar_falls_back_when_configured_node_is_not_actionable():
 
     assert _click_gmail_addons_sidebar_toggle(page) is True
     assert page.evaluate_calls == 2
+
+
+def test_addons_clicks_the_explicit_get_addons_selector_after_rail_opens():
+    page = _FakeGetAddonsPage()
+
+    assert _click_gmail_get_addons(page) is True
+    assert page.selector == _GMAIL_ADDONS_GET_SELECTOR
 
 
 def test_addons_authorizes_localized_marketplace_install_confirmation():

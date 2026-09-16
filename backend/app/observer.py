@@ -1020,6 +1020,7 @@ def _handle_labels_markers_tick(observer: "BrowserObserver", page: "Page", host:
 _GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
 _GOOGLE_WORKSPACE_MARKETPLACE_URL = "https://workspace.google.com/marketplace/"
 _GMAIL_ADDONS_SIDEBAR_SELECTOR = r"body > div.tVu25 > div.nH > div > div.nH.aqk.aql.bkL > div:nth-child(3) > div > div.bAw\.bcf.it > div.brC-dA-I-Jw > div"
+_GMAIL_ADDONS_GET_SELECTOR = "#qJTzr > div:nth-child(3)"
 _ADDONS_GET_LABELS = (
     "get add-ons",
     "get addons",
@@ -1381,6 +1382,24 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
 
 def _click_gmail_get_addons(page: "Page") -> bool:
     """Open Marketplace from the rail, including icon-only localized builds."""
+    try:
+        clicked = page.evaluate(
+            """selector => {
+                const node = document.querySelector(selector);
+                if (!node) return false;
+                const style = window.getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) return false;
+                const target = node.closest('button, [role="button"]') || node;
+                target.click();
+                return true;
+            }""",
+            _GMAIL_ADDONS_GET_SELECTOR,
+        )
+        if clicked:
+            return True
+    except Exception:  # noqa: BLE001 - semantic fallbacks below
+        pass
     if _click_element_with_text(page, _ADDONS_GET_LABELS):
         return True
     try:
