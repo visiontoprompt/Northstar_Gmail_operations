@@ -68,6 +68,28 @@ _OPERATION_FAILURE_EVENTS = {
 }
 _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], input#password"
 _OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
+_OTP_MAX_RETRIES = 3
+_OTP_REJECTION_TERMS = (
+    "wrong code",
+    "incorrect code",
+    "invalid code",
+    "code has expired",
+    "code expired",
+    "try again",
+    "code incorrect",
+    "code invalide",
+    "code expire",
+    "réessayez",
+    "ressayez",
+    "codigo incorrecto",
+    "código incorrecto",
+    "codigo no valido",
+    "código no válido",
+    "codigo expirado",
+    "código expirado",
+    "intentalo de nuevo",
+    "inténtalo de nuevo",
+)
 
 
 class BrowserObserver:
@@ -161,6 +183,9 @@ class BrowserObserver:
         self._fill_failed_urls: dict[str, int] = defaultdict(int)
         self._otp_attempted_urls: set[str] = set()
         self._otp_failed_urls: dict[str, int] = defaultdict(int)
+        self._otp_retry_counts: dict[str, int] = defaultdict(int)
+        self._otp_submitted_at: dict[str, float] = {}
+        self._otp_last_code_counters: dict[str, int] = {}
         self._reported_no_page = False
         self._logged_states: set[tuple[str, str]] = set()
 
@@ -305,7 +330,7 @@ class BrowserObserver:
                 self._chooser_clicked_urls.add(url)
             elif url not in self._continue_clicked_urls and _handle_google_account_continue(page, self, url, host):
                 self._continue_clicked_urls.add(url)
-            if _has_otp_input(page) and self._resolve_otp_secret is not None and url not in self._otp_attempted_urls:
+            if _has_otp_input(page) and self._resolve_otp_secret is not None and _otp_should_attempt(page, self, url):
                 _fill_otp_code(page, self, url)
         elif host in _ACCOUNT_HANDOFF_HOSTS and url not in self._continue_clicked_urls:
             # A saved profile can render the account hand-off inside Gmail or
@@ -618,6 +643,34 @@ def _resolve_otp_secret(observer: "BrowserObserver") -> str | None:
     return observer._otp_secret
 
 
+def _otp_should_attempt(page: "Page", observer: "BrowserObserver", url: str) -> bool:
+    """Allow a bounded retry when Google rejected or cleared a submitted code.
+
+    TOTP values remain valid for a time window, so a retry is delayed until a
+    fresh counter is available. This avoids submitting the same expired value
+    repeatedly while also preventing an infinite retry loop.
+    """
+    if url not in observer._otp_attempted_urls:
+        return True
+    if observer._otp_retry_counts.get(url, 0) >= _OTP_MAX_RETRIES:
+        return False
+    submitted_at = observer._otp_submitted_at.get(url)
+    if submitted_at is None or time.monotonic() - submitted_at < 4.0:
+        return False
+    try:
+        page_text = _visible_text(page).lower()
+        field = page.locator(_OTP_FIELD_SELECTOR)
+        field_empty = field.count() > 0 and not _input_value(field.first)
+    except Exception:  # noqa: BLE001 - the next observer tick will retry
+        return False
+    rejected = any(term in page_text for term in _OTP_REJECTION_TERMS)
+    if not rejected and not field_empty:
+        return False
+    current_counter = int(time.time() // 30)
+    last_counter = observer._otp_last_code_counters.get(url, -1)
+    return current_counter > last_counter
+
+
 def _fill_otp_code(page: "Page", observer: "BrowserObserver", url: str) -> None:
     """Generate a TOTP from the stored Authenticator secret and enter it into
     Google's code field. A transient failure is retried on the next tick; a
@@ -634,11 +687,17 @@ def _fill_otp_code(page: "Page", observer: "BrowserObserver", url: str) -> None:
         observer._otp_attempted_urls.add(url)
         observer._emit("failed", f"could not generate TOTP on {url}: {exc}", result="failure")
         return
+    was_attempted = url in observer._otp_attempted_urls
     try:
         otp_field = page.locator(_OTP_FIELD_SELECTOR)
-        if otp_field.count() and not _input_value(otp_field.first):
+        if otp_field.count() and (not _input_value(otp_field.first) or was_attempted):
+            if was_attempted:
+                otp_field.first.fill("", timeout=2000)
             otp_field.first.fill(code, timeout=2000)
-            observer._emit("otp_filled", url)
+            observer._otp_retry_counts[url] = observer._otp_retry_counts.get(url, 0) + (1 if was_attempted else 0)
+            observer._otp_submitted_at[url] = time.monotonic()
+            observer._otp_last_code_counters[url] = int(time.time() // 30)
+            observer._emit("otp_retry_filled" if was_attempted else "otp_filled", url)
             _click_submit(page, url)
             observer._otp_attempted_urls.add(url)
         elif otp_field.count():

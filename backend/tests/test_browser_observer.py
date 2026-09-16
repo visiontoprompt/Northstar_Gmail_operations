@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt
 
 
 class _FakeButton:
@@ -581,6 +581,38 @@ def test_auto_login_fills_otp_from_stored_secret():
     assert page.cred_fields["otp"].value.isdigit() and len(page.cred_fields["otp"].value) == 6
     assert "otp_filled" in events
     assert getattr(button, "clicked", False) is True
+
+
+def test_auto_login_retries_rejected_otp_with_a_fresh_time_window_code():
+    events = []
+    url = "https://accounts.google.com/v3/signin/challenge/totp/xyz"
+    page = _FakePage(url, "Enter the code", "Incorrect code. Try again.", otp="")
+    observer = BrowserObserver("s1", "p1", 9222, resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP", report_event=lambda sid, event, detail, result: events.append(event))
+
+    with patch("app.observer.time.time", return_value=60.0), patch("app.observer.time.monotonic", return_value=10.0):
+        _fill_otp_code(page, observer, url)
+    assert "otp_filled" in events
+
+    page.cred_fields["otp"].value = ""
+    with patch("app.observer.time.time", return_value=90.0), patch("app.observer.time.monotonic", return_value=20.0):
+        assert _otp_should_attempt(page, observer, url) is True
+        _fill_otp_code(page, observer, url)
+
+    assert "otp_retry_filled" in events
+    assert observer._otp_retry_counts[url] == 1
+    assert len(page.cred_fields["otp"].value) == 6
+
+
+def test_auto_login_does_not_resubmit_same_otp_time_window():
+    url = "https://accounts.google.com/v3/signin/challenge/totp/xyz"
+    page = _FakePage(url, "Enter the code", "Incorrect code. Try again.", otp="")
+    observer = BrowserObserver("s1", "p1", 9222, resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP")
+    observer._otp_attempted_urls.add(url)
+    observer._otp_submitted_at[url] = 0.0
+    observer._otp_last_code_counters[url] = 2
+
+    with patch("app.observer.time.time", return_value=89.0), patch("app.observer.time.monotonic", return_value=10.0):
+        assert _otp_should_attempt(page, observer, url) is False
 
 
 def test_auto_login_skips_otp_without_stored_secret():
