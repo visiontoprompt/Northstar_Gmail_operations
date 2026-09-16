@@ -92,9 +92,8 @@ The Proxies inventory is account-scoped and group-filterable: it groups identica
 
 Login page handling is observation-first: normal Google interstitials can be classified, account-not-found copy is recognized in English and French, and CAPTCHA/MFA/security checks pause for human action. See [docs/login-safety.md](docs/login-safety.md).
 
-Gmail add-ons use a curated set of official Workspace Marketplace listing URLs. The observer searches the Marketplace and verifies up to three installs per account. Google or a Marketplace publisher may still require permission, OAuth, billing, or subscription approval; those prompts are recorded as `NEEDS_ATTENTION` and are never accepted automatically.
+Gmail add-ons use a curated set of official Workspace Marketplace listing URLs. The observer searches the Marketplace, approves the localized Google Marketplace installation confirmation, and verifies up to three installs per account. Publisher OAuth scopes, billing, subscription, or other unrelated account-consent prompts are recorded as `NEEDS_ATTENTION` and are never accepted automatically.
 
-Gmail add-ons use a curated set of official Workspace Marketplace listing URLs. The observer searches the Marketplace and verifies up to three installs per account. Google or a Marketplace publisher may still require permission, OAuth, billing, or subscription approval; those prompts are recorded as `NEEDS_ATTENTION` and are never accepted automatically.
 
 ## Verification
 

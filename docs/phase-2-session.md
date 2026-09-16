@@ -50,9 +50,10 @@ start these verified operations in the same isolated browser boundary:
   Browsing, enable it when needed, verify the resulting control state in
   English, French, or Spanish, then close the browser session.
 - `POST /api/v1/accounts/{id}/addons` — open Gmail at the inbox, search the
-  curated Workspace Marketplace catalog, and install and verify up to three
-  listings in the saved profile. Permission, OAuth, billing, and subscription
-  prompts pause the session for operator attention.
+  curated Workspace Marketplace catalog, approve the localized Marketplace
+  installation confirmation, and install and verify up to three listings in
+  the saved profile. Publisher OAuth, billing, subscription, and unrelated
+  account-consent prompts pause the session for operator attention.
 
 These operations require `browser_profiles.authenticated_at`, never combine a
 new login with a settings mutation, and finish only after a verified terminal

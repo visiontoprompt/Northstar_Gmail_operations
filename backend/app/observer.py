@@ -1020,14 +1020,6 @@ def _handle_labels_markers_tick(observer: "BrowserObserver", page: "Page", host:
 _GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
 _GOOGLE_WORKSPACE_MARKETPLACE_URL = "https://workspace.google.com/marketplace/"
 _GMAIL_ADDONS_SIDEBAR_SELECTOR = r"body > div.tVu25 > div.nH > div > div.nH.aqk.aql.bkL > div:nth-child(3) > div > div.bAw\.bcf.it > div.brC-dA-I-Jw > div"
-_ADDONS_SIDEBAR_TOGGLE_LABELS = (
-    "show side panel",
-    "hide side panel",
-    "afficher le panneau latéral",
-    "masquer le panneau latéral",
-    "mostrar panel lateral",
-    "ocultar panel lateral",
-)
 _ADDONS_GET_LABELS = (
     "get add-ons",
     "get addons",
@@ -1035,6 +1027,13 @@ _ADDONS_GET_LABELS = (
     "obtenir des modules complementaires",
     "obtener complementos",
     "obtener complementos de google workspace",
+)
+_ADDONS_RAIL_LABELS = (
+    "add-ons",
+    "addons",
+    "modules complémentaires",
+    "modules complementaires",
+    "complementos",
 )
 _ADDONS_SEARCH_LABELS = (
     "search",
@@ -1069,6 +1068,38 @@ _ADDONS_PERMISSION_TERMS = (
     "payment",
     "subscription",
 )
+_ADDONS_MARKETPLACE_CONTEXT_TERMS = (
+    "install",
+    "installer",
+    "instalar",
+    "marketplace",
+    "add-on",
+    "add-ons",
+    "addon",
+    "application",
+    "app",
+)
+_ADDONS_EXTERNAL_CONSENT_TERMS = (
+    "access your google account",
+    "accéder à votre compte google",
+    "acceder a tu cuenta de google",
+    "third-party",
+    "third party",
+    "publisher",
+    "see, edit, create, and delete",
+    "voir, modifier, créer et supprimer",
+    "ver, editar, crear y eliminar",
+    "paid plan",
+    "free trial",
+    "payment",
+    "subscription",
+)
+_ADDONS_AUTHORIZATION_LABELS = (
+    "authorize",
+    "autorise",
+    "autoriser",
+    "autorizar",
+)
 
 
 def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) -> None:
@@ -1076,8 +1107,9 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
 
     Gmail's add-on rail and Marketplace are both dynamic and localized. The
     flow therefore uses the supplied rail selector only as a first-choice
-    toggle, then semantic visible labels for the rest. It never accepts a
-    third-party permission, OAuth, billing, or subscription prompt.
+    toggle, then semantic visible labels for the rest. It accepts only the
+    Marketplace installation confirmation; third-party OAuth, billing, and
+    subscription prompts remain an operator hand-off.
     """
     observer._addons_tick_count += 1
     if observer._addons_tick_count > 240:
@@ -1096,7 +1128,7 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
                 observer._emit("addons.sidebar_opened", "opened the Gmail add-ons sidebar")
             return
         if not observer._addons_get_opened:
-            if _click_element_with_text(page, _ADDONS_GET_LABELS):
+            if _click_gmail_get_addons(page):
                 observer._addons_get_opened = True
                 observer._emit("addons.marketplace_opened", "opened Get add-ons from the Gmail sidebar")
             return
@@ -1136,16 +1168,6 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
             observer._emit("addons.listing_fallback", f"opened the allowlisted Marketplace listing for {name} after search results did not expose the card")
         return
 
-    if _addons_permission_dialog_visible(page):
-        if not observer._addons_permission_reported:
-            observer._addons_permission_reported = True
-            observer._emit("addons.permission_required", f"Marketplace requested operator approval before installing {name}", result="attention")
-        # Keep the dedicated window open for the operator. If the operator
-        # approves the Marketplace dialog, the next tick can verify the
-        # resulting listing and continue without relaunching the profile.
-        return
-    observer._addons_permission_reported = False
-
     if not observer._addons_listing_opened:
         observer._addons_listing_opened = True
         observer._emit("addons.listing_ready", f"Marketplace listing ready for {name}")
@@ -1169,10 +1191,16 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
         return
 
     observer._addons_wait_ticks += 1
-    if _addons_permission_dialog_visible(page):
+    authorization = _addons_authorize_marketplace_install(page, name)
+    if authorization == "clicked":
+        observer._addons_permission_reported = False
+        observer._addons_wait_ticks = 0
+        observer._emit("addons.install_authorized", f"approved the Google Marketplace installation confirmation for {name}")
+        return
+    if authorization == "pause" or _addons_permission_dialog_visible(page):
         if not observer._addons_permission_reported:
             observer._addons_permission_reported = True
-            observer._emit("addons.permission_required", f"Marketplace requested operator approval before completing {name}", result="attention")
+            observer._emit("addons.permission_required", f"A non-Marketplace permission or account approval is required before completing {name}", result="attention")
         return
     observer._addons_permission_reported = False
     if _addons_listing_is_installed(page):
@@ -1191,7 +1219,13 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
 
 
 def _click_gmail_addons_sidebar_toggle(page: "Page") -> bool:
-    """Click Gmail's right-rail toggle, with a semantic fallback for locales."""
+    """Click Gmail's right-rail add-ons button, with a localized fallback.
+
+    In some Gmail builds the supplied selector resolves to the rail container,
+    while in others the actionable control is a tooltip-only ``+`` button.
+    The fallback deliberately requires add-on wording so the generic side
+    panel controls cannot be clicked accidentally.
+    """
     try:
         clicked = page.evaluate(
             """selector => {
@@ -1208,7 +1242,146 @@ def _click_gmail_addons_sidebar_toggle(page: "Page") -> bool:
             return True
     except Exception:  # noqa: BLE001 - semantic fallback below
         pass
-    return _click_element_with_text(page, _ADDONS_SIDEBAR_TOGGLE_LABELS)
+    if _click_element_with_text(page, _ADDONS_GET_LABELS):
+        return True
+    try:
+        clicked = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const labels = [...config.get, ...config.rail].map(normalize);
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('data-tooltip'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const candidates = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title]')]
+                    .filter(visible)
+                    .map(node => ({ node, text: textOf(node) }))
+                    .filter(item => labels.some(label => item.text.includes(label)));
+                const target = candidates.find(item => labels.slice(0, config.get.length).some(label => item.text.includes(label))) || candidates[0];
+                if (!target) return false;
+                target.node.click();
+                return true;
+            }""",
+            {"get": _ADDONS_GET_LABELS, "rail": _ADDONS_RAIL_LABELS},
+        )
+        return bool(clicked)
+    except Exception:  # noqa: BLE001 - the observer retries after Gmail re-renders
+        return False
+
+
+def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None:
+    """Approve a clearly identified Marketplace install confirmation.
+
+    Return ``clicked`` for the Google Marketplace confirmation, ``pause`` for
+    an unrelated consent/security screen, and ``None`` when no modal exists.
+    This keeps the automation from accepting a publisher's OAuth scopes or a
+    paid/subscription prompt merely because it contains an Allow button.
+    """
+    try:
+        result = page.evaluate(
+            """config => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const contextTerms = config.context.map(normalize);
+                const externalTerms = config.external.map(normalize);
+                const labels = config.labels.map(normalize);
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const modals = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+                    .filter(visible)
+                    .sort((a, b) => textOf(b).length - textOf(a).length);
+                for (const modal of modals) {
+                    const modalText = textOf(modal);
+                    const hasInstallContext = contextTerms.some(term => modalText.includes(term)) || modalText.includes(normalize(config.name));
+                    const hasExternalConsent = externalTerms.some(term => modalText.includes(term));
+                    const controls = [...modal.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')].filter(visible);
+                    if (hasInstallContext && !hasExternalConsent) {
+                        const confirmation = controls.find(control => {
+                            const label = textOf(control);
+                            return labels.some(value => label === value || label.startsWith(value + ' '));
+                        });
+                        if (confirmation) {
+                            confirmation.click();
+                            return 'clicked';
+                        }
+                    }
+                    // A Marketplace confirmation can include a short access
+                    // summary. Only the explicit localized Authorize action
+                    // may cross that boundary; generic Allow/Continue labels
+                    // remain paused when the dialog looks like OAuth consent.
+                    if (hasInstallContext && hasExternalConsent) {
+                        const explicitAuthorization = controls.find(control => {
+                            const label = textOf(control);
+                            return labels.some(value => label === value || label.startsWith(value + ' '));
+                        });
+                        if (explicitAuthorization) {
+                            explicitAuthorization.click();
+                            return 'clicked';
+                        }
+                    }
+                    const permissionText = ['permission', 'autorisation', 'permiso', 'allow access', 'autoriser', 'autorizar'].some(term => modalText.includes(term));
+                    if (permissionText || hasExternalConsent) return 'pause';
+                }
+                return null;
+            }""",
+            {"context": _ADDONS_MARKETPLACE_CONTEXT_TERMS, "external": _ADDONS_EXTERNAL_CONSENT_TERMS, "labels": _ADDONS_AUTHORIZATION_LABELS, "name": name},
+        )
+        return result if result in {"clicked", "pause"} else None
+    except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
+        return None
+
+
+def _click_gmail_get_addons(page: "Page") -> bool:
+    """Open Marketplace from the rail, including icon-only localized builds."""
+    if _click_element_with_text(page, _ADDONS_GET_LABELS):
+        return True
+    try:
+        clicked = page.evaluate(
+            """labels => {
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const wanted = labels.map(normalize);
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('data-tooltip'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const control = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title]')]
+                    .find(node => visible(node) && wanted.some(label => textOf(node).includes(label)));
+                if (!control) return false;
+                control.click();
+                return true;
+            }""",
+            _ADDONS_GET_LABELS,
+        )
+        return bool(clicked)
+    except Exception:  # noqa: BLE001 - the observer retries after Gmail re-renders
+        return False
 
 
 def _addons_search_marketplace(page: "Page", name: str) -> bool:
