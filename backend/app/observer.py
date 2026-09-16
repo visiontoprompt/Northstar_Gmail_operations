@@ -319,7 +319,8 @@ class BrowserObserver:
         if self.purpose == "security":
             _handle_security_tick(self, page, host)
         if self.purpose == "addons":
-            _handle_addons_tick(self, page, host)
+            addons_surface, addons_host = _active_addons_surface(page, host)
+            _handle_addons_tick(self, addons_surface, addons_host)
 
         state_key = (signal.value, url)
         if state_key in self._logged_states:
@@ -467,6 +468,33 @@ def _active_page(owner: "Browser | BrowserContext", purpose: str | None = None) 
         if _open_page_url(page):
             return page
     return ranked[0]
+
+
+def _active_addons_surface(page: "Page", page_host: str) -> tuple[object, str]:
+    """Return the Marketplace frame when Gmail embeds it in the side panel.
+
+    Gmail has used both a new tab/window and an embedded Workspace Marketplace
+    frame over time. The observer receives the same outer Page in the latter
+    case, so only inspecting ``page.url`` would leave the operation polling
+    Gmail forever after the Marketplace was visibly opened.
+    """
+    if page_host == "workspace.google.com":
+        return page, page_host
+    try:
+        frames = list(getattr(page, "frames", []) or [])
+    except Exception:  # noqa: BLE001 - a page can be closing during hand-off
+        frames = []
+    for frame in frames:
+        try:
+            frame_url = getattr(frame, "url", "")
+            if callable(frame_url):
+                frame_url = frame_url()
+            frame_host = (urlparse(frame_url or "").hostname or "").lower().rstrip(".")
+            if frame_host == "workspace.google.com":
+                return frame, frame_host
+        except Exception:  # noqa: BLE001 - ignore detached frames
+            continue
+    return page, page_host
 
 
 def _page_has_settled(observer: "BrowserObserver", url: str, text: str) -> bool:

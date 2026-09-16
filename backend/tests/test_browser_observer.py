@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _addons_authorize_marketplace_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -175,6 +175,19 @@ class _FakeGetAddonsPage:
         return selector == _GMAIL_ADDONS_GET_SELECTOR
 
 
+class _FakeFrame:
+    def __init__(self, url: str):
+        self.url = url
+
+
+class _FakeFramedGmailPage:
+    url = "https://mail.google.com/mail/u/0/#inbox"
+
+    def __init__(self):
+        self.marketplace_frame = _FakeFrame("https://workspace.google.com/marketplace/")
+        self.frames = [self.marketplace_frame]
+
+
 class _FakeSecurityPage:
     def __init__(self, url: str):
         self.url = url
@@ -265,6 +278,15 @@ def test_addons_clicks_the_explicit_get_addons_selector_after_rail_opens():
 
     assert _click_gmail_get_addons(page) is True
     assert page.selector == _GMAIL_ADDONS_GET_SELECTOR
+
+
+def test_addons_uses_embedded_marketplace_frame_from_gmail_side_panel():
+    page = _FakeFramedGmailPage()
+
+    surface, host = _active_addons_surface(page, "mail.google.com")
+
+    assert surface is page.marketplace_frame
+    assert host == "workspace.google.com"
 
 
 def test_addons_authorizes_localized_marketplace_install_confirmation():
