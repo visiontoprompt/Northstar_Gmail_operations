@@ -69,6 +69,8 @@ _OPERATION_FAILURE_EVENTS = {
 _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[id=identifierId], input[type=password], input[name=Passwd], input#password"
 _OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
 _OTP_MAX_RETRIES = 3
+_ADDONS_POPUP_STALL_SECONDS = 45.0
+_ADDONS_POPUP_RETRY_LIMIT = 2
 _OTP_REJECTION_TERMS = (
     "wrong code",
     "incorrect code",
@@ -167,6 +169,10 @@ class BrowserObserver:
         self._addons_skipped: list[str] = []
         self._addons_wait_ticks = 0
         self._addons_permission_reported = False
+        self._retry_requested = False
+        self._retry_attempt = 0
+        self._loading_signature: tuple[str, str, str] | None = None
+        self._loading_since: float | None = None
         self._start_navigation_attempts = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -227,54 +233,67 @@ class BrowserObserver:
             logger.warning("playwright not installed; session %s is human hand-off", self.session_id)
             return
         with sync_playwright() as pw:
-            context = _launch_profile_context(pw, self)
-            if context is None:
-                failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose, "failed")
-                self._emit(failure_event, "Could not launch the isolated browser with the assigned proxy; verify the proxy connection and that it permits Google", result="failure")
-                self._notify_browser_closed()
-                return
-            try:
-                page = context.pages[0] if context.pages else context.new_page()
-                self._start_navigation_attempts = 1
-                if not _open_start_page(page, self.start_url):
-                    failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose)
-                    if failure_event:
-                        self._emit(
-                            failure_event,
-                            "The isolated browser could not load the operation start page; verify the assigned proxy permits Google",
-                            result="failure",
-                        )
-                    self._stop.set()
-                    return
-                page_count = len(context.pages)
-                logger.info("AUTOMATION ACTIVE: observer launched the isolated browser for session %s (%d page target(s))", self.session_id, page_count)
+            retry_count = 0
+            while True:
+                self._retry_requested = False
+                context = _launch_profile_context(pw, self)
+                if context is None:
+                    failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose, "failed")
+                    self._emit(failure_event, "Could not launch the isolated browser with the assigned proxy; verify the proxy connection and that it permits Google", result="failure")
+                    break
                 try:
-                    for target in context.pages:
-                        logger.info("session %s: page target %s", self.session_id, _open_page_url(target))
-                except Exception:  # noqa: BLE001 - report-only
-                    logger.warning("session %s: page targets unreadable", self.session_id)
-                try:
-                    while not self._stop.is_set():
+                    page = context.pages[0] if context.pages else context.new_page()
+                    self._start_navigation_attempts = 1
+                    if not _open_start_page(page, self.start_url):
+                        failure_event = _OPERATION_FAILURE_EVENTS.get(self.purpose)
+                        if failure_event:
+                            self._emit(
+                                failure_event,
+                                "The isolated browser could not load the operation start page; verify the assigned proxy permits Google",
+                                result="failure",
+                            )
+                        self._stop.set()
+                    else:
+                        page_count = len(context.pages)
+                        logger.info("AUTOMATION ACTIVE: observer launched the isolated browser for session %s (%d page target(s))", self.session_id, page_count)
                         try:
-                            self._tick(context)
-                        except Exception:  # noqa: BLE001 - a bad page must not kill the observer
-                            logger.exception("observer tick failed for session %s", self.session_id)
-                        self._stop.wait(self._interval)
+                            for target in context.pages:
+                                logger.info("session %s: page target %s", self.session_id, _open_page_url(target))
+                        except Exception:  # noqa: BLE001 - report-only
+                            logger.warning("session %s: page targets unreadable", self.session_id)
+                        try:
+                            while not self._stop.is_set():
+                                try:
+                                    self._tick(context)
+                                except Exception:  # noqa: BLE001 - a bad page must not kill the observer
+                                    logger.exception("observer tick failed for session %s", self.session_id)
+                                self._stop.wait(self._interval)
+                        finally:
+                            logger.info("observer closing the isolated browser for session %s", self.session_id)
                 finally:
-                    logger.info("observer closing the isolated browser for session %s", self.session_id)
-            finally:
-                try:
-                    # Closing the persistent context terminates the browser but
-                    # keeps the user-data dir on disk, so the account's saved
-                    # cookies/profile persist for the next no-login session.
-                    context.close()
-                except Exception:  # noqa: BLE001
-                    logger.debug("observer context close failed for session %s", self.session_id, exc_info=True)
-                finally:
-                    # Cleanup runs only after Chromium releases its files.
-                    # Removing an unsaved profile from the page callback lets
-                    # the closing browser recreate a partial directory.
-                    self._notify_browser_closed()
+                    try:
+                        # Closing the persistent context terminates the browser
+                        # but keeps the user-data dir on disk, so the account's
+                        # saved cookies/profile persist for the next attempt.
+                        context.close()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("context close failed for session %s", self.session_id, exc_info=True)
+
+                if not self._retry_requested:
+                    break
+                if retry_count >= _ADDONS_POPUP_RETRY_LIMIT:
+                    self._retry_requested = False
+                    self._emit("addons.failed", "The add-on popup stayed loading after the retry limit; the session was closed", result="failure")
+                    break
+                retry_count += 1
+                self._retry_attempt = retry_count
+                self._reset_after_popup_retry()
+                self._stop.clear()
+                logger.warning("session %s: closed stalled add-on popup; retrying fresh browser attempt %d/%d", self.session_id, retry_count, _ADDONS_POPUP_RETRY_LIMIT)
+                time.sleep(min(2.0, max(0.25, self._interval * 2)))
+            # Notify only after the final context closes. Intermediate retry
+            # cycles must not make the API briefly release the profile lock.
+            self._notify_browser_closed()
 
     def _tick(self, browser: "Browser | BrowserContext") -> None:
         page = _active_page(browser, self.purpose)
@@ -297,6 +316,8 @@ class BrowserObserver:
             return
         title = page.title() or ""
         text = _visible_text(page)
+        if _handle_addons_loading_stall(self, page):
+            return
         signal, action = classify_page(PageObservation(url=url, title=title, text=text))
         host = (urlparse(url).hostname or "").lower().rstrip(".")
 
@@ -372,7 +393,36 @@ class BrowserObserver:
             logger.warning("session %s: page stayed unknown on %s; paused for a human", self.session_id, url)
         elif signal.value == "ORDINARY_INTERSTITIAL":
             logger.info("session %s: interstitial (consent/chooser) on %s", self.session_id, url)
-        self._logged_states.add(state_key)
+            self._logged_states.add(state_key)
+
+    def _reset_after_popup_retry(self) -> None:
+        """Reset transient observer state while keeping installed add-ons.
+
+        A retry starts a new persistent browser context against the same
+        profile. Existing successful installs remain discoverable and are
+        skipped by the normal Marketplace verification path.
+        """
+        self._last_observation = None
+        self._unknown_since = None
+        self._loading_signature = None
+        self._loading_since = None
+        self._reported_no_page = False
+        self._logged_states.clear()
+        self._continue_clicked_urls.clear()
+        self._chooser_clicked_urls.clear()
+        self._addons_sidebar_opened = False
+        self._addons_get_opened = False
+        self._addons_plus_clicked = False
+        self._addons_plus_wait_ticks = 0
+        self._addons_plus_scan_ticks = 0
+        self._addons_plus_scan_reported = False
+        self._addons_plus_click_detail = None
+        self._addons_marketplace_reported = False
+        self._addons_search_attempted = False
+        self._addons_listing_opened = False
+        self._addons_install_attempted = False
+        self._addons_wait_ticks = 0
+        self._addons_permission_reported = False
 
 
 def _launch_profile_context(pw, observer: "BrowserObserver"):
@@ -490,6 +540,68 @@ def _page_rank(url: str, purpose: str | None = None) -> int:
     if host == "mail.google.com" or url.startswith(_BLANK_URL_PREFIXES):
         return 2
     return 1
+
+
+def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> bool:
+    """Close and retry when an add-on Marketplace popup never finishes.
+
+    This watchdog is deliberately narrow. It only watches the Marketplace
+    route and Google's OAuth popup during the add-on operation, and only when
+    the document is still loading, has no visible body, or displays an
+    explicit loading/waiting state. A normal slow but usable page is left
+    alone. The retry is bounded by ``_ADDONS_POPUP_RETRY_LIMIT`` in ``_run``.
+    """
+    if observer.purpose != "addons":
+        return False
+    try:
+        url = _open_page_url(page)
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = parsed.path.lower()
+        is_marketplace = host == "workspace.google.com" and "/marketplace" in path
+        is_oauth_popup = host == "accounts.google.com" and "/signin/oauth" in path
+        if not (is_marketplace or is_oauth_popup):
+            observer._loading_signature = None
+            observer._loading_since = None
+            return False
+        text = _visible_text(page).strip()
+        try:
+            ready_state = str(page.evaluate("document.readyState") or "").lower()
+        except Exception:  # noqa: BLE001 - fake/closing pages may not evaluate
+            ready_state = ""
+        loading_copy = any(term in text.lower() for term in (
+            "loading",
+            "chargement",
+            "cargando",
+            "please wait",
+            "veuillez patienter",
+            "espera un momento",
+            "espera mientras",
+        ))
+        still_loading = ready_state in {"loading", "interactive"} or not text or loading_copy
+        if not still_loading:
+            observer._loading_signature = None
+            observer._loading_since = None
+            return False
+        signature = (url, ready_state, text[:500])
+        now = time.monotonic()
+        if signature != observer._loading_signature:
+            observer._loading_signature = signature
+            observer._loading_since = now
+            return False
+        if observer._loading_since is None or now - observer._loading_since < _ADDONS_POPUP_STALL_SECONDS:
+            return False
+        observer._retry_requested = True
+        observer._emit(
+            "addons.popup_stalled",
+            f"The add-on popup stayed in a loading state for {_ADDONS_POPUP_STALL_SECONDS:.0f} seconds; closing the browser before retry",
+            result="attention",
+        )
+        observer._stop.set()
+        return True
+    except Exception:  # noqa: BLE001 - watchdog must never terminate observation itself
+        logger.debug("add-on loading watchdog could not inspect session %s", observer.session_id, exc_info=True)
+        return False
 
 
 def _active_page(owner: "Browser | BrowserContext", purpose: str | None = None) -> "Page | None":
