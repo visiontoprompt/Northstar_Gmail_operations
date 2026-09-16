@@ -1229,11 +1229,41 @@ def _click_gmail_addons_sidebar_toggle(page: "Page") -> bool:
     try:
         clicked = page.evaluate(
             """selector => {
-                const node = document.querySelector(selector);
-                if (!node) return false;
-                const rect = node.getBoundingClientRect();
-                if (rect.width <= 0 || rect.height <= 0) return false;
-                node.click();
+                const root = document.querySelector(selector);
+                if (!root) return false;
+                const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const visible = node => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                };
+                const textOf = node => normalize([
+                    node?.innerText,
+                    node?.textContent,
+                    node?.getAttribute?.('aria-label'),
+                    node?.getAttribute?.('data-tooltip'),
+                    node?.getAttribute?.('title'),
+                ].filter(Boolean).join(' '));
+                const addOnWords = [
+                    'get add-ons',
+                    'get addons',
+                    'obtenir des modules complémentaires',
+                    'obtenir des modules complementaires',
+                    'obtener complementos',
+                    'add-ons',
+                    'addons',
+                    'modules complémentaires',
+                    'modules complementaires',
+                    'complementos',
+                ];
+                const candidates = [root, ...root.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title]')]
+                    .filter(visible);
+                const target = candidates.find(node => addOnWords.some(word => textOf(node).includes(word)))
+                    || (root.matches('button, [role="button"]') ? root : null)
+                    || root.closest('button, [role="button"]');
+                if (!target || !visible(target)) return false;
+                target.click();
                 return true;
             }""",
             _GMAIL_ADDONS_SIDEBAR_SELECTOR,

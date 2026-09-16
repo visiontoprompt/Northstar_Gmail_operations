@@ -146,6 +146,18 @@ class _FakeAddonsSidebarPage:
         return True
 
 
+class _FakeAddonsSidebarFallbackPage:
+    def __init__(self):
+        self.evaluate_calls = 0
+
+    def locator(self, _selector: str):
+        return _FakeLocator([])
+
+    def evaluate(self, _script: str, _argument):
+        self.evaluate_calls += 1
+        return self.evaluate_calls > 1
+
+
 class _FakeMarketplaceInstallPage:
     def __init__(self, result: str):
         self.result = result
@@ -230,6 +242,13 @@ def test_addons_clicks_the_configured_gmail_sidebar_selector():
 
     assert _click_gmail_addons_sidebar_toggle(page) is True
     assert page.selector == _GMAIL_ADDONS_SIDEBAR_SELECTOR
+
+
+def test_addons_sidebar_falls_back_when_configured_node_is_not_actionable():
+    page = _FakeAddonsSidebarFallbackPage()
+
+    assert _click_gmail_addons_sidebar_toggle(page) is True
+    assert page.evaluate_calls == 2
 
 
 def test_addons_authorizes_localized_marketplace_install_confirmation():
