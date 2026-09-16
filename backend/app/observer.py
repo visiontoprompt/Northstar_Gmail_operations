@@ -131,6 +131,9 @@ class BrowserObserver:
         self._addons_tick_count = 0
         self._addons_sidebar_opened = False
         self._addons_get_opened = False
+        self._addons_plus_clicked = False
+        self._addons_plus_wait_ticks = 0
+        self._addons_marketplace_reported = False
         self._addons_search_attempted = False
         self._addons_listing_opened = False
         self._addons_install_attempted = False
@@ -1157,14 +1160,31 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
                 observer._emit("addons.sidebar_opened", "opened the Gmail add-ons sidebar")
             return
         if not observer._addons_get_opened:
-            if _click_gmail_get_addons(page):
-                observer._addons_get_opened = True
-                observer._emit("addons.marketplace_opened", "opened Get add-ons from the Gmail sidebar")
+            if not observer._addons_plus_clicked:
+                if _click_gmail_get_addons(page):
+                    observer._addons_plus_clicked = True
+                    observer._addons_plus_wait_ticks = 0
+                    observer._emit("addons.plus_clicked", "clicked the visible + button in the Gmail add-ons sidebar")
+                return
+            # The plus button can open Marketplace as a child frame without
+            # changing the outer Gmail URL. Give that frame time to appear;
+            # if it does not, retry the scan instead of reporting success.
+            observer._addons_plus_wait_ticks += 1
+            if observer._addons_plus_wait_ticks >= 8:
+                observer._addons_plus_clicked = False
+                observer._addons_plus_wait_ticks = 0
             return
         return
 
     if host != "workspace.google.com":
         return
+
+    observer._addons_get_opened = True
+    observer._addons_plus_clicked = False
+    observer._addons_plus_wait_ticks = 0
+    if not observer._addons_marketplace_reported:
+        observer._addons_marketplace_reported = True
+        observer._emit("addons.marketplace_opened", "Marketplace surface is now visible after the Gmail + button click")
 
     if observer._addons_current_index >= len(observer.addon_candidates):
         observer._emit("addons.failed", f"Only {len(observer._addons_installed)} approved add-ons were installed; three were required", result="failure")
@@ -1436,6 +1456,58 @@ def _click_gmail_get_addons(page: "Page") -> bool:
                     return true;
                 }""",
                 _GMAIL_ADDONS_GET_SELECTOR,
+            )
+            if clicked:
+                return True
+        except Exception:  # noqa: BLE001 - try the next frame or fallback
+            continue
+
+    # Some Gmail releases render the plus as an unlabeled icon in a narrow
+    # right rail. Use viewport geometry only after the explicit selector: the
+    # target must be on the right edge, be visible, and contain either a real
+    # plus glyph or add-on wording in its accessible metadata.
+    for surface in surfaces:
+        try:
+            clicked = surface.evaluate(
+                """config => {
+                    const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const addOnWords = config.labels.map(normalize);
+                    const visible = node => {
+                        if (!node) return false;
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                    };
+                    const textOf = node => normalize([
+                        node?.innerText,
+                        node?.textContent,
+                        node?.getAttribute?.('aria-label'),
+                        node?.getAttribute?.('data-tooltip'),
+                        node?.getAttribute?.('title'),
+                    ].filter(Boolean).join(' '));
+                    const width = window.innerWidth || document.documentElement.clientWidth || 0;
+                    const height = window.innerHeight || document.documentElement.clientHeight || 0;
+                    const isRightRail = rect => rect.left >= Math.max(0, width - Math.max(180, width * 0.28)) && rect.top > 40 && rect.top < height - 20 && rect.width <= Math.max(180, width * 0.32);
+                    const controls = [...document.querySelectorAll('button, [role="button"], [aria-label], [data-tooltip], [title], div, span')]
+                        .filter(visible)
+                        .map(node => ({ node, rect: node.getBoundingClientRect(), text: textOf(node) }))
+                        .filter(item => isRightRail(item.rect));
+                    const plus = controls.filter(item => /(^|\\s)\\+(?=\\s|$)/.test(item.text) || item.text === '+' || addOnWords.some(label => item.text.includes(label)));
+                    if (!plus.length) return false;
+                    // Prefer an explicit add-on label. Otherwise choose the
+                    // lowest visible plus control, which is the Marketplace
+                    // button at the bottom of Gmail's right rail.
+                    plus.sort((a, b) => {
+                        const aLabel = addOnWords.some(label => a.text.includes(label)) ? 0 : 1;
+                        const bLabel = addOnWords.some(label => b.text.includes(label)) ? 0 : 1;
+                        return aLabel - bLabel || b.rect.top - a.rect.top;
+                    });
+                    const node = plus[0].node;
+                    const target = node.closest('button, [role="button"]') || node;
+                    target.click();
+                    return true;
+                }""",
+                {"labels": _ADDONS_GET_LABELS + _ADDONS_RAIL_LABELS},
             )
             if clicked:
                 return True
