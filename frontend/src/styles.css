@@ -399,6 +399,12 @@ tbody tr:hover { background: #fbfdfc; }
 .credential-choice small { margin-top: 3px; color: #849690; font-size: 10px; line-height: 1.4; }
 .credential-choice > svg { color: #86a39b; }
 .credential-reauth-note { margin-top: 17px; padding: 11px 12px; color: #876d3e; background: #fff9ed; border: 1px solid #f0dfbd; border-radius: 9px; font-size: 10px; line-height: 1.45; }
+.credential-handoff { display: grid; gap: 5px; margin-top: 18px; padding: 13px; color: #64745e; background: #fff9ed; border: 1px solid #f0dfbd; border-radius: 9px; }
+.credential-handoff .detail-label { color: #9b742e; }
+.credential-handoff strong { color: #6f5628; font-size: 11px; }
+.credential-handoff small { color: #897957; font-size: 10px; line-height: 1.45; }
+.credential-confirm { display: flex; align-items: flex-start; gap: 8px; margin-top: 5px; color: #5e6e61; font-size: 10px; line-height: 1.4; }
+.credential-confirm input { margin: 1px 0 0; accent-color: var(--color-primary); }
 .batch-modal { width: min(100%, 590px); }
 .batch-control { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 14px; background: #fbfdfc; border: 1px solid #e3ece9; border-radius: 10px; }
 .batch-control label, .batch-control small { display: block; }
