@@ -133,6 +133,9 @@ class BrowserObserver:
         self._addons_get_opened = False
         self._addons_plus_clicked = False
         self._addons_plus_wait_ticks = 0
+        self._addons_plus_scan_ticks = 0
+        self._addons_plus_scan_reported = False
+        self._addons_plus_click_detail: dict[str, object] | None = None
         self._addons_marketplace_reported = False
         self._addons_search_attempted = False
         self._addons_listing_opened = False
@@ -495,6 +498,19 @@ def _active_addons_surface(page: "Page", page_host: str) -> tuple[object, str]:
             frame_host = (urlparse(frame_url or "").hostname or "").lower().rstrip(".")
             if frame_host == "workspace.google.com":
                 return frame, frame_host
+
+            # Gmail has also rendered the Marketplace in a same-origin-looking
+            # embedded surface whose URL is not a stable workspace.google.com
+            # URL. Use visible Marketplace copy as a second, content-based
+            # signal so the observer does not keep polling the outer mailbox.
+            body = frame.locator("body")
+            if body.count():
+                text = (body.inner_text(timeout=1000) or "").lower()
+                marketplace_copy = "marketplace" in text and any(
+                    term in text for term in ("install", "installer", "instalar", "add-on", "addon", "application")
+                )
+                if marketplace_copy:
+                    return frame, "workspace.google.com"
         except Exception:  # noqa: BLE001 - ignore detached frames
             continue
     return page, page_host
@@ -1157,14 +1173,29 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
         if not observer._addons_sidebar_opened:
             if _click_gmail_addons_sidebar_toggle(page):
                 observer._addons_sidebar_opened = True
+                observer._addons_plus_scan_ticks = 0
+                observer._addons_plus_scan_reported = False
                 observer._emit("addons.sidebar_opened", "opened the Gmail add-ons sidebar")
             return
         if not observer._addons_get_opened:
             if not observer._addons_plus_clicked:
-                if _click_gmail_get_addons(page):
+                observer._addons_plus_click_detail = None
+                if _click_gmail_get_addons(page, report=lambda detail: setattr(observer, "_addons_plus_click_detail", detail)):
                     observer._addons_plus_clicked = True
                     observer._addons_plus_wait_ticks = 0
-                    observer._emit("addons.plus_clicked", "clicked the visible + button in the Gmail add-ons sidebar")
+                    observer._addons_plus_scan_ticks = 0
+                    observer._addons_plus_scan_reported = False
+                    evidence = observer._addons_plus_click_detail or {}
+                    selector = evidence.get("selector", "semantic visible control")
+                    label = evidence.get("label", "")
+                    frame_url = evidence.get("frame_url", "")
+                    self_detail = f"clicked Gmail add-ons control selector={selector!r} label={label!r} frame={frame_url or 'mailbox'}"
+                    observer._emit("addons.plus_clicked", self_detail)
+                else:
+                    observer._addons_plus_scan_ticks += 1
+                    if observer._addons_plus_scan_ticks >= 3 and not observer._addons_plus_scan_reported:
+                        observer._addons_plus_scan_reported = True
+                        observer._emit("addons.plus_scan_waiting", "Gmail add-ons sidebar is open, but no visible + / Get add-ons control matched; continuing to rescan Gmail frames", result="attention")
                 return
             # The plus button can open Marketplace as a child frame without
             # changing the outer Gmail URL. Give that frame time to appear;
@@ -1173,6 +1204,8 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
             if observer._addons_plus_wait_ticks >= 8:
                 observer._addons_plus_clicked = False
                 observer._addons_plus_wait_ticks = 0
+                observer._addons_plus_scan_ticks = 0
+                observer._addons_plus_scan_reported = False
             return
         return
 
@@ -1428,7 +1461,7 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
         return None
 
 
-def _click_gmail_get_addons(page: "Page") -> bool:
+def _click_gmail_get_addons(page: "Page", report=None) -> bool:
     """Open Marketplace from the revealed rail in any Gmail child frame."""
     surfaces = [page]
     try:
@@ -1444,6 +1477,18 @@ def _click_gmail_get_addons(page: "Page") -> bool:
     # embedded panel rather than in the top-level document.
     for surface in surfaces:
         try:
+            # Use Playwright's real pointer click for the exact user-supplied
+            # selector when possible. A DOM ``element.click()`` can be ignored
+            # by Gmail's event delegation even though it returns successfully.
+            exact = surface.locator(_GMAIL_ADDONS_GET_SELECTOR)
+            if exact.count() and exact.is_visible():
+                exact.click(timeout=3000)
+                if report:
+                    report({"selector": _GMAIL_ADDONS_GET_SELECTOR, "label": "Get add-ons", "frame_url": getattr(surface, "url", "")})
+                return True
+        except Exception:  # noqa: BLE001 - fall through to DOM/frame scan
+            pass
+        try:
             clicked = surface.evaluate(
                 """selector => {
                     const node = document.querySelector(selector);
@@ -1453,11 +1498,14 @@ def _click_gmail_get_addons(page: "Page") -> bool:
                     if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) return false;
                     const target = node.closest('button, [role="button"]') || node;
                     target.click();
-                    return true;
+                    const rect = target.getBoundingClientRect();
+                    return {clicked: true, selector, label: (target.innerText || target.getAttribute('aria-label') || target.getAttribute('data-tooltip') || '').trim(), frame_url: location.href, rect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}};
                 }""",
                 _GMAIL_ADDONS_GET_SELECTOR,
             )
             if clicked:
+                if report:
+                    report(clicked if isinstance(clicked, dict) else {"selector": _GMAIL_ADDONS_GET_SELECTOR, "frame_url": getattr(surface, "url", "")})
                 return True
         except Exception:  # noqa: BLE001 - try the next frame or fallback
             continue
@@ -1505,17 +1553,22 @@ def _click_gmail_get_addons(page: "Page") -> bool:
                     const node = plus[0].node;
                     const target = node.closest('button, [role="button"]') || node;
                     target.click();
-                    return true;
+                    const rect = target.getBoundingClientRect();
+                    return {clicked: true, selector: 'geometry-right-rail', label: (target.innerText || target.getAttribute('aria-label') || target.getAttribute('data-tooltip') || '').trim(), frame_url: location.href, rect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}};
                 }""",
                 {"labels": _ADDONS_GET_LABELS + _ADDONS_RAIL_LABELS},
             )
             if clicked:
+                if report:
+                    report(clicked if isinstance(clicked, dict) else {"selector": "geometry-right-rail", "frame_url": getattr(surface, "url", "")})
                 return True
         except Exception:  # noqa: BLE001 - try the next frame or fallback
             continue
 
     for surface in surfaces:
         if _click_element_with_text(surface, _ADDONS_GET_LABELS):
+            if report:
+                report({"selector": "semantic-visible-label", "label": "get add-ons" , "frame_url": getattr(surface, "url", "")})
             return True
 
     for surface in surfaces:
@@ -1541,11 +1594,14 @@ def _click_gmail_get_addons(page: "Page") -> bool:
                         .find(node => visible(node) && wanted.some(label => textOf(node).includes(label)));
                     if (!control) return false;
                     control.click();
-                    return true;
+                    const rect = control.getBoundingClientRect();
+                    return {clicked: true, selector: 'localized-visible-control', label: (control.innerText || control.getAttribute('aria-label') || control.getAttribute('data-tooltip') || '').trim(), frame_url: location.href, rect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}};
                 }""",
                 _ADDONS_GET_LABELS,
             )
             if clicked:
+                if report:
+                    report(clicked if isinstance(clicked, dict) else {"selector": "localized-visible-control", "frame_url": getattr(surface, "url", "")})
                 return True
         except Exception:  # noqa: BLE001 - the observer retries after Gmail re-renders
             continue

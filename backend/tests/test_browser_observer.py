@@ -192,6 +192,21 @@ class _FakeFrame:
         self.url = url
 
 
+class _FakeMarketplaceTextFrame:
+    url = "https://mail.google.com/mail/u/0/#inbox"
+
+    class _Body:
+        def count(self):
+            return 1
+
+        def inner_text(self, timeout: int = 1000):
+            return "Google Workspace Marketplace — Installer des applications"
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        return self._Body()
+
+
 class _FakeFramedGmailPage:
     url = "https://mail.google.com/mail/u/0/#inbox"
 
@@ -301,6 +316,17 @@ def test_addons_clicks_explicit_get_addons_selector_inside_revealed_sidebar_fram
 
 def test_addons_uses_embedded_marketplace_frame_from_gmail_side_panel():
     page = _FakeFramedGmailPage()
+
+    surface, host = _active_addons_surface(page, "mail.google.com")
+
+    assert surface is page.marketplace_frame
+    assert host == "workspace.google.com"
+
+
+def test_addons_uses_marketplace_copy_when_embedded_frame_url_is_not_stable():
+    page = _FakeFramedGmailPage()
+    page.marketplace_frame = _FakeMarketplaceTextFrame()
+    page.frames = [page.marketplace_frame]
 
     surface, host = _active_addons_surface(page, "mail.google.com")
 
