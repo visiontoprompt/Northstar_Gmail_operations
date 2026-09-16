@@ -222,11 +222,17 @@ class ImportSummary(BaseModel):
 
 
 class CredentialUpdate(BaseModel):
-    password: str = Field(min_length=1, max_length=2048)
-    recovery: str = Field(min_length=1, max_length=320)
-    two_fa: str = Field(min_length=1, max_length=2048, alias="2fa")
+    password: str | None = Field(default=None, min_length=1, max_length=2048)
+    recovery: str | None = Field(default=None, min_length=1, max_length=320)
+    two_fa: str | None = Field(default=None, min_length=1, max_length=2048, alias="2fa")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def require_one_change(self) -> "CredentialUpdate":
+        if self.password is None and self.recovery is None and self.two_fa is None:
+            raise ValueError("Provide one credential field to update")
+        return self
 
 
 class CredentialRevisionResponse(BaseModel):

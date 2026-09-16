@@ -442,7 +442,7 @@ def list_operation_drafts(db: Session, organization_id: str, account_id: str) ->
     return [_operation_draft_response(draft) for draft in drafts]
 
 
-def update_credentials(db: Session, organization_id: str, actor_id: str, account_id: str, password: str, recovery: str, two_fa: str) -> dict:
+def update_credentials(db: Session, organization_id: str, actor_id: str, account_id: str, password: str | None, recovery: str | None, two_fa: str | None) -> dict:
     account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id))
     if not account:
         raise ImportValidationError("Account not found")
@@ -455,16 +455,22 @@ def update_credentials(db: Session, organization_id: str, actor_id: str, account
             existing_payload = SecretCipher().decrypt(account.secret.encrypted_payload) or {}
         except Exception as exc:  # noqa: BLE001
             raise ImportValidationError("The encrypted account vault could not be opened") from exc
+        if isinstance(existing_payload, dict):
+            for key in ("password", "recovery", "2fa"):
+                if payload[key] is None:
+                    payload[key] = existing_payload.get(key)
         if isinstance(existing_payload, dict) and existing_payload.get("proxy"):
             payload["proxy"] = existing_payload["proxy"]
+    if any(not isinstance(payload[key], str) or not payload[key].strip() for key in ("password", "recovery", "2fa")):
+        raise ImportValidationError("The existing encrypted credential set is incomplete; provide all credential fields")
     encrypted_payload = SecretCipher().encrypt(payload)
     if account.secret:
         account.secret.encrypted_payload = encrypted_payload
         account.secret.key_version = "v1"
     else:
         account.secret = AccountSecret(id=_new_id("secret"), account_id=account.id, secret_ref=f"secret://account/{account.id}/primary", encrypted_payload=encrypted_payload)
-    account.recovery_hint = mask_recovery(recovery)
-    account.two_fa_configured = bool(two_fa)
+    account.recovery_hint = mask_recovery(payload["recovery"])
+    account.two_fa_configured = bool(payload["2fa"])
     account.readiness_status = "READY_FOR_LOGIN"
     account.login_status = "REQUIRED"
     if account.browser_profile:

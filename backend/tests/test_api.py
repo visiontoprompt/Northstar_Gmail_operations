@@ -365,6 +365,29 @@ def test_credential_update_creates_encrypted_revision_and_requires_reauth() -> N
         assert all(row["secret_status"] == "STORED_ENCRYPTED" for row in revisions.json())
 
 
+def test_credential_update_can_rotate_one_field_without_returning_or_losing_other_secrets() -> None:
+    from app.db import SessionLocal
+    from app.models import AccountSecret
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "partial-rotate@example.com", "password": "keep-password", "recovery": "keep@example.com", "2fa": "keep-totp", "group_id": group_id}).json()
+        updated = client.put(f"/api/v1/accounts/{account['id']}/credentials", json={"recovery": "new@example.com"})
+        assert updated.status_code == 200
+        assert updated.json()["recovery_masked"].startswith("n")
+        assert updated.json()["two_fa_configured"] is True
+        assert "keep-password" not in updated.text
+        assert "new@example.com" not in updated.text
+
+        with SessionLocal() as db:
+            secret = db.query(AccountSecret).filter(AccountSecret.account_id == account["id"]).one()
+            assert secret is not None
+            payload = SecretCipher().decrypt(secret.encrypted_payload)
+            assert payload["password"] == "keep-password"
+            assert payload["recovery"] == "new@example.com"
+            assert payload["2fa"] == "keep-totp"
+
+
 def test_login_job_queues_group_accounts_and_honors_concurrency() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]

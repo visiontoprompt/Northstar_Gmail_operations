@@ -27,7 +27,7 @@ The application does not solve or bypass CAPTCHA/MFA, or use stealth/fingerprint
 - `GET /api/v1/sessions?account_id={id}` — list session history.
 - `POST /api/v1/sessions/{id}/events` — record `LOGIN_COMPLETED`, `VERIFICATION_REQUIRED`, or `HEARTBEAT`.
 - `POST /api/v1/sessions/{id}/close` — close the session and release its profile lock.
-- `PUT /api/v1/accounts/{id}/credentials` — store a new encrypted credential revision and require re-authentication.
+- `PUT /api/v1/accounts/{id}/credentials` — store one or more changed credential fields as a new encrypted revision and require re-authentication. The password, recovery value, and 2FA secret are optional individually, but at least one must be supplied; omitted fields are preserved from the encrypted vault.
 - `GET /api/v1/accounts/{id}/credential-revisions` — list masked revision metadata only.
 - `POST /api/v1/login-jobs` — create a group/account login queue with a concurrency limit.
 - `GET /api/v1/login-jobs/{id}` — read batch progress and per-account states.
