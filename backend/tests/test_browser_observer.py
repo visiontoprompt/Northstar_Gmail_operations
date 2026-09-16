@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _handle_security_tick, _is_safe_interstitial, _open_start_page
 
 
 class _FakeButton:
@@ -164,6 +164,26 @@ class _FakeMarketplaceInstallPage:
 
     def evaluate(self, _script: str, _config: dict):
         return self.result
+
+
+class _FakeInstallControl(_FakeButton):
+    def __init__(self, label: str, aria_label: str | None = None):
+        super().__init__(label)
+        self.aria_label = aria_label
+
+    def get_attribute(self, name: str):
+        return self.aria_label if name == "aria-label" else None
+
+    def is_visible(self) -> bool:
+        return True
+
+
+class _FakeInstallPage:
+    def __init__(self):
+        self.controls = [_FakeInstallControl("Installer", "Install first card"), _FakeInstallControl("Désinstaller", "Uninstall another card")]
+
+    def locator(self, _selector: str):
+        return _FakeLocator(self.controls)
 
 
 class _FakeGetAddonsPage:
@@ -338,6 +358,14 @@ def test_addons_authorizes_localized_marketplace_install_confirmation():
     page = _FakeMarketplaceInstallPage("clicked")
 
     assert _addons_authorize_marketplace_install(page, "Any.do for Gmail") == "clicked"
+
+
+def test_addons_clicks_first_card_install_using_localized_or_aria_label():
+    page = _FakeInstallPage()
+
+    assert _addons_click_install(page) is True
+    assert page.controls[0].clicked is True
+    assert getattr(page.controls[1], "clicked", False) is not True
 
 
 def test_addons_pauses_unrelated_consent_confirmation():

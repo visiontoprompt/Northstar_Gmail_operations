@@ -1398,9 +1398,10 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
     This keeps the automation from accepting a publisher's OAuth scopes or a
     paid/subscription prompt merely because it contains an Allow button.
     """
-    try:
-        result = page.evaluate(
-            """config => {
+    for surface in _addons_surfaces(page):
+        try:
+            result = surface.evaluate(
+                """config => {
                 const normalize = value => (value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const contextTerms = config.context.map(normalize);
                 const externalTerms = config.external.map(normalize);
@@ -1417,14 +1418,15 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
                     node?.getAttribute?.('aria-label'),
                     node?.getAttribute?.('title'),
                 ].filter(Boolean).join(' '));
-                const modals = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+                const modalNodes = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
                     .filter(visible)
                     .sort((a, b) => textOf(b).length - textOf(a).length);
-                for (const modal of modals) {
+                const roots = modalNodes.length ? modalNodes : (visible(document.body) ? [document.body] : []);
+                for (const modal of roots) {
                     const modalText = textOf(modal);
                     const hasInstallContext = contextTerms.some(term => modalText.includes(term)) || modalText.includes(normalize(config.name));
                     const hasExternalConsent = externalTerms.some(term => modalText.includes(term));
-                    const controls = [...modal.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')].filter(visible);
+                    const controls = [...modal.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"], a[aria-label]')].filter(visible);
                     if (hasInstallContext && !hasExternalConsent) {
                         const confirmation = controls.find(control => {
                             const label = textOf(control);
@@ -1454,11 +1456,13 @@ def _addons_authorize_marketplace_install(page: "Page", name: str) -> str | None
                 }
                 return null;
             }""",
-            {"context": _ADDONS_MARKETPLACE_CONTEXT_TERMS, "external": _ADDONS_EXTERNAL_CONSENT_TERMS, "labels": _ADDONS_AUTHORIZATION_LABELS, "name": name},
-        )
-        return result if result in {"clicked", "pause"} else None
-    except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
-        return None
+                {"context": _ADDONS_MARKETPLACE_CONTEXT_TERMS, "external": _ADDONS_EXTERNAL_CONSENT_TERMS, "labels": _ADDONS_AUTHORIZATION_LABELS, "name": name},
+            )
+            if result in {"clicked", "pause"}:
+                return result
+        except Exception:  # noqa: BLE001 - the next observer tick retries after a re-render
+            continue
+    return None
 
 
 def _click_gmail_get_addons(page: "Page", report=None) -> bool:
@@ -1627,6 +1631,35 @@ def _addons_search_marketplace(page: "Page", name: str) -> bool:
     return False
 
 
+def _addons_surfaces(page: object) -> list[object]:
+    """Return a surface and its live child frames without failing on detach."""
+    surfaces = [page]
+    try:
+        frames = getattr(page, "frames", [])
+        if callable(frames):
+            frames = frames()
+        surfaces.extend(frame for frame in list(frames or []) if frame is not page)
+    except Exception:  # noqa: BLE001 - a frame may detach during a popup transition
+        pass
+    return surfaces
+
+
+def _addons_control_text(control: object) -> str:
+    values: list[str] = []
+    try:
+        values.append(control.inner_text() or "")
+    except Exception:  # noqa: BLE001 - some controls expose only aria text
+        pass
+    for attribute in ("aria-label", "data-tooltip", "title", "value"):
+        try:
+            value = control.get_attribute(attribute)
+        except Exception:  # noqa: BLE001 - test doubles and detached nodes
+            value = None
+        if value:
+            values.append(value)
+    return " ".join(values).replace("\u00a0", " ").strip().lower()
+
+
 def _addons_click_search_result(page: "Page", name: str) -> bool:
     wanted = name.lower().replace("™", "").strip()
     try:
@@ -1650,45 +1683,57 @@ def _addons_click_search_result(page: "Page", name: str) -> bool:
 
 
 def _addons_click_install(page: "Page") -> bool:
-    try:
-        for control in page.locator("button, [role=button], a").all():
-            try:
-                if not control.is_visible():
+    """Click the first visible Marketplace install action in the listing.
+
+    Marketplace cards do not use one stable DOM shape. The action text may be
+    inside a button, a role button, an anchor, or an aria-only control. Read
+    all of those signals and explicitly exclude uninstall/already-installed
+    controls so the first card's install action is the one selected.
+    """
+    for surface in _addons_surfaces(page):
+        try:
+            for control in surface.locator("button, [role=button], a, input[type=button], input[type=submit]").all():
+                try:
+                    if not control.is_visible():
+                        continue
+                    text = _addons_control_text(control)
+                    if any(term in text for term in _ADDONS_ALREADY_INSTALLED_LABELS):
+                        continue
+                    if any(text == term or text.startswith(term + " ") or f" {term} " in text for term in _ADDONS_INSTALL_LABELS):
+                        control.click(timeout=2000)
+                        return True
+                except Exception:  # noqa: BLE001 - keep scanning localized controls
                     continue
-                text = (control.inner_text() or "").strip().lower()
-                if text in _ADDONS_INSTALL_LABELS:
-                    control.click(timeout=2000)
-                    return True
-            except Exception:  # noqa: BLE001 - keep scanning localized controls
-                continue
-    except Exception:  # noqa: BLE001
-        return False
+        except Exception:  # noqa: BLE001 - continue through child frames
+            continue
     return False
 
 
 def _addons_listing_is_installed(page: "Page") -> bool:
-    try:
-        for control in page.locator("button, [role=button], a").all():
-            if not control.is_visible():
-                continue
-            text = (control.inner_text() or "").strip().lower()
-            if text in _ADDONS_ALREADY_INSTALLED_LABELS:
-                return True
-    except Exception:  # noqa: BLE001
-        return False
+    for surface in _addons_surfaces(page):
+        try:
+            for control in surface.locator("button, [role=button], a, input[type=button], input[type=submit]").all():
+                if not control.is_visible():
+                    continue
+                text = _addons_control_text(control)
+                if text in _ADDONS_ALREADY_INSTALLED_LABELS:
+                    return True
+        except Exception:  # noqa: BLE001 - continue through child frames
+            continue
     return False
 
 
 def _addons_permission_dialog_visible(page: "Page") -> bool:
-    try:
-        for dialog in page.locator('[role="dialog"], [aria-modal="true"]').all():
-            if not dialog.is_visible():
-                continue
-            text = (dialog.inner_text() or "").replace("\n", " ").strip().lower()
-            if any(term in text for term in _ADDONS_PERMISSION_TERMS):
-                return True
-    except Exception:  # noqa: BLE001
-        return False
+    for surface in _addons_surfaces(page):
+        try:
+            for dialog in surface.locator('[role="dialog"], [aria-modal="true"]').all():
+                if not dialog.is_visible():
+                    continue
+                text = _addons_control_text(dialog).replace("\n", " ")
+                if any(term in text for term in _ADDONS_PERMISSION_TERMS):
+                    return True
+        except Exception:  # noqa: BLE001 - continue through child frames
+            continue
     return False
 
 
