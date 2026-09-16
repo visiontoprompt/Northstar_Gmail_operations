@@ -301,6 +301,26 @@ def test_classifier_detects_google_account_not_found_copy() -> None:
     assert signal.value == "ACCOUNT_NOT_FOUND"
 
 
+def test_classifier_accepts_sparse_post_auth_google_account_root_in_supported_languages() -> None:
+    from app.login_policy import PageObservation, classify_page
+
+    for title, text in (
+        ("Google Account", ""),
+        ("Compte Google", "Accueil"),
+        ("Cuenta de Google", "Inicio"),
+    ):
+        signal, action = classify_page(PageObservation(url="https://myaccount.google.com/?pli=1", title=title, text=text))
+        assert signal.value == "GOOGLE_ACCOUNT_HOME"
+        assert action.value == "SAFE_TO_OBSERVE"
+
+    # The canonical root can be momentarily text-light while Google finishes
+    # painting the account shell. It must not be downgraded to UNKNOWN after
+    # the OTP redirect has already reached myaccount.google.com.
+    signal, action = classify_page(PageObservation(url="https://myaccount.google.com/?pli=1"))
+    assert signal.value == "GOOGLE_ACCOUNT_HOME"
+    assert action.value == "SAFE_TO_OBSERVE"
+
+
 def test_signed_in_google_account_home_marks_account_authenticated() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]

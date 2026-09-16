@@ -89,12 +89,18 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             return PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE
         if host == "myaccount.google.com" and any(marker in haystack for marker in (
             "google account",
+            "compte google",
+            "cuenta de google",
             "personal info",
+            "información personal",
+            "informacion personal",
             "security",
             "data & privacy",
             "people & sharing",
             "payments & subscriptions",
             "privacy & personalization",
+            "inicio",
+            "accueil",
             "informations personnelles",
             "sécurité",
             "données et confidentialité",
@@ -102,6 +108,15 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             # This is positive post-authentication evidence, distinct from an
             # inbox observation. Logged-out My Account pages are handled by
             # the sign-in markers above.
+            return PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE
+        # After a successful OTP/chooser hand-off, Google can briefly render
+        # the canonical account-home route with almost no accessible body
+        # text. It is still a strong post-authentication signal: a logged-out
+        # request to this route is redirected to accounts.google.com, while
+        # the account-home route itself remains on myaccount.google.com. Keep
+        # this limited to the root route and only after login/challenge terms
+        # have been checked above.
+        if host == "myaccount.google.com" and parsed.path.lower().rstrip("/") == "":
             return PageSignal.GOOGLE_ACCOUNT_HOME, PageAction.SAFE_TO_OBSERVE
         if any(marker in haystack for marker in ("continue", "welcome", "terms of service", "privacy", "review settings")):
             return PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE

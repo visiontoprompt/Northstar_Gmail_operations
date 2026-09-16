@@ -364,6 +364,8 @@ class BrowserObserver:
             logger.info("session %s: one-time code step on %s; auto sign-in is entering the TOTP", self.session_id, url)
         elif signal.value == "GMAIL_HOME":
             logger.info("session %s: mailbox detected on %s", self.session_id, url)
+        elif signal.value == "GOOGLE_ACCOUNT_HOME":
+            logger.info("session %s: signed-in Google Account page detected on %s", self.session_id, url)
         elif host in _LOGIN_HOSTS and _has_credential_input(page):
             logger.info("session %s: login form detected on %s; auto sign-in is entering the saved credentials", self.session_id, url)
         elif signal.value == "UNKNOWN":
