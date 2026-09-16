@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_google_oauth, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_addons_loading_stall, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt, _page_rank
+from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_google_oauth, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_addons_loading_stall, _handle_addons_missing_surface, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt, _page_rank
 
 
 class _FakeButton:
@@ -383,6 +383,34 @@ def test_addons_retries_a_popup_that_stays_loading():
 
     assert observer._retry_requested is True
     assert observer._stop.is_set()
+    assert events[0][1] == "addons.popup_stalled"
+
+
+def test_addons_retries_when_marketplace_popup_disappears():
+    events = []
+    observer = BrowserObserver("s1", "p1", 9222, purpose="addons", report_event=lambda *args: events.append(args))
+    observer._addons_get_opened = True
+    owner = type("_FakeContext", (), {"pages": [_FakePage("https://mail.google.com/mail/u/0/#inbox", "Gmail", "Inbox")]})()
+
+    with patch("app.observer.time.monotonic", side_effect=[100.0, 107.0]):
+        assert _handle_addons_missing_surface(observer, owner) is False
+        assert _handle_addons_missing_surface(observer, owner) is True
+
+    assert observer._retry_requested is True
+    assert observer._stop.is_set()
+    assert events[0][1] == "addons.popup_closed"
+
+
+def test_addons_retries_a_crashed_marketplace_page():
+    events = []
+    observer = BrowserObserver("s1", "p1", 9222, purpose="addons", report_event=lambda *args: events.append(args))
+    page = _FakePage("https://workspace.google.com/marketplace/app/1", "", "Aw, Snap!")
+    observer._loading_signature = (page.url, "", "Aw, Snap!")
+    observer._loading_since = 0.0
+
+    with patch("app.observer.time.monotonic", return_value=4.0):
+        assert _handle_addons_loading_stall(observer, page) is True
+
     assert events[0][1] == "addons.popup_stalled"
 
 

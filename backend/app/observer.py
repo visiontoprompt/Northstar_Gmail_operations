@@ -70,6 +70,8 @@ _CREDENTIAL_FIELD_SELECTOR = "input[type=email], input[name=identifier], input[i
 _OTP_FIELD_SELECTOR = "input[inputmode=numeric]:visible, input#totpPin:visible, input[name=totpPin]:visible, input[autocomplete=one-time-code]:visible, input[type=tel][autocomplete=one-time-code]:visible"
 _OTP_MAX_RETRIES = 3
 _ADDONS_POPUP_STALL_SECONDS = 45.0
+_ADDONS_POPUP_MISSING_SECONDS = 6.0
+_ADDONS_POPUP_CRASH_SECONDS = 3.0
 _ADDONS_POPUP_RETRY_LIMIT = 2
 _OTP_REJECTION_TERMS = (
     "wrong code",
@@ -173,6 +175,7 @@ class BrowserObserver:
         self._retry_attempt = 0
         self._loading_signature: tuple[str, str, str] | None = None
         self._loading_since: float | None = None
+        self._addons_missing_since: float | None = None
         self._start_navigation_attempts = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -296,6 +299,8 @@ class BrowserObserver:
             self._notify_browser_closed()
 
     def _tick(self, browser: "Browser | BrowserContext") -> None:
+        if _handle_addons_missing_surface(self, browser):
+            return
         page = _active_page(browser, self.purpose)
         if page is None:
             if not self._reported_no_page:
@@ -406,6 +411,7 @@ class BrowserObserver:
         self._unknown_since = None
         self._loading_signature = None
         self._loading_since = None
+        self._addons_missing_since = None
         self._reported_no_page = False
         self._logged_states.clear()
         self._continue_clicked_urls.clear()
@@ -569,7 +575,18 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             ready_state = str(page.evaluate("document.readyState") or "").lower()
         except Exception:  # noqa: BLE001 - fake/closing pages may not evaluate
             ready_state = ""
-        loading_copy = any(term in text.lower() for term in (
+        normalized_text = text.lower()
+        crash_copy = any(term in normalized_text for term in (
+            "aw, snap",
+            "this page crashed",
+            "page crashed",
+            "page unresponsive",
+            "la page a planté",
+            "la page ne répond pas",
+            "la pagina se ha bloqueado",
+            "la página no responde",
+        ))
+        loading_copy = any(term in normalized_text for term in (
             "loading",
             "chargement",
             "cargando",
@@ -578,7 +595,7 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             "espera un momento",
             "espera mientras",
         ))
-        still_loading = ready_state in {"loading", "interactive"} or not text or loading_copy
+        still_loading = crash_copy or ready_state in {"loading", "interactive"} or not text or loading_copy
         if not still_loading:
             observer._loading_signature = None
             observer._loading_since = None
@@ -589,7 +606,8 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
             observer._loading_signature = signature
             observer._loading_since = now
             return False
-        if observer._loading_since is None or now - observer._loading_since < _ADDONS_POPUP_STALL_SECONDS:
+        threshold = _ADDONS_POPUP_CRASH_SECONDS if crash_copy else _ADDONS_POPUP_STALL_SECONDS
+        if observer._loading_since is None or now - observer._loading_since < threshold:
             return False
         observer._retry_requested = True
         observer._emit(
@@ -602,6 +620,68 @@ def _handle_addons_loading_stall(observer: "BrowserObserver", page: "Page") -> b
     except Exception:  # noqa: BLE001 - watchdog must never terminate observation itself
         logger.debug("add-on loading watchdog could not inspect session %s", observer.session_id, exc_info=True)
         return False
+
+
+def _browser_pages(owner: "Browser | BrowserContext") -> list[object]:
+    if hasattr(owner, "contexts"):
+        return [page for context in owner.contexts for page in context.pages]
+    return list(getattr(owner, "pages", None) or [])
+
+
+def _addons_target_surface_exists(owner: "Browser | BrowserContext") -> bool:
+    """Check whether the Marketplace page/panel still exists in the context."""
+    for target in _browser_pages(owner):
+        try:
+            target_url = _open_page_url(target)
+            parsed = urlparse(target_url)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host == "workspace.google.com" and "/marketplace" in parsed.path.lower():
+                return True
+        except Exception:  # noqa: BLE001 - closing popup
+            continue
+        try:
+            frames = getattr(target, "frames", [])
+            if callable(frames):
+                frames = frames()
+            for frame in list(frames or []):
+                frame_url = getattr(frame, "url", "")
+                if callable(frame_url):
+                    frame_url = frame_url()
+                frame_host = (urlparse(frame_url or "").hostname or "").lower().rstrip(".")
+                if frame_host == "workspace.google.com":
+                    return True
+                body = frame.locator("body")
+                if body.count():
+                    body_text = (body.inner_text(timeout=500) or "").lower()
+                    if "marketplace" in body_text and any(term in body_text for term in ("install", "installer", "instalar", "add-on", "addon")):
+                        return True
+        except Exception:  # noqa: BLE001 - detached frames are normal during popup transitions
+            continue
+    return False
+
+
+def _handle_addons_missing_surface(observer: "BrowserObserver", owner: "Browser | BrowserContext") -> bool:
+    """Retry when the expected Marketplace popup/panel disappears."""
+    if observer.purpose != "addons" or not observer._addons_get_opened:
+        observer._addons_missing_since = None
+        return False
+    if _addons_target_surface_exists(owner):
+        observer._addons_missing_since = None
+        return False
+    now = time.monotonic()
+    if observer._addons_missing_since is None:
+        observer._addons_missing_since = now
+        return False
+    if now - observer._addons_missing_since < _ADDONS_POPUP_MISSING_SECONDS:
+        return False
+    observer._retry_requested = True
+    observer._emit(
+        "addons.popup_closed",
+        f"The Marketplace popup disappeared for {_ADDONS_POPUP_MISSING_SECONDS:.0f} seconds; closing the browser before retry",
+        result="attention",
+    )
+    observer._stop.set()
+    return True
 
 
 def _active_page(owner: "Browser | BrowserContext", purpose: str | None = None) -> "Page | None":
@@ -1448,6 +1528,10 @@ def _handle_addons_tick(observer: "BrowserObserver", page: "Page", host: str) ->
             observer._emit("addons.search_result_opened", f"opened the Marketplace search result for {name}")
             return
         if observer._addons_wait_ticks >= 6:
+            # The fallback starts a new page transition. Do not carry the
+            # search wait counter into the listing or fail on the very first
+            # listing tick while the Install control is still rendering.
+            observer._addons_wait_ticks = 0
             _navigate_settings(page, candidate["url"])
             observer._emit("addons.listing_fallback", f"opened the allowlisted Marketplace listing for {name} after search results did not expose the card")
         return
