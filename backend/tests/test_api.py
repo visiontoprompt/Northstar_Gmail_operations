@@ -82,6 +82,7 @@ def test_browser_desktop_rejects_non_admins() -> None:
             with TestClient(app) as client:
                 assert client.get("/api/v1/desktop/status").status_code == 403
                 assert client.get("/api/v1/desktop/authorize").status_code == 403
+                assert client.get("/api/v1/desktop/runtime").status_code == 403
                 assert client.post(f"/api/v1/sessions/{session['id']}/focus").status_code in {403, 404}
     finally:
         settings.browser_desktop_enabled = original_enabled
@@ -104,6 +105,9 @@ def test_account_operator_can_access_desktop_and_infrastructure_but_not_admin_pa
             with TestClient(app) as client:
                 assert client.get("/api/v1/desktop/status").json() == {"enabled": True}
                 assert client.get("/api/v1/desktop/authorize").status_code == 204
+                runtime = client.get("/api/v1/desktop/runtime")
+                assert runtime.status_code == 200
+                assert set(runtime.json()) == {"default_login_concurrency", "max_active_profiles"}
                 assert client.get("/api/v1/infrastructure/ovh").status_code == 200
                 assert client.get("/api/v1/infrastructure/godaddy/accounts").status_code == 200
                 assert client.get("/api/v1/employees").status_code == 403

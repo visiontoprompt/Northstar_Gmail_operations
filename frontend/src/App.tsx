@@ -978,7 +978,7 @@ function BrowserDesktopPage({ isActive, groups, refreshKey, onRefresh, onOpenSes
     setLoading(true); setError("");
     Promise.all([
       api<{ enabled: boolean }>("/api/v1/desktop/status"),
-      api<{ default_login_concurrency: number; max_active_profiles: number }>("/api/v1/settings"),
+      api<{ default_login_concurrency: number; max_active_profiles: number }>("/api/v1/desktop/runtime"),
       loadAccounts(), loadSessions(),
     ]).then(([status, runtime]) => {
       if (cancelled) return;

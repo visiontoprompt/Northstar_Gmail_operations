@@ -406,6 +406,17 @@ def browser_desktop_status(request: Request, db: Session = Depends(get_db)) -> d
     return {"enabled": settings.browser_desktop_enabled}
 
 
+@app.get("/api/v1/desktop/runtime")
+def browser_desktop_runtime(request: Request, db: Session = Depends(get_db)) -> dict[str, int]:
+    """Expose only the runtime limits needed by the desktop launcher."""
+    _account_operator(request, db)
+    workspace = get_workspace_settings(db, settings.demo_org_id)
+    return {
+        "default_login_concurrency": int(workspace["default_login_concurrency"]),
+        "max_active_profiles": int(workspace["max_active_profiles"]),
+    }
+
+
 @app.post("/api/v1/sessions/{session_id}/focus")
 def focus_browser_session(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
     user = _account_operator(request, db)
