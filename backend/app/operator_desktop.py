@@ -100,6 +100,19 @@ def _process_matches(pattern: str) -> bool:
         return False
 
 
+def _process_is_alive(key: tuple[str, str], pattern: str) -> bool:
+    """Prefer the owned Popen handle; use pgrep only for pre-existing children.
+
+    The pgrep fallback protects ports/displays left by a process outside this
+    API process. For children launched here, Popen.poll() is an exact identity
+    check and avoids brittle matching of platform-specific command lines.
+    """
+    process = _PROCESSES.get(key)
+    if process is not None:
+        return process.poll() is None
+    return _process_matches(pattern)
+
+
 def _spawn(key: tuple[str, str], argv: list[str], env: dict[str, str] | None = None) -> None:
     process = _PROCESSES.get(key)
     if process is not None and process.poll() is None:
@@ -121,7 +134,7 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
         env = os.environ.copy()
         env["DISPLAY"] = display
         x_socket = Path(f"/tmp/.X11-unix/X{display_number}")
-        if x_socket.exists() and not _process_matches(f"[X]vfb {display} "):
+        if x_socket.exists() and not _process_is_alive((employee_id, "xvfb"), f"[X]vfb {display} "):
             raise RuntimeError("The allocated private display is occupied by an unknown process")
         if not x_socket.exists():
             _spawn((employee_id, "xvfb"), ["Xvfb", display, "-screen", "0", "1600x900x24", "-nolisten", "tcp", "-ac"], env)
@@ -135,22 +148,22 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
                 _spawn((employee_id, "openbox"), ["openbox", "--sm-disable", "--display", display], env)
         except FileNotFoundError:
             _spawn((employee_id, "openbox"), ["openbox", "--sm-disable", "--display", display], env)
-        if _port_open(vnc_port) and not _process_matches(f"[x]11vnc .* -rfbport {vnc_port}($| )"):
+        if _port_open(vnc_port) and not _process_is_alive((employee_id, "x11vnc"), f"[x]11vnc .* -rfbport {vnc_port}($| )"):
             raise RuntimeError("The allocated private VNC port is occupied by an unknown process")
         if not _port_open(vnc_port):
             _spawn((employee_id, "x11vnc"), ["x11vnc", "-display", display, "-localhost", "-nopw", "-forever", "-shared", "-rfbport", str(vnc_port), "-noxdamage", "-repeat", "-xkb"], env)
         deadline = time.monotonic() + 8
         while not _port_open(vnc_port) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if not _port_open(vnc_port) or not _process_matches(f"[x]11vnc .* -rfbport {vnc_port}($| )"):
+        if not _port_open(vnc_port) or not _process_is_alive((employee_id, "x11vnc"), f"[x]11vnc .* -rfbport {vnc_port}($| )"):
             raise RuntimeError("Private VNC server could not be started")
-        if _port_open(websocket_port) and not _process_matches(f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
+        if _port_open(websocket_port) and not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
             raise RuntimeError("The allocated private viewer port is occupied by an unknown process")
         if not _port_open(websocket_port):
             _spawn((employee_id, "websockify"), ["websockify", f"127.0.0.1:{websocket_port}", f"127.0.0.1:{vnc_port}"], env)
         deadline = time.monotonic() + 8
         while (not _port_open(websocket_port) or not _websocket_ready(websocket_port)) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if not _port_open(websocket_port) or not _websocket_ready(websocket_port) or not _process_matches(f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
+        if not _port_open(websocket_port) or not _websocket_ready(websocket_port) or not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
             raise RuntimeError("Private browser viewer did not complete its WebSocket handshake")
         return {"display": display, "websocket_port": websocket_port, "slot": slot}

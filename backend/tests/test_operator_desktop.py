@@ -3,6 +3,7 @@ import threading
 from pathlib import Path
 
 from app.config import get_settings
+import app.operator_desktop as operator_desktop
 from app.operator_desktop import _slot_for, _websocket_ready
 
 
@@ -23,6 +24,18 @@ def test_operator_desktop_slots_are_persisted_and_never_shared(tmp_path, monkeyp
     assert one != two
     assert _slot_for("employee_one") == one
     assert Path(tmp_path / ".operator-desktops.json").exists()
+
+
+def test_managed_process_uses_popen_identity_instead_of_command_line_match(monkeypatch) -> None:
+    class RunningProcess:
+        def poll(self) -> None:
+            return None
+
+    key = ("operator_test", "x11vnc")
+    monkeypatch.setitem(operator_desktop._PROCESSES, key, RunningProcess())
+    monkeypatch.setattr(operator_desktop, "_process_matches", lambda _pattern: False)
+
+    assert operator_desktop._process_is_alive(key, "fragile command line pattern") is True
 
 
 def test_websocket_readiness_requires_a_successful_upgrade() -> None:
