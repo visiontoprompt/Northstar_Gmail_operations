@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
+import unicodedata
 from urllib.parse import urlparse
 
 
@@ -9,12 +10,15 @@ class PageSignal(StrEnum):
     GOOGLE_ACCOUNT_HOME = "GOOGLE_ACCOUNT_HOME"
     ORDINARY_INTERSTITIAL = "ORDINARY_INTERSTITIAL"
     CAPTCHA = "CAPTCHA"
+    PHONE_VERIFICATION = "PHONE_VERIFICATION"
+    RECOVERY_VERIFICATION = "RECOVERY_VERIFICATION"
     MFA_OR_SECURITY_CHECK = "MFA_OR_SECURITY_CHECK"
     ACCOUNT_NOT_FOUND = "ACCOUNT_NOT_FOUND"
     CONTACTS_HOME = "CONTACTS_HOME"
     CONTACTS_IMPORT_DIALOG = "CONTACTS_IMPORT_DIALOG"
     CONTACTS_IMPORT_DONE = "CONTACTS_IMPORT_DONE"
     GMAIL_SETTINGS = "GMAIL_SETTINGS"
+    GOOGLE_ALERTS = "GOOGLE_ALERTS"
     UNKNOWN = "UNKNOWN"
 
 
@@ -31,13 +35,48 @@ class PageObservation:
     text: str = ""
 
 
+def is_totp_challenge_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (parsed.hostname or "").lower() == "accounts.google.com" and any(
+        marker in parsed.path.lower() for marker in ("/challenge/totp", "/challenge/otp")
+    )
+
+
 def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]:
     parsed = urlparse(observation.url)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
     haystack = f"{observation.url} {observation.title} {observation.text}".lower()
-    if any(marker in haystack for marker in ("captcha", "recaptcha", "i'm not a robot", "unusual traffic")):
+    folded = unicodedata.normalize("NFKD", haystack).encode("ascii", "ignore").decode("ascii")
+    google_signin_host = host in {"accounts.google.com", "consent.google.com"}
+    google_captcha_host = host in {"www.google.com", "google.com"} and parsed.path.lower().startswith("/sorry")
+    if google_captcha_host or google_signin_host and any(marker in folded for marker in (
+        "captcha", "recaptcha", "hcaptcha", "i'm not a robot", "unusual traffic",
+        "verify you are human", "prove you're not a robot",
+    )):
         return PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN
-    if any(marker in haystack for marker in ("2-step verification", "two-step verification", "security key", "verify it's you", "phone verification", "security check", "enter the code", "enter your code", "google authenticator", "one-time code")):
+    recovery_context = any(marker in folded for marker in (
+        "recovery email", "recovery e-mail", "recovery address", "adresse e-mail de recuperation",
+        "adresse email de recuperation", "e-mail de recuperation", "email de recuperation",
+        "correo electronico de recuperacion", "correo de recuperacion", "recuperacao de email",
+    ))
+    recovery_action = any(marker in folded for marker in (
+        "confirm", "verify", "enter", "validation code", "verification code", "get a code",
+        "confirmez", "saisissez", "obtenir un code", "code de validation", "codigo de verificacion",
+    ))
+    if google_signin_host and recovery_context and recovery_action:
+        return PageSignal.RECOVERY_VERIFICATION, PageAction.WAIT_FOR_HUMAN
+    phone_route = host == "accounts.google.com" and any(marker in parsed.path.lower() for marker in ("/challenge/phone", "/challenge/sms"))
+    phone_copy = any(marker in folded for marker in (
+        "phone verification", "verify your phone number", "verify phone number", "confirm your phone number",
+        "enter your phone number", "enter a phone number", "add your phone number",
+        "send a code to your phone", "send a text message", "text message with a verification code",
+        "verifiez votre numero de telephone", "confirmez votre numero de telephone",
+        "verifica tu numero de telefono", "verifique seu numero de telefone",
+        "bestatigen sie ihre telefonnummer",
+    ))
+    if google_signin_host and (phone_route or phone_copy):
+        return PageSignal.PHONE_VERIFICATION, PageAction.WAIT_FOR_HUMAN
+    if google_signin_host and any(marker in folded for marker in ("2-step verification", "two-step verification", "security key", "verify it's you", "security check", "enter the code", "enter your code", "google authenticator", "one-time code")):
         return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
     if any(marker in haystack for marker in (
         # English Google sign-in copy.
@@ -76,12 +115,14 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
         if parsed.path.startswith("/mail/") and any(marker in haystack for marker in mailbox_markers):
             return PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE
         return PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION
+    if host in {"www.google.com", "google.com"} and parsed.path.lower().rstrip("/") == "/alerts":
+        return PageSignal.GOOGLE_ALERTS, PageAction.SAFE_TO_OBSERVE
     if host in {"accounts.google.com", "consent.google.com", "myaccount.google.com"}:
         # Google sometimes renders the TOTP challenge with little or no
         # accessible text while the URL still identifies the challenge.
         # Recognize the route before generic interstitial markers (such as
         # "privacy") can misclassify it and close an otherwise valid login.
-        if host == "accounts.google.com" and any(marker in parsed.path.lower() for marker in ("/challenge/totp", "/challenge/otp")):
+        if is_totp_challenge_url(observation.url):
             return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
         if host == "accounts.google.com" and "/signin/oauth" in parsed.path.lower():
             # A Marketplace add-on may open Google's localized OAuth consent
@@ -89,6 +130,13 @@ def classify_page(observation: PageObservation) -> tuple[PageSignal, PageAction]
             # interstitial, not an unknown login page; the add-on observer
             # decides whether the exact Continue action is safe to click.
             return PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE
+        if host == "accounts.google.com" and "/signin/challenge" in parsed.path.lower():
+            # Google can render a security prompt with no accessible copy at
+            # first. A generic "Sign in" title appears on challenge pages,
+            # too; only an explicit password prompt is safe to drive here.
+            if "enter your password" in folded:
+                return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE
+            return PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN
         if any(marker in haystack for marker in ("sign in", "email or phone", "enter your password")):
             return PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE
         if host == "myaccount.google.com" and parsed.path.lower().rstrip("/") == "/account-enhanced-safe-browsing":

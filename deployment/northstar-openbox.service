@@ -1,0 +1,19 @@
+[Unit]
+Description=Northstar virtual desktop window manager
+Requires=northstar-xvfb.service
+After=northstar-xvfb.service
+
+[Service]
+Type=simple
+User=northstar
+Group=northstar
+Environment=DISPLAY=:99
+Environment=HOME=/var/lib/northstar
+ExecStart=/usr/bin/openbox --sm-disable
+Restart=on-failure
+RestartSec=2
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

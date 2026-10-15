@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from app.models import BrowserSession, GmailAccount
+from app.models import AuditEvent, BrowserSession, GmailAccount, ProxyInventory
 from app.observer import BrowserObserver, _launch_profile_context
 from app.proxy import ProxyValidationError, parse_proxy
 from app.security import SecretCipher
@@ -75,6 +75,76 @@ def test_account_proxy_is_encrypted_and_not_returned_by_api() -> None:
             assert "proxy-pass" not in secret.encrypted_payload
         finally:
             db.close()
+
+
+def test_group_distribution_balances_healthy_proxies_and_rejects_short_capacity() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account_ids = []
+        for index in range(4):
+            response = client.post("/api/v1/accounts/single", json={"email": f"balanced-{index}@example.com", "password": "account-password", "group_id": group_id})
+            assert response.status_code == 201, response.text
+            account_ids.append(response.json()["id"])
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.10:8080|P1\n203.0.113.11:8080|P2"})
+        assert imported.status_code == 201, imported.text
+        proxy_ids = [row["proxy_id"] for row in imported.json()["rows"]]
+        with SessionLocal() as db:
+            for proxy_id in proxy_ids:
+                db.get(ProxyInventory, proxy_id).test_status = "HEALTHY"
+            db.commit()
+        payload = {"group_id": group_id, "proxy_ids": proxy_ids, "accounts_per_proxy": 2}
+        assigned = client.post("/api/v1/proxies/distribute-group", json=payload)
+        assert assigned.status_code == 200, assigned.text
+        assert assigned.json()["changed_count"] == 4
+        with SessionLocal() as db:
+            counts = [sum(db.get(GmailAccount, account_id).proxy_id == proxy_id for account_id in account_ids) for proxy_id in proxy_ids]
+            assert counts == [2, 2]
+        repeated = client.post("/api/v1/proxies/distribute-group", json=payload)
+        assert repeated.status_code == 200
+        assert repeated.json()["changed_count"] == 0
+        too_small = client.post("/api/v1/proxies/distribute-group", json={**payload, "accounts_per_proxy": 1})
+        assert too_small.status_code == 422
+        with SessionLocal() as db:
+            assert [sum(db.get(GmailAccount, account_id).proxy_id == proxy_id for account_id in account_ids) for proxy_id in proxy_ids] == [2, 2]
+            db.get(GmailAccount, account_ids[0]).browser_profile.lock_state = "LOCKED"
+            db.commit()
+        locked = client.post("/api/v1/proxies/distribute-group", json=payload)
+        assert locked.status_code == 422
+        assert "active sessions" in locked.json()["detail"].lower()
+
+
+def test_group_distribution_equal_mode_needs_no_capacity_limit() -> None:
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        for index in range(5):
+            assert client.post("/api/v1/accounts/single", json={"email": f"equal-{index}@example.com", "password": "account-password", "group_id": group_id}).status_code == 201
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.21:8080|E1\n203.0.113.22:8080|E2"})
+        proxy_ids = [row["proxy_id"] for row in imported.json()["rows"]]
+        with SessionLocal() as db:
+            for proxy_id in proxy_ids:
+                db.get(ProxyInventory, proxy_id).test_status = "HEALTHY"
+            db.commit()
+        result = client.post("/api/v1/proxies/distribute-group", json={"group_id": group_id, "proxy_ids": proxy_ids, "mode": "equal"})
+        assert result.status_code == 200, result.text
+        assert result.json()["account_count"] == 5
+        assert sorted(result.json()["distribution"].values()) == [2, 3]
+        assert result.json()["accounts_per_proxy"] is None
+
+
+def test_proxy_endpoints_can_be_grouped_and_filtered_in_inventory() -> None:
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.41:8080|East 1\n203.0.113.42:8080|East 2"})
+        assert imported.status_code == 201, imported.text
+        proxy_ids = [row["proxy_id"] for row in imported.json()["rows"]]
+        grouped = client.post("/api/v1/proxies/group", json={"proxy_ids": proxy_ids, "group_name": "US East"})
+        assert grouped.status_code == 200, grouped.text
+        inventory = client.get("/api/v1/proxies").json()
+        assert {item["proxy_group"] for item in inventory if item["id"] in proxy_ids} == {"US East"}
+        ungrouped = client.post("/api/v1/proxies/group", json={"proxy_ids": [proxy_ids[0]], "group_name": None})
+        assert ungrouped.status_code == 200, ungrouped.text
+        inventory = client.get("/api/v1/proxies").json()
+        groups = {item["id"]: item["proxy_group"] for item in inventory if item["id"] in proxy_ids}
+        assert groups == {proxy_ids[0]: None, proxy_ids[1]: "US East"}
 
 
 def test_saved_profile_reconciles_stale_required_login_status() -> None:
@@ -141,6 +211,26 @@ def test_observer_keeps_normal_chrome_window_for_in_context_navigation(tmp_path)
     assert all(not argument.startswith("--app=") for argument in kwargs["args"])
 
 
+def test_external_newsletter_context_can_launch_headless_and_incognito(tmp_path) -> None:
+    playwright = MagicMock()
+    observer = BrowserObserver(
+        "s-external",
+        "external-profile",
+        0,
+        profile_dir=str(tmp_path),
+        executable="fake-browser",
+        headless=True,
+        newsletter_config={"ephemeral_browser": True, "headless_browser": True},
+        purpose="newsletter",
+    )
+
+    _launch_profile_context(playwright, observer)
+
+    kwargs = playwright.chromium.launch_persistent_context.call_args.kwargs
+    assert kwargs["headless"] is True
+    assert "--incognito" in kwargs["args"]
+
+
 def test_proxy_inventory_can_reassign_edit_and_remove_accounts() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
@@ -160,6 +250,68 @@ def test_proxy_inventory_can_reassign_edit_and_remove_accounts() -> None:
         removed = client.request("DELETE", f"/api/v1/proxies/{proxy_id}", json={"confirmation": "REMOVE"})
         assert removed.status_code == 200
         assert client.get("/api/v1/proxies").json() == []
+
+
+def test_bulk_proxy_import_stores_unassigned_inventory_without_exposing_credentials() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/proxies/import",
+            json={"lines": "proxy-user:proxy-pass:203.0.113.40:8080 | US-NY-0040 | New York, US"},
+        )
+
+        assert response.status_code == 201
+        assert "proxy-pass" not in response.text
+        result = response.json()
+        assert result["imported"] == 1
+        assert result["duplicates"] == 0
+        assert result["invalid"] == 0
+        assert result["rows"] == [{"line_number": 1, "status": "IMPORTED", "message": "Stored as ungrouped inventory", "proxy_id": result["rows"][0]["proxy_id"]}]
+
+        proxies = client.get("/api/v1/proxies").json()
+        assert len(proxies) == 1
+        assert proxies[0]["label"] == "US-NY-0040"
+        assert proxies[0]["region"] == "New York, US"
+        assert proxies[0]["account_count"] == 0
+        assert "proxy-pass" not in str(proxies)
+
+        db = SessionLocal()
+        try:
+            inventory = db.query(ProxyInventory).one()
+            audit = db.query(AuditEvent).filter_by(action="proxy.imported").one()
+            assert "proxy-pass" not in (inventory.encrypted_payload or "")
+            assert audit.metadata_json == {"proxy_id": inventory.id, "proxy_authentication": "authenticated", "source": "bulk_import", "proxy_group": None}
+        finally:
+            db.close()
+
+
+def test_bulk_proxy_import_assigns_all_new_endpoints_to_selected_group() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/proxies/import",
+            json={"lines": "198.51.100.81:8080 | East 1\n198.51.100.82:8080 | East 2", "group_name": "US East"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["imported"] == 2
+        proxies = client.get("/api/v1/proxies").json()
+        assert {proxy["proxy_group"] for proxy in proxies} == {"US East"}
+        groups = client.get("/api/v1/proxies/groups").json()
+        assert next(group for group in groups if group["name"] == "US East")["proxy_count"] == 2
+
+
+def test_bulk_proxy_import_reports_invalid_and_duplicate_rows_without_overwriting_endpoint() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/proxies/import",
+            json={"lines": "198.51.100.44:8080 | First endpoint\nnot-a-proxy\n198.51.100.44:8080 | Replacement attempt"},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["imported"] == 1
+        assert response.json()["duplicates"] == 1
+        assert response.json()["invalid"] == 1
+        assert [row["status"] for row in response.json()["rows"]] == ["IMPORTED", "INVALID", "DUPLICATE"]
+        assert client.get("/api/v1/proxies").json()[0]["label"] == "First endpoint"
 
 
 def test_unassign_keeps_proxy_inventory_available_for_reassignment() -> None:

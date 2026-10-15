@@ -259,3 +259,32 @@ def test_addons_operation_requires_saved_profile_and_closes_after_three_installs
         assert finished["login_state"] == "ADDONS_COMPLETED"
         assert finished["operation_status"] == "COMPLETED"
         assert finished["browser_opened"] is False
+
+
+def test_mail_confirmation_review_keeps_the_matched_message_open_for_an_operator(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="mail_confirmation_review@example.com")
+        opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{opened.json()['id']}/close")
+
+        started = client.post(
+            f"/api/v1/accounts/{account['id']}/mail-workflow",
+            json={"subject": "Confirm your subscription", "action": "confirmation_review"},
+        )
+        assert started.status_code == 201, started.text
+        service._report_observer_event(
+            started.json()["id"],
+            "mail.review_ready",
+            "opened the matching confirmation email for operator review; no links were followed",
+            "attention",
+        )
+
+        reviewing = client.get(f"/api/v1/sessions/{started.json()['id']}").json()
+        assert reviewing["state"] == "NEEDS_ATTENTION"
+        assert reviewing["login_state"] == "MAIL_WORKFLOW_REVIEW_READY"
+        assert reviewing["operation_status"] == "INTERRUPTED"
+        assert reviewing["browser_opened"] is True

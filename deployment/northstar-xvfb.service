@@ -1,0 +1,17 @@
+[Unit]
+Description=Northstar virtual X display for server-side Chromium
+After=network.target
+
+[Service]
+Type=simple
+User=northstar
+Group=northstar
+Environment=HOME=/var/lib/northstar
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1600x900x24 -nolisten tcp -ac
+Restart=on-failure
+RestartSec=2
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

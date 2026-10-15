@@ -5,7 +5,7 @@ Phase 1 is the account registry and onboarding boundary for a company-managed Gm
 This phase can:
 
 - create and manage account groups sized for roughly 300 accounts;
-- add one account or preview/import many accounts using `email:password:recovery:2fa`;
+- add one account or preview/import many accounts using `email:password`, `email:password:recovery`, or `email:password:recovery:2fa`;
 - validate and deduplicate accounts inside an organization;
 - keep credential material in an encrypted secrets table, separate from operational metadata;
 - reserve dedicated proxy metadata and persistent browser-profile metadata for profile-backed operations;
@@ -13,6 +13,7 @@ This phase can:
 - queue a whole group for concurrency-controlled isolated profile dispatch;
 - version encrypted credential updates and mark accounts for re-authentication;
 - expose searchable, filterable admin account views and an audit trail.
+- manage account groups, organization employees, and persisted workspace policy settings from dedicated admin pages.
 - keep reusable CSV/VCF/TXT contact files in an organization library and launch profile-backed imports at Google Contacts.
 - open Gmail's Add-ons rail and install up to three randomly selected, allowlisted Workspace Marketplace listings per authenticated account, with a configurable bulk concurrency limit.
 
@@ -60,11 +61,28 @@ uvicorn app.main:app --reload --port 8000
 
 Copy `backend/.env.example` when setting up a local environment. In production, use a managed secret provider and replace the development SQLite default with PostgreSQL.
 
+For Ubuntu production hosting, use the systemd, Nginx, environment, and migration templates in [deployment/README.md](deployment/README.md). Production startup refuses SQLite, requires authentication, and verifies that the Alembic schema revision is current. Apply schema changes with `cd backend && alembic -c alembic.ini upgrade head`; new schema changes must be added as Alembic revisions. The legacy SQL files under `backend/migrations/` document earlier schema history.
+
 For local browser-session testing only, set `BROWSER_LAUNCH_ENABLED=true`. Each account then opens in its own Chrome process and persistent user-data directory, separate from the browser window hosting the SaaS console. The app never passes imported passwords, recovery values, or 2FA secrets to Chrome.
 
 The development default uses SQLite at `./data/gmail_ops.db`. Set `DATABASE_URL` to PostgreSQL for a shared environment. The API creates the demo organization and starter groups on first boot in development.
 
-Outside development, configure `ADMIN_API_TOKEN` and send it as `Authorization: Bearer <token>` on API requests. The local development bypass is intentional for the demo console only; production deployments must replace this bootstrap token with the organization's real identity provider and role-based authorization before exposing the service.
+Employee workspace sign-in is enabled by `./dev.sh`. On a fresh database, the console shows a one-time administrator setup screen. The administrator can create employees, set or rotate their workspace sign-in password, and assign each employee explicit group access. Operators and auditors receive only their assigned groups; administrators retain full workspace control. Employee passwords are stored as scrypt hashes and sessions use an opaque HttpOnly cookie. Gmail account passwords, recovery addresses, and 2FA values remain in the existing encrypted account vault and are never reused as employee login credentials.
+
+For legacy local inspection, `AUTH_REQUIRED=false` keeps the development-only demo administrator fallback. Do not use that fallback for a shared or production deployment. Disable `ALLOW_INITIAL_ADMIN_SETUP` outside development and review the role/group policy before exposing the service.
+
+The Groups page supports audited name, description, capacity, and active/paused
+state changes; capacity cannot be lowered below the active accounts already in
+the group. The Employees page supports organization-scoped create, edit, role
+changes, suspend/reactivate, and soft deactivation. The Settings page persists
+workspace policy such as default group capacity, login/operation limits,
+profile limits, observer cadence, session timeout, automatic session closure,
+and audit retention. Employees can also be assigned to one or more groups with
+View only, Operate accounts, or Manage group access levels; those assignments
+are replaced atomically and audited. Deployment secrets, API tokens, database/Redis URLs, and
+process-level browser flags remain outside the UI.
+
+Outside development, configure `ADMIN_API_TOKEN` for break-glass API administration and use employee cookie sessions for normal workspace access. Production deployments must use PostgreSQL, place the service behind HTTPS, disable initial setup, and use a managed identity/MFA policy before exposing it to operators. Login endpoints also enforce application-level throttling and account lockout; Nginx adds an IP-level limit in the supplied template.
 
 ### Frontend
 

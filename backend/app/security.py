@@ -5,7 +5,7 @@ import json
 import struct
 import time
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, MultiFernet
 
 from .config import get_settings
 
@@ -14,15 +14,24 @@ class SecretCipher:
     """Application boundary for encrypted account credential material."""
 
     def __init__(self) -> None:
-        raw = get_settings().secret_key.encode("utf-8")
-        derived = base64.urlsafe_b64encode(hashlib.sha256(raw).digest())
-        self._fernet = Fernet(derived)
+        settings = get_settings()
+        keys = [settings.secret_key, *([settings.secret_key_previous] if settings.secret_key_previous else [])]
+        self._fernet = MultiFernet([self._derive(key) for key in keys])
+
+    @staticmethod
+    def _derive(secret: str) -> Fernet:
+        derived = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+        return Fernet(derived)
 
     def encrypt(self, payload: dict[str, str]) -> str:
         return self._fernet.encrypt(json.dumps(payload, separators=(",", ":")).encode()).decode()
 
     def decrypt(self, value: str) -> dict[str, str]:
         return json.loads(self._fernet.decrypt(value.encode()).decode())
+
+    def rotate(self, value: str) -> str:
+        """Re-encrypt one stored value with the current key after a key rotation."""
+        return self._fernet.rotate(value.encode()).decode()
 
 
 def normalize_totp_secret(value: str) -> str:

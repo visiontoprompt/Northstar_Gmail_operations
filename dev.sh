@@ -28,11 +28,11 @@ port_in_use() {
 }
 
 backend_is_ours() {
-  curl -fsS -m 2 http://127.0.0.1:8000/api/v1/health 2>/dev/null | rg -q '"status":"ok"'
+  curl -fsS -m 2 http://127.0.0.1:8000/api/v1/health 2>/dev/null | grep -q '"status":"ok"'
 }
 
 frontend_is_ours() {
-  curl -fsS -m 2 http://127.0.0.1:5173/ 2>/dev/null | rg -q 'Account registry'
+  curl -fsS -m 2 http://127.0.0.1:5173/ 2>/dev/null | grep -q 'Account registry'
 }
 
 cleanup() {
@@ -75,7 +75,11 @@ if [[ "$backend_ready" != true ]]; then
     export BROWSER_LAUNCH_ENABLED=true
     export BROWSER_OBSERVER_ENABLED=true
     export BROWSER_AUTO_LOGIN=true
-    exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+    export WORKER_ENABLED=true
+    # Employee workspace sign-in is enabled for the local console. The first
+    # run shows a one-time administrator setup screen; no password is seeded.
+    export AUTH_REQUIRED=true
+    exec ./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir "$BACKEND_DIR/app"
   ) &
   backend_pid=$!
 fi

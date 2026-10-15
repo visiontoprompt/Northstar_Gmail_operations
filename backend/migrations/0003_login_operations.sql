@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS login_jobs (
     id VARCHAR(96) PRIMARY KEY,
     organization_id VARCHAR(64) NOT NULL REFERENCES organizations(id),
     group_id VARCHAR(64) REFERENCES account_groups(id),
+    operation_type VARCHAR(32) NOT NULL DEFAULT 'login',
+    operation_config JSON NOT NULL DEFAULT '{}',
     concurrency_limit INTEGER NOT NULL DEFAULT 4,
     status VARCHAR(24) NOT NULL DEFAULT 'QUEUED',
     total_count INTEGER NOT NULL DEFAULT 0,

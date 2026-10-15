@@ -2,7 +2,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 from app.login_policy import PageAction, PageSignal
-from app.observer import BrowserObserver, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _active_addons_surface, _addons_authorize_google_oauth, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _fill_otp_code, _handle_addons_loading_stall, _handle_addons_missing_surface, _handle_security_tick, _is_safe_interstitial, _open_start_page, _otp_should_attempt, _page_rank
+from app.observer import BrowserObserver, _MAIL_CONFIRMATION_CONTROL_WAIT_TICKS, _MAIL_CONFIRMATION_LANDING_WAIT_TICKS, _MAIL_CONFIRMATION_MAX_TICKS, _MAIL_CONFIRMATION_SUCCESS_TERMS, _MAIL_REVIEW_EMPTY_SETTLE_TICKS, _MAIL_REVIEW_MIN_COLLECTION_TICKS, _MAIL_REVIEW_ROUTE_WAIT_TICKS, _mail_collect_review_candidates, _mail_confirmation_score, _mail_confirmation_tick_budget, _mail_navigate_to_review_candidate, _ACCOUNT_PREFERENCES_EXISTING_IMAGE_PICKER_MARKERS, _ACCOUNT_PREFERENCES_ILLUSTRATION_LABELS, _ACCOUNT_PREFERENCES_PROFILE_PICKER_MARKERS, _ACCOUNT_PREFERENCES_PROFILE_SAVE_LABELS, _CONTACTS_FINAL_IMPORT_SELECTOR, _GMAIL_ADDONS_GET_SELECTOR, _GMAIL_ADDONS_SIDEBAR_SELECTOR, _PASSWORD_CHANGE_SUCCESS_JS_RE, _RECOVERY_PAGE_PATHS, _RECOVERY_URL, _TWO_STEP_AUTH_NAME_TERMS, _TWO_STEP_CONFIRM_REMOVE_LABELS, _TWO_STEP_MANUAL_LABELS, _TWO_STEP_PAGE_PATHS, _TWO_STEP_REMOVE_LABELS, _TWO_STEP_ROW_EDIT_LABELS, _TWO_STEP_URL, _active_page, _complete_credential_change, _active_addons_surface, _addons_authorize_google_oauth, _addons_authorize_marketplace_install, _addons_click_install, _click_gmail_addons_sidebar_toggle, _click_gmail_get_addons, _click_random_profile_illustration, _confirm_enhanced_safe_browsing, _contacts_click_final_import, _contacts_click_label, _contacts_dialog_closed_after_confirm, _contacts_import_result_route, _credential_change_is_confirmed, _drive_recovery_page, _drive_two_step_setup, _fill_otp_code, _fill_two_step_code, _finish_password_change, _handle_addons_loading_stall, _handle_addons_missing_surface, _handle_credential_change_tick, _handle_mail_tick, _handle_security_tick, _is_safe_interstitial, _mail_action_confirmation_visible, _mail_click_reply_send, _mail_fill_reply, _mail_reply_surface_ready, _mail_review_control_summary, _mail_scroll_reply_thread, _mail_search_applied, _mail_subject_query, _open_start_page, _otp_should_attempt, _page_rank, _visible_picker_root
 
 
 class _FakeButton:
@@ -74,6 +74,9 @@ class _FakeLocator:
     def count(self) -> int:
         return self._count if self._count is not None else len(self._elements)
 
+    def locator(self, _selector: str):
+        return _FakeLocator(self._elements)
+
     def all(self):
         return list(self._elements)
 
@@ -99,6 +102,36 @@ class _FakeLocator:
         if self._elements:
             self._elements[0].click(timeout=timeout)
         return self
+
+
+class _GmailSearchPage(_FakePage):
+    """A Gmail page that is showing the result list for a submitted query."""
+
+    def __init__(self, fragment: str | None = None, text: str = ""):
+        route = "search/in%3Aanywhere+is%3Aunread+subject%3A%22confirm%22" if fragment is None else fragment
+        super().__init__(f"https://mail.google.com/mail/u/0/#{route}", text=text)
+
+
+class _SearchBoxLocator(_FakeLocator):
+    def is_visible(self, timeout: int = 500) -> bool:
+        return bool(self._elements)
+
+    @property
+    def first(self):
+        return _SearchBoxLocator(self._elements[:1])
+
+
+class _GmailSearchBoxPage(_GmailSearchPage):
+    """A Gmail page whose search box already holds the submitted query."""
+
+    def __init__(self, query: str, fragment: str | None = "inbox"):
+        super().__init__(fragment=fragment)
+        self.query = query
+
+    def locator(self, selector: str):
+        if "Search mail" in selector:
+            return _SearchBoxLocator([_FakeField(self.query)])
+        return super().locator(selector)
 
 
 class _FakeText(_FakeButton):
@@ -526,6 +559,74 @@ def test_observer_reports_captcha_to_session_but_keeps_watching():
     assert not observer._stop.is_set(), "observer must stay alive to catch Gmail after the human clears the challenge"
 
 
+def test_captcha_does_not_drive_still_present_sign_in_controls():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge", "Security check", "I'm not a robot", identifier="", buttons=[button])
+    observer = BrowserObserver("captcha-session", "captcha-profile", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("reader@example.com", "secret"))
+
+    observer._tick(_fake_browser([page]))
+
+    assert page.cred_fields["email"].value == ""
+    assert getattr(button, "clicked", False) is False
+    assert not observer._stop.is_set()
+
+
+def test_phone_verification_waits_even_with_saved_totp_secret():
+    button = _FakeButton("Continue")
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge/phone", "Verify your phone number", "Enter a phone number to receive a code", otp="", buttons=[button])
+    observer = BrowserObserver("phone-session", "phone-profile", 9222, observe_session_page=lambda *a: None, resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP")
+
+    observer._tick(_fake_browser([page]))
+
+    assert page.cred_fields["otp"].value == ""
+    assert getattr(button, "clicked", False) is False
+    assert not observer._stop.is_set()
+
+
+def test_sparse_google_captcha_is_detected_from_visible_iframe():
+    from app.login_policy import PageObservation, classify_page
+    from app.observer import _login_challenge_hint
+
+    page = MagicMock()
+    page.locator.return_value.count.return_value = 1
+    url = "https://accounts.google.com/v3/signin/challenge"
+    hint = _login_challenge_hint(page, url, "accounts.google.com")
+
+    assert hint == "captcha verification required"
+    assert classify_page(PageObservation(url, "Sign in", hint)) == (PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN)
+
+
+def test_supported_captcha_solves_in_background_then_applies_token_once():
+    from app.observer import _handle_supported_captcha_tick
+
+    observer = BrowserObserver("captcha-solver", "captcha-profile", 9222, captcha_api_key="configured-key")
+    page = MagicMock()
+    with patch("app.observer.detect_widget", return_value=("recaptcha_v2", "site-key")), patch("app.observer.response_present", return_value=False), patch("app.observer.solve_widget", return_value="solved-token") as solve, patch("app.observer.apply_token", return_value=True) as apply:
+        assert _handle_supported_captcha_tick(observer, page, "https://example.com/signup") is True
+        for _ in range(100):
+            if observer._captcha_attempt["token"]:
+                break
+            time.sleep(0.001)
+        assert _handle_supported_captcha_tick(observer, page, "https://example.com/signup") is False
+        assert _handle_supported_captcha_tick(observer, page, "https://example.com/signup") is False
+        solve.assert_called_once()
+        apply.assert_called_once_with(page, "recaptcha_v2", "solved-token")
+
+
+def test_login_policy_distinguishes_phone_challenge_from_identifier_form():
+    from app.login_policy import PageObservation, classify_page
+
+    assert classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/phone", "Google", "")) == (PageSignal.PHONE_VERIFICATION, PageAction.WAIT_FOR_HUMAN)
+    assert classify_page(PageObservation("https://accounts.google.com/", "Sign in", "Email or phone")) == (PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE)
+    assert classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/unknown", "Google", "")) == (PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)
+    assert classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/unknown", "Sign in", "")) == (PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)
+    assert classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/pwd", "Google", "Enter your password")) == (PageSignal.LOGIN_FORM, PageAction.SAFE_TO_OBSERVE)
+    recovery = "Récupération de compte. Obtenir un code de validation. Confirmez l'adresse e-mail de récupération que vous avez ajoutée à votre compte. Saisissez l'adresse e-mail de récupération."
+    assert classify_page(PageObservation("https://accounts.google.com/v3/signin/challenge/selection", "Récupération de compte", recovery)) == (PageSignal.RECOVERY_VERIFICATION, PageAction.WAIT_FOR_HUMAN)
+    assert classify_page(PageObservation("https://www.google.com/sorry/index", "Google", "Unusual traffic")) == (PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN)
+    assert classify_page(PageObservation("https://mail.google.com/mail/u/0/#inbox", "Inbox", "Inbox Compose: an email about CAPTCHA and phone verification")) == (PageSignal.GMAIL_HOME, PageAction.SAFE_TO_OBSERVE)
+
+
 def test_observer_records_observations():
     seen = []
     observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda sid, url, title, text: seen.append((sid, url, title, text)), interval=0.05)
@@ -554,7 +655,7 @@ def test_auto_login_fills_identifier_and_submits():
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["email"].value == "alice@example.com"
     assert getattr(button, "clicked", False) is True
-    assert "https://accounts.google.com/" in observer._auto_attempted_urls
+    assert "https://accounts.google.com/#identifier" in observer._auto_attempted_urls
 
 
 def test_auto_login_fills_password_on_password_page():
@@ -823,6 +924,35 @@ def test_observer_reports_unknown_after_settle_window():
     assert not observer._stop.is_set()
 
 
+def test_newsletter_unknown_public_page_reaches_profile_handler_without_attention():
+    seen = []
+    page = _FakePage("https://example.com/newsletter", "Newsletter", "Sign up for updates")
+    observer = BrowserObserver("s1", "p1", 9222, purpose="newsletter", observe_session_page=lambda *a: seen.append(a), settle_seconds=0.0)
+    with patch("app.observer.classify_page", return_value=(PageSignal.UNKNOWN, PageAction.NEEDS_ATTENTION)), patch("app.observer._handle_newsletter_signup_tick") as handler:
+        observer._tick(_fake_browser([page]))
+    handler.assert_called_once()
+    assert seen == []
+    assert not observer._stop.is_set()
+
+
+def test_newsletter_task_deadline_marks_only_the_stalled_item_for_review():
+    events = []
+    observer = BrowserObserver(
+        "stalled-newsletter-session",
+        "newsletter-profile",
+        9222,
+        purpose="newsletter",
+        report_event=lambda _sid, event, detail, result: events.append((event, detail, result)),
+    )
+    observer._newsletter_started_at = time.monotonic() - 181
+
+    observer._tick(_fake_browser([]))
+
+    assert observer._stop.is_set()
+    assert events and events[-1][0] == "newsletter.signup.manual_review"
+    assert "3-minute task limit" in events[-1][1]
+
+
 def test_observer_requires_an_exact_google_host_for_consent():
     assert _is_safe_interstitial("https://accounts.google.com/continue", "ORDINARY_INTERSTITIAL") is True
     assert _is_safe_interstitial("https://evil.example/accounts.google.com/continue", "UNKNOWN") is False
@@ -859,7 +989,7 @@ def test_selector_constraints_only_match_inputs_for_password_ids():
 
     credential_parts = {part.strip() for part in _CREDENTIAL_FIELD_SELECTOR.split(",")}
     assert "#password" not in credential_parts
-    assert "input#password" in credential_parts
+    assert "input#password:visible" in credential_parts
     otp_parts = {part.strip() for part in _OTP_FIELD_SELECTOR.split(",")}
     assert "#totpPin" not in otp_parts
     assert any(part.startswith("input#totpPin") for part in otp_parts)
@@ -883,3 +1013,1328 @@ def test_observer_stop_from_its_own_thread_does_not_try_to_join_itself():
     observer._thread = __import__("threading").current_thread()
     observer.stop()
     assert observer._stop.is_set()
+
+
+class _FakeTwoStepPage:
+    def __init__(self, drive_result: dict, fill_result: str = "submitted"):
+        self.url = "https://myaccount.google.com/two-step-verification/authenticator"
+        self.drive_result = drive_result
+        self.fill_result = fill_result
+        self.fill_calls = 0
+
+    def evaluate(self, script: str, _config: dict):
+        if "rejectionTerms" in script:
+            self.fill_calls += 1
+            return self.fill_result
+        return self.drive_result
+
+
+def test_two_step_setup_uses_the_authenticator_url_and_matches_legacy_path():
+    assert _TWO_STEP_URL == "https://myaccount.google.com/two-step-verification/authenticator"
+    assert any(path == "/signinoptions/two-step-verification" for path in _TWO_STEP_PAGE_PATHS)
+
+
+def test_two_step_labels_target_the_manual_secret_key_option():
+    labels = " ".join(_TWO_STEP_MANUAL_LABELS)
+    assert "secret key" in labels or "setup key" in labels
+
+
+def test_two_step_tick_captures_googles_key_and_replaces_the_generated_secret():
+    events: list[str] = []
+    stored: dict[str, object] = {}
+
+    def store(_sid: str, material: dict):
+        stored["material"] = material
+
+    observer = BrowserObserver(
+        "s-two-step", "p-two-step", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+        store_credential_change=store,
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": "JBSWY3DPEHPK3PXP", "action": "key"})
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._two_step_key == "JBSWY3DPEHPK3PXP"
+    assert stored["material"]["2fa"] == "JBSWY3DPEHPK3PXP"
+    assert observer._two_step_code_attempts == 1
+    assert page.fill_calls == 1
+    assert "two_step.secret_captured" in events
+
+
+def test_two_step_tick_marks_an_existing_authenticator_as_removed():
+    observer = BrowserObserver(
+        "s-two-step", "p-two-step", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "remove"})
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._two_step_removed is True
+
+
+def test_two_step_tick_fills_the_current_account_code_on_a_reauth_prompt():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-two-step-reauth", "p-two-step-reauth", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+        resolve_otp_secret=lambda _sid: "JBSWY3DPEHPK3PXP",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "reauth-code"})
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert page.fill_calls == 1  # the stored (current) TOTP was entered
+    assert observer._two_step_code_attempts == 1
+    assert observer._two_step_key is None  # no new secret is captured from a re-auth prompt
+    assert observer._two_step_removed is False
+
+
+def test_two_step_tick_does_not_resubmit_or_restart_after_new_code_submission():
+    class _SettlingPage(_FakeTwoStepPage):
+        def __init__(self):
+            super().__init__({"state": "waiting", "key": None, "action": "code"}, fill_result="submitted")
+            self.drive_calls = 0
+
+        def evaluate(self, script: str, config: dict):
+            if "rejectionTerms" in script:
+                self.fill_calls += 1
+                return self.fill_result
+            self.drive_calls += 1
+            if self.drive_calls == 1:
+                return {"state": "waiting", "key": None, "action": "code", "scan": {"hasCodeInput": True}}
+            # Google has accepted the OTP, but its success surface is still
+            # rendering. A later tick must not click Remove/Add or Verify again.
+            return {"state": "waiting", "key": None, "action": "verification-pending", "scan": {"hasCodeInput": True}}
+
+    observer = BrowserObserver(
+        "s-two-step-settling", "p-two-step-settling", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "JBSWY3DPEHPK3PXP", "two_fa_requested": True},
+    )
+    observer._two_step_key = "JBSWY3DPEHPK3PXP"
+    page = _SettlingPage()
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._two_step_code_submitted is True
+    assert page.drive_calls == 2
+    assert page.fill_calls == 1
+    assert observer._stop.is_set() is False
+
+
+def test_two_step_tick_fails_when_the_reauth_code_is_rejected_repeatedly():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-two-step-reauth-reject", "p-two-step-reauth-reject", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+        resolve_otp_secret=lambda _sid: "JBSWY3DPEHPK3PXP",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "reauth-code"}, fill_result="rejected")
+
+    for _ in range(6):
+        _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert "credential_change.failed" in events
+    assert observer._stop.is_set()
+
+
+def test_two_step_tick_completes_once_google_confirms_the_authenticator():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-two-step", "p-two-step", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    observer._two_step_key = "JBSWY3DPEHPK3PXP"
+    page = _FakeTwoStepPage({"state": "done", "key": None, "action": None})
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert "credential_change.completed" in events
+    assert observer._stop.is_set()
+
+
+def test_two_step_tick_reports_the_page_scan_when_it_stalls():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-two-step-scan", "p-two-step-scan", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({
+        "state": "waiting",
+        "key": None,
+        "action": "idle",
+        "scan": {"hasPassword": False, "hasSetupKey": False, "hasCodeInput": False, "hasDialog": False, "hasExistingRow": True, "hasGetStarted": False, "hasManual": False},
+    })
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+    assert "two_step.scan" in events
+    assert observer._stop.is_set() is False  # a stall is reported, not fatal
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+    assert events.count("two_step.scan") == 1  # same scan is not re-emitted every tick
+
+
+def test_two_fa_only_plan_routes_to_the_authenticator_page_not_the_password_page():
+    calls: list[str] = []
+
+    class _NavPage:
+        url = "https://mail.google.com/mail/u/0/"
+
+        def goto(self, url: str, **_kwargs):
+            calls.append(url)
+
+    observer = BrowserObserver(
+        "s-two-step", "p-two-step", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "JBSWY3DPEHPK3PXP", "two_fa_requested": True},
+    )
+
+    _handle_credential_change_tick(observer, _NavPage(), "mail.google.com")
+
+    assert calls == ["https://myaccount.google.com/two-step-verification/authenticator"]
+
+
+def test_combined_plan_starts_with_the_password_page_then_hands_off_to_two_fa():
+    calls: list[str] = []
+
+    class _NavPage:
+        url = "https://mail.google.com/mail/u/0/"
+
+        def goto(self, url: str, **_kwargs):
+            calls.append(url)
+
+    observer = BrowserObserver(
+        "s-combined", "p-combined", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"password": "NewPass123!", "2fa": "SERVERSECRET123456", "password_requested": True, "two_fa_requested": True},
+    )
+
+    _handle_credential_change_tick(observer, _NavPage(), "mail.google.com")
+
+    assert calls == ["https://myaccount.google.com/signinoptions/password"]
+
+
+def test_completion_never_fires_until_google_confirms_each_requested_field():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-guard", "p-guard", 9222, purpose="credential_change",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "code"})
+
+    _complete_credential_change(observer, page, {"password": "NewPass123!", "password_requested": True}, "the new password was applied")
+
+    assert "credential_change.completed" not in events
+    assert "credential_change.failed" in events
+    assert observer._stop.is_set()
+
+
+def test_password_leg_reports_success_even_when_the_two_fa_leg_is_still_pending():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-pw-leg", "p-pw-leg", 9222, purpose="credential_change",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "idle"})
+
+    _finish_password_change(observer, page, {"password": "NewPass123!", "password_requested": True, "two_fa_requested": True})
+
+    assert observer._password_change_confirmed is True
+    assert "password.change_completed" in events  # password persisted independently
+    assert "credential_change.completed" not in events  # 2FA leg has not finished yet
+
+
+def test_password_only_change_completes_through_the_shared_finisher():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-pw-only", "p-pw-only", 9222, purpose="credential_change",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "idle"})
+
+    _finish_password_change(observer, page, {"password": "NewPass123!", "password_requested": True})
+
+    assert "password.change_completed" in events
+    assert "credential_change.completed" in events  # no 2FA leg: the plan finishes here
+
+
+def test_password_tick_marks_an_enter_submit_as_in_flight():
+    observer = BrowserObserver(
+        "s-pw-enter", "p-pw-enter", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"password": "NewPass123!", "password_requested": True},
+        resolve_current_password=lambda _sid: "old-secret",
+    )
+    page = _FakeTwoStepPage("keyboard2")
+    page.url = "https://myaccount.google.com/signinoptions/password"
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    # The final submit went through Enter: detection must start instead of the
+    # tick re-driving (and re-submitting) the form forever.
+    assert observer._password_change_clicked is True
+    assert observer._credential_change_stage == 2
+
+
+def test_password_tick_accepts_a_settled_submit_without_a_success_banner():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-pw-likely", "p-pw-likely", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"password": "NewPass123!", "password_requested": True},
+        resolve_current_password=lambda _sid: "old-secret",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage("likely")
+    page.url = "https://myaccount.google.com/signinoptions/password"
+    observer._password_change_clicked = True
+
+    for _ in range(3):
+        _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._password_change_confirmed is False  # still settling
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+    assert observer._password_change_confirmed is True
+    assert "credential_change.completed" in events
+
+
+def test_password_success_matcher_covers_variant_and_localized_phrases():
+    import re
+
+    # The matcher is authored for the browser engine ([^] matches any char);
+    # translate that one construct so Python can validate the phrase coverage.
+    pattern = re.compile(_PASSWORD_CHANGE_SUCCESS_JS_RE.replace("[^]", r"[\s\S]"))
+    for phrase in (
+        "password changed",
+        "Password changed successfully",
+        "your password has been updated",
+        "passwort wurde geandert",
+        "senha alterada com sucesso",
+        "mot de passe a ete modifie",
+        "パスワードを変更しました",
+        "비밀번호가 변경되었습니다",
+        "密码已更改",
+        "пароль был изменен",
+    ):
+        assert pattern.search(phrase.lower()), phrase
+
+
+def test_two_step_tick_still_drives_the_legacy_signinoptions_path():
+    observer = BrowserObserver(
+        "s-two-step", "p-two-step", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"2fa": "SERVERSECRET123456", "two_fa_requested": True},
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": "manual"})
+    page.url = "https://myaccount.google.com/signinoptions/two-step-verification"
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert _drive_two_step_setup(page, None)["state"] == "waiting"
+
+
+def test_fill_two_step_code_returns_the_submit_status():
+    page = _FakeTwoStepPage({"state": "waiting", "key": None, "action": None}, fill_result="submitted")
+
+    assert _fill_two_step_code(page, "JBSWY3DPEHPK3PXP") == "submitted"
+    assert page.fill_calls == 1
+
+
+def test_two_step_page_paths_include_googles_new_twosv_slug():
+    assert _TWO_STEP_URL == "https://myaccount.google.com/two-step-verification/authenticator"
+    assert any(path == "/signinoptions/twosv" for path in _TWO_STEP_PAGE_PATHS)
+    assert any(path == "/signinoptions/two-step-verification" for path in _TWO_STEP_PAGE_PATHS)
+
+
+def _label_matches(label: str, terms: tuple[str, ...]) -> bool:
+    import unicodedata
+
+    def normalize(value: str) -> str:
+        stripped = unicodedata.normalize("NFD", value).encode("ascii", "ignore").decode()
+        return " ".join(stripped.split()).lower()
+
+    normalized = normalize(label)
+    return any(
+        normalized == term or normalized.startswith(term + " ") or normalized.endswith(" " + term)
+        for term in (normalize(term) for term in terms)
+    )
+
+
+def test_two_step_remove_detects_the_localized_authenticator_row():
+    # Spanish management page (the user's container): the row is named
+    # "Autenticador" and its trash button is aria-labelled
+    # "Quitar el Autenticador de Google". Detection must recognise it as an
+    # existing authenticator AND as the Remove affordance.
+    delete_label = "Quitar el Autenticador de Google"
+    assert any(term in delete_label.lower() for term in _TWO_STEP_AUTH_NAME_TERMS)
+    assert _label_matches(delete_label, _TWO_STEP_REMOVE_LABELS)
+    assert any("autenticador" in term for term in _TWO_STEP_AUTH_NAME_TERMS)
+
+
+def test_two_step_change_affordance_is_not_mistaken_for_remove():
+    # "Cambiar la app de autenticador" (Change authenticator app) sits before
+    # the trash button; it must map to the edit affordance, never Remove.
+    change_label = "Cambiar la app de autenticador"
+    assert not _label_matches(change_label, _TWO_STEP_REMOVE_LABELS)
+    assert _label_matches(change_label, _TWO_STEP_ROW_EDIT_LABELS)
+
+
+def test_two_step_confirm_remove_matches_the_popup_button():
+    assert _label_matches("Quitar", _TWO_STEP_CONFIRM_REMOVE_LABELS)
+    assert _label_matches("Remove authenticator", _TWO_STEP_CONFIRM_REMOVE_LABELS)
+
+
+def test_two_step_manual_option_matches_the_punctuated_i_cant_scan_it():
+    import re
+    import unicodedata
+
+    def js_normalize(value: str) -> str:
+        stripped = unicodedata.normalize("NFD", value).encode("ascii", "ignore").decode()
+        stripped = re.sub(r"""[?¿!¡.,:;()\[\]{}"'\u00ab\u00bb\u2026]""", " ", stripped)
+        return " ".join(stripped.split()).lower()
+
+    def matches(label: str) -> bool:
+        normalized = js_normalize(label)
+        return any(
+            normalized == term or normalized.startswith(term + " ") or normalized.endswith(" " + term)
+            for term in (js_normalize(term) for term in _TWO_STEP_MANUAL_LABELS)
+        )
+
+    # Google renders the manual-key affordance with a trailing "?" and the
+    # leading "I"; both used to defeat the strict label match.
+    assert matches("Can't scan it?")
+    assert matches("I can't scan it")
+    assert matches("Cannot scan the QR code")
+    assert matches("No puedes escanearlo?")
+    assert matches("Je ne peux pas scanner le code")
+    assert matches("¿No se puede escanear?")
+    assert matches("Ne peut-on pas le scanner ?")
+    assert matches("Can't it be scanned?")
+    assert matches("can't scan it?")
+
+
+def test_two_step_manual_keyword_fallback_covers_passive_locale_phrases():
+    import re
+    import unicodedata
+
+    def js_normalize(value: str) -> str:
+        stripped = unicodedata.normalize("NFD", value).encode("ascii", "ignore").decode()
+        stripped = re.sub(r"""[?¿!¡.,:;()\[\]{}"'\u00ab\u00bb\u2026]""", " ", stripped)
+        return " ".join(stripped.split()).lower()
+
+    # Mirrors the in-page fallback predicate: ANY visible label coupling a scan
+    # keyword with a cannot/not phrasing is the manual-key option, even when it
+    # is not (yet) an exact list term.
+    def predicate(label: str) -> bool:
+        normalized = js_normalize(label)
+        if not normalized:
+            return False
+        return bool(re.search(r"(scan|scann|escan)", normalized)) and bool(
+            re.search(r"(\bcan\s*'?\s*t\b|cannot|not scan|no se puede|no puedes|no puedo|ne peut|pas scanner|impossible|trouble|problem)", normalized)
+        )
+
+    for phrase in (
+        "¿No se puede escanear?",
+        "Ne peut-on pas le scanner ?",
+        "Can't it be scanned?",
+        "can't scan it?",
+        "No puedes escanear el código QR?",
+        "Vous ne pouvez pas scanner le code ?",
+    ):
+        assert predicate(phrase), phrase
+
+    # A plain scanning hint or unrelated link must never be mistaken for it.
+    assert not predicate("Scan this QR code with your phone")
+    assert not predicate("Use Google Authenticator")
+
+
+def test_recovery_only_plan_navigates_to_the_recovery_email_page():
+    calls: list[str] = []
+
+    class _NavPage:
+        url = "https://mail.google.com/mail/u/0/"
+
+        def goto(self, url: str, **_kwargs):
+            calls.append(url)
+
+    observer = BrowserObserver(
+        "s-recovery", "p-recovery", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"recovery": "rotated@example.com", "recovery_requested": True},
+    )
+
+    _handle_credential_change_tick(observer, _NavPage(), "mail.google.com")
+
+    assert calls == [_RECOVERY_URL]
+    assert any(path == "/recovery/email" for path in _RECOVERY_PAGE_PATHS)
+
+
+def test_recovery_tick_confirms_after_google_accepts_the_new_address():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-recovery-done", "p-recovery-done", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"recovery": "rotated@example.com", "recovery_requested": True},
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage({"state": "done", "action": "success"})
+    page.url = "https://myaccount.google.com/recovery/email"
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._recovery_change_confirmed is True
+    assert "recovery.change_completed" in events
+
+
+def test_recovery_leg_must_finish_before_the_plan_can_complete():
+    observer = BrowserObserver("s-recovery-guard", "p-recovery-guard", 9222, purpose="credential_change")
+    material = {"recovery_requested": True, "recovery": "rotated@example.com"}
+
+    assert _credential_change_is_confirmed(observer, material) is False
+    observer._recovery_change_confirmed = True
+    assert _credential_change_is_confirmed(observer, material) is True
+
+
+def test_drive_recovery_page_fills_the_address_then_saves():
+    class _RecoveryPage:
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate(self, _script: str, _config: dict):
+            self.calls += 1
+            if self.calls == 1:
+                return {"state": "waiting", "action": "email-filled"}
+            if self.calls == 2:
+                return {"state": "waiting", "action": "save"}
+            return {"state": "done", "action": "success"}
+
+    page = _RecoveryPage()
+    assert _drive_recovery_page(page, "rotated@example.com")["action"] == "email-filled"
+    assert _drive_recovery_page(page, "rotated@example.com")["action"] == "save"
+    assert _drive_recovery_page(page, "rotated@example.com")["state"] == "done"
+
+
+def test_drive_recovery_page_forwards_the_saved_flag():
+    captured: dict = {}
+
+    class _CapturePage:
+        def evaluate(self, _script: str, config: dict):
+            captured.update(config)
+            return {"state": "waiting", "action": "idle"}
+
+    _drive_recovery_page(_CapturePage(), "rotated@example.com", already_saved=True)
+    assert captured["alreadySaved"] is True
+
+
+def test_recovery_tick_remembers_the_save_so_it_never_reopens_the_form():
+    observer = BrowserObserver(
+        "s-recovery-save", "p-recovery-save", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"recovery": "rotated@example.com", "recovery_requested": True},
+    )
+    page = _FakeTwoStepPage({"state": "waiting", "action": "save"})
+    page.url = "https://myaccount.google.com/recovery/email"
+
+    _handle_credential_change_tick(observer, page, "myaccount.google.com")
+
+    assert observer._recovery_saved is True
+    assert observer._recovery_change_confirmed is False
+
+
+def test_password_in_flight_confirmation_runs_on_a_login_host():
+    events: list[str] = []
+    observer = BrowserObserver(
+        "s-pw-loginhost", "p-pw-loginhost", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"password": "NewPass123!", "password_requested": True},
+        resolve_current_password=lambda _sid: "old-secret",
+        report_event=lambda _sid, event, _detail, _result: events.append(event),
+    )
+    page = _FakeTwoStepPage("done")
+    # Google briefly lands the post-change confirmation on the sign-in host.
+    page.url = "https://accounts.google.com/signin/v2/challenge/pwd"
+    observer._password_change_clicked = True
+
+    _handle_credential_change_tick(observer, page, "accounts.google.com")
+
+    # The host guards must not swallow the in-flight confirmation.
+    assert observer._password_change_confirmed is True
+    assert "password.change_completed" in events
+
+
+def test_password_in_flight_re_auth_uses_the_new_password():
+    observer = BrowserObserver(
+        "s-pw-reauth", "p-pw-reauth", 9222, purpose="credential_change",
+        resolve_credential_change=lambda _sid: {"password": "NewPass123!", "password_requested": True},
+        resolve_current_password=lambda _sid: "old-secret",
+    )
+    url = "https://accounts.google.com/signin/v2/challenge/pwd"
+    page = _FakeTwoStepPage("pending")
+    page.url = url
+    observer._password_change_clicked = True
+    observer._credentials = ("user@example.com", "old-secret")
+    observer._credentials_tried = True
+    observer._auto_attempted_urls.add(url)
+    observer._submitted_urls.add(url)
+
+    _handle_credential_change_tick(observer, page, "accounts.google.com")
+
+    # Re-auth must use the freshly provisioned password, not the stale stored one.
+    assert observer._credentials == ("user@example.com", "NewPass123!")
+    assert url not in observer._auto_attempted_urls
+    assert url not in observer._submitted_urls
+
+
+def test_mail_reply_search_uses_all_gmail_folders():
+    assert _mail_subject_query({"action": "reply", "subject": "Quarterly planning"}) == 'in:anywhere subject:"Quarterly planning"'
+
+
+def test_mail_confirmation_review_searches_all_gmail_folders():
+    assert _mail_subject_query({"action": "confirmation_review", "subject": "Confirm your subscription"}) == 'in:anywhere is:unread subject:"Confirm your subscription"'
+
+
+def test_mail_confirmation_review_can_target_only_read_emails():
+    assert _mail_subject_query({"action": "confirmation_review", "review_email_state": "read", "subject": "Confirm your subscription"}) == 'in:anywhere is:read subject:"Confirm your subscription"'
+
+
+def test_mail_confirmation_review_summarizes_visible_controls_without_exposing_content():
+    captured: dict = {}
+
+    class _ReviewPage:
+        def evaluate(self, script: str, confirmation_cues: list[str]):
+            captured["script"] = script
+            captured["confirmation_cues"] = confirmation_cues
+            return {"controlCount": 4, "confirmationCount": 1, "buttonCount": 1, "textLinkCount": 3}
+
+    summary = _mail_review_control_summary(_ReviewPage())  # type: ignore[arg-type]
+
+    assert summary == {"control_count": 4, "confirmation_count": 1, "button_count": 1, "text_link_count": 3}
+    assert "subscribe" in captured["confirmation_cues"]
+    assert "href" in captured["script"]
+    assert "control.click" not in captured["script"]
+
+
+def test_mail_confirmation_review_waits_for_stable_control_scan_before_marking_ready():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-controls",
+        "profile-review-controls",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "subject": "Confirm your subscription"},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 3, "confirmation_count": 1, "button_count": 1, "text_link_count": 2}
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_click_confirmation_control", return_value=None), patch("app.observer._mail_review_control_summary", return_value=summary):
+        _handle_mail_tick(observer, MagicMock(), "mail.google.com")  # opens the matched message
+        _handle_mail_tick(observer, MagicMock(), "mail.google.com")  # first scan
+        assert observer._mail_review_ready is False
+        for _ in range(_MAIL_CONFIRMATION_CONTROL_WAIT_TICKS + 1):
+            _handle_mail_tick(observer, MagicMock(), "mail.google.com")
+
+    assert observer._mail_review_ready is True
+    assert [event for event, _detail, _result, _metadata in events] == [
+        "mail.matches_found",
+        "mail.thread_opened",
+        "mail.review_controls_detected",
+        "mail.confirmation_control_unavailable",
+        "mail.review_ready",
+    ]
+    assert events[-1][3] == {
+        "message_controls_rendered": True,
+        "reviewed_message_count": 1,
+        "visible_message_controls": 3,
+        "candidate_confirmation_controls": 1,
+        "visible_message_buttons": 1,
+        "visible_message_text_links": 2,
+        "message_index": 1,
+        "confirmed_messages": 0,
+        "messages_needing_review": 1,
+    }
+
+
+def test_mail_confirmation_review_queue_confirms_each_matched_message_from_captured_routes():
+    """The queue keeps its matches after Gmail drops the opened thread.
+
+    A read-state filtered search loses a message once it is opened, so the
+    remaining matches are re-opened from the routes captured before the first
+    message was opened instead of from a re-run search.
+    """
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-queue",
+        "profile-review-queue",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 2},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    opened: list[str] = []
+
+    def _navigate(_page, candidate):
+        opened.append(candidate["key"])
+        return True
+
+    candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}, {"key": "gmail:thread-two", "href": "#all/thread-two"}]
+
+    def _rows(_page, _config):
+        # Gmail empties the result list as soon as a message is opened.
+        return candidates if not opened else []
+
+    summary = {"control_count": 3, "confirmation_count": 1, "button_count": 1, "text_link_count": 2}
+    landing = _FakePage("https://news.example.com/confirm?token=one", text="Thanks for confirming. Subscription confirmed.")
+
+    with patch("app.observer._mail_review_candidate_rows", side_effect=_rows), patch("app.observer._mail_navigate_to_review_candidate", side_effect=_navigate), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="button"), patch("app.observer._mail_confirmation_landing_target", side_effect=lambda _observer, _page, _host: landing if (observer._mail_review_awaiting_landing or observer._mail_review_landing_page is landing) else None):
+        for _ in range(20):
+            _handle_mail_tick(observer, _GmailSearchPage(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    assert opened == ["gmail:thread-one", "gmail:thread-two"]
+    assert observer._mail_review_ready is False
+    assert observer._mail_review_processed_count == 2
+    assert observer._mail_review_confirmed_count == 2
+    assert observer._stop.is_set()
+    assert [event for event, _detail, _result, _metadata in events].count("mail.confirmation_clicked") == 2
+    assert [event for event, _detail, _result, _metadata in events][-2:] == ["mail.confirmation_succeeded", "mail.completed"]
+    assert events[-1][3] == {
+        "reviewed_message_count": 2,
+        "candidate_confirmation_messages": 2,
+        "messages_without_rendered_controls": 0,
+        "visible_message_controls": 6,
+        "visible_message_buttons": 2,
+        "visible_message_text_links": 4,
+        "confirmation_links_followed": 2,
+        "matched_confirmation_emails": 2,
+        "confirmed_messages": 2,
+        "messages_needing_review": 0,
+    }
+
+
+def test_mail_confirmation_review_queue_keeps_going_after_a_message_without_a_usable_control():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-mixed",
+        "profile-review-mixed",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 3},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    summaries = [
+        {"control_count": 2, "confirmation_count": 0, "button_count": 0, "text_link_count": 2},
+        {"control_count": 3, "confirmation_count": 1, "button_count": 1, "text_link_count": 2},
+    ]
+    candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}, {"key": "gmail:thread-two", "href": "#all/thread-two"}]
+    landing = _FakePage("https://news.example.com/confirm", text="Thanks for confirming. Subscription confirmed.")
+
+    with patch("app.observer._mail_review_candidate_rows", return_value=candidates), patch("app.observer._mail_review_scroll_results", return_value=False), patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", side_effect=lambda _page: summaries[0] if observer._mail_review_processed_count == 0 else summaries[1]), patch("app.observer._mail_click_confirmation_control", side_effect=lambda _page: None if observer._mail_review_processed_count == 0 else "text_link"), patch("app.observer._mail_confirmation_landing_target", side_effect=lambda _observer, _page, _host: landing if (observer._mail_review_awaiting_landing or observer._mail_review_landing_page is landing) else None):
+        for _ in range(40):
+            _handle_mail_tick(observer, _GmailSearchPage(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, _metadata in events]
+    assert names.count("mail.confirmation_control_missing") == 1
+    assert names.count("mail.confirmation_succeeded") == 1
+    assert observer._mail_review_processed_count == 2
+    assert observer._mail_review_confirmed_count == 1
+    assert observer._mail_review_attention_count == 1
+    assert observer._stop.is_set()
+    # A run that confirmed only part of the queue is reported as a failure with
+    # both counts, never as a completed subscription.
+    assert names[-1] == "mail.failed"
+    assert "1 of 2" in events[-1][1]
+    assert "1 still need review" in events[-1][1]
+    assert events[-1][3]["messages_needing_review"] == 1
+    assert events[-1][3]["confirmed_messages"] == 1
+
+
+def test_mail_confirmation_review_queue_completes_when_no_captured_match_is_left():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-empty-search",
+        "profile-review-empty-search",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 5},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    observer._mail_review_processed_count = 1
+    observer._mail_review_confirmed_count = 1
+    observer._mail_review_candidate_count = 1
+
+    _handle_mail_tick(
+        observer,
+        _FakePage("https://mail.google.com/mail/u/0/#search", text="No messages matched your search. Try using search options."),
+        "mail.google.com",
+    )
+
+    assert observer._stop.is_set()
+    assert events[-1][0] == "mail.completed"
+    assert events[-1][3]["reviewed_message_count"] == 1
+    assert events[-1][3]["candidate_confirmation_messages"] == 1
+    assert events[-1][3]["matched_confirmation_emails"] == 1
+
+
+def test_mail_confirmation_review_follows_a_multi_step_confirmation_page_to_success():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-steps",
+        "profile-review-steps",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 1},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 1, "confirmation_count": 1, "button_count": 1, "text_link_count": 0}
+    first = _FakePage("https://news.example.com/confirm", text="Review your subscription and continue")
+    done = _FakePage("https://news.example.com/confirm/done", text="Subscription confirmed")
+
+    def _landing(_observer, _page, _host):
+        if observer._mail_review_landing_steps >= 2:
+            return done
+        return first if (observer._mail_review_awaiting_landing or observer._mail_review_landing_page is not None) else None
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="button"), patch("app.observer._mail_confirmation_landing_target", side_effect=_landing), patch("app.observer._mail_click_landing_step", return_value=True) as landing_step, patch("app.observer._mail_visible_text_terms", side_effect=lambda page, terms: ("subscription confirmed",) if (terms is _MAIL_CONFIRMATION_SUCCESS_TERMS and page is done) else ()):
+        for _ in range(20):
+            _handle_mail_tick(observer, MagicMock(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, _metadata in events]
+    assert landing_step.call_count == 2
+    assert names.count("mail.confirmation_step_completed") == 2
+    assert names[-1] == "mail.completed"
+    assert observer._mail_review_confirmed_count == 1
+    assert observer._mail_review_confirmation_steps == 3
+    assert events[-1][3]["confirmed_messages"] == 1
+
+
+def test_mail_confirmation_review_reports_a_confirmation_page_that_refuses_the_request():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-refused",
+        "profile-review-refused",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 1},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 1, "confirmation_count": 1, "button_count": 1, "text_link_count": 0}
+    refused = _FakePage("https://news.example.com/confirm", text="This link has expired")
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="button"), patch("app.observer._mail_confirmation_landing_target", side_effect=lambda _observer, _page, _host: refused if (observer._mail_review_awaiting_landing or observer._mail_review_landing_page is refused) else None):
+        for _ in range(20):
+            _handle_mail_tick(observer, MagicMock(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, metadata in events]
+    assert "mail.confirmation_failed" in names
+    assert names[-1] == "mail.failed"
+    assert observer._mail_review_confirmed_count == 0
+    assert observer._mail_review_attention_count == 1
+    assert events[-1][3]["messages_needing_review"] == 1
+
+
+def test_mail_confirmation_review_reports_a_sign_in_page_instead_of_waiting_for_it():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-signin",
+        "profile-review-signin",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 1},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 1, "confirmation_count": 1, "button_count": 1, "text_link_count": 0}
+    sign_in = _FakePage("https://accounts.google.com/ServiceLogin", text="Sign in to continue")
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="button"), patch("app.observer._mail_confirmation_landing_target", side_effect=lambda _observer, _page, _host: sign_in if observer._mail_review_awaiting_landing else None):
+        for _ in range(20):
+            _handle_mail_tick(observer, MagicMock(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, _metadata in events]
+    assert names.count("mail.confirmation_clicked") == 1
+    assert "mail.confirmation_message_review" in names
+    assert names[-1] == "mail.failed"
+    assert observer._mail_review_attention_count == 1
+
+
+def test_mail_confirmation_review_reports_a_confirmation_control_that_opens_nothing():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-nopage",
+        "profile-review-nopage",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 1},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 1, "confirmation_count": 1, "button_count": 1, "text_link_count": 0}
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="text_link"), patch("app.observer._mail_confirmation_landing_target", return_value=None):
+        for _ in range(_MAIL_CONFIRMATION_LANDING_WAIT_TICKS + 12):
+            _handle_mail_tick(observer, MagicMock(), "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, _metadata in events]
+    assert "mail.confirmation_message_review" in names
+    assert names[-1] == "mail.failed"
+    assert observer._mail_tick_count <= _MAIL_CONFIRMATION_LANDING_WAIT_TICKS + 10
+
+
+def test_mail_confirmation_review_does_not_reprocess_a_same_tab_confirmation_page():
+    """A control that navigated the mailbox tab must not be counted twice."""
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-sametab",
+        "profile-review-sametab",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 2},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    observer._mail_search_submitted = True
+    observer._mail_review_collection_done = True
+    observer._mail_review_candidates = [{"key": "gmail:thread-one", "href": "#all/thread-one"}]
+    summary = {"control_count": 1, "confirmation_count": 1, "button_count": 1, "text_link_count": 0}
+    same_tab = _FakePage("https://news.example.com/confirm", text="Thanks for confirming. Subscription confirmed.")
+
+    with patch("app.observer._mail_navigate_to_review_candidate", return_value=True), patch("app.observer._mail_review_control_summary", return_value=summary), patch("app.observer._mail_click_confirmation_control", return_value="button"), patch("app.observer._mail_confirmation_landing_target", side_effect=lambda _observer, page, host: page if host != "mail.google.com" else None):
+        navigated = False
+        for _ in range(30):
+            # The mailbox tab never returns to Gmail after the control navigated it.
+            navigated = navigated or observer._mail_review_control_clicked
+            _handle_mail_tick(observer, same_tab if navigated else MagicMock(), "news.example.com" if navigated else "mail.google.com")
+            if observer._stop.is_set():
+                break
+
+    names = [event for event, _detail, _result, _metadata in events]
+    assert names.count("mail.confirmation_succeeded") == 1
+    assert names.count("mail.confirmation_step_completed") == 0
+    assert observer._mail_review_processed_count == 1
+    assert observer._mail_review_confirmed_count == 1
+
+
+def test_mail_confirmation_tick_budget_scales_with_the_selected_message_count():
+    assert _mail_confirmation_tick_budget({"action": "confirmation_review", "max_messages": 1}) == 190
+    assert _mail_confirmation_tick_budget({"action": "confirmation_review", "max_messages": 4}) == 400
+    assert _mail_confirmation_tick_budget({"action": "confirmation_review", "max_messages": 500}) == _MAIL_CONFIRMATION_MAX_TICKS
+
+
+def test_mail_review_candidate_route_must_stay_inside_gmail():
+    class _RoutePage(_FakePage):
+        def __init__(self):
+            super().__init__("https://mail.google.com/mail/u/0/")
+            self.visited: list[str] = []
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.visited.append(url)
+            self.url = url
+
+    page = _RoutePage()
+    assert _mail_navigate_to_review_candidate(page, {"key": "row:https://evil.example/#all/1", "href": "https://evil.example/#all/1"}) is False
+    assert _mail_navigate_to_review_candidate(page, {"key": "gmail:thread-one", "href": ""}) is False or page.url.endswith("thread-one")
+    assert all(url.startswith("https://mail.google.com/") for url in page.visited)
+
+
+def test_mail_confirmation_label_ranking_prefers_an_exact_confirmation_label():
+    exact = _mail_confirmation_score("Confirm subscription")
+    inside = _mail_confirmation_score("Please confirm subscription now")
+    unrelated = _mail_confirmation_score("Manage your preferences")
+    assert exact > inside > unrelated
+    assert unrelated == 0
+
+
+def test_mail_confirmation_review_stops_collecting_matches_at_the_selected_limit():
+    observer = BrowserObserver(
+        "mail-review-limit",
+        "profile-review-limit",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 2},
+        report_event=lambda _session, event, detail, result, metadata=None: None,
+    )
+    rows = [{"key": f"gmail:thread-{index}", "href": f"#all/thread-{index}"} for index in range(5)]
+
+    with patch("app.observer._mail_review_candidate_rows", return_value=rows):
+        _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+
+    assert len(observer._mail_review_candidates) == 2
+    assert observer._mail_review_collection_done is True
+
+
+def test_mail_confirmation_review_fails_when_gmail_reports_the_search_matched_nothing():
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-noresults",
+        "profile-review-noresults",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 3},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+
+    with patch("app.observer._mail_review_candidate_rows", return_value=[]), patch("app.observer._mail_search_list_status", return_value={"visible_rows": 0, "no_results": True}):
+        for _ in range(_MAIL_REVIEW_EMPTY_SETTLE_TICKS):
+            _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+
+    assert observer._mail_review_collection_done is True
+    assert observer._stop.is_set()
+    assert [event for event, _detail, _result, _metadata in events][-1] == "mail.failed"
+    assert "matched no email at all" in events[-1][1]
+
+
+def test_mail_confirmation_review_waits_for_the_result_list_before_reporting_no_match():
+    """A result list that has not rendered yet must not read as an empty mailbox."""
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-none",
+        "profile-review-none",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 3},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    status = {"visible_rows": 6, "no_results": False}
+    rows: list[dict[str, str]] = []
+
+    with patch("app.observer._mail_review_candidate_rows", side_effect=lambda _page, _config: list(rows)), patch("app.observer._mail_search_list_status", side_effect=lambda _page: dict(status)), patch("app.observer._mail_review_scroll_results", return_value=False):
+        for _ in range(_MAIL_REVIEW_MIN_COLLECTION_TICKS - 1):
+            _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+            assert observer._mail_review_collection_done is False
+            assert observer._stop.is_set() is False
+            # Gmail finishes rendering a late result list while the run waits.
+            if len(rows) == 0 and observer._mail_review_collection_ticks == 3:
+                rows.append({"key": "gmail:thread-one", "href": "#all/thread-one"})
+        _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+
+    assert observer._mail_review_collection_done is True
+    assert observer._stop.is_set() is False
+    assert [candidate["key"] for candidate in observer._mail_review_candidates] == ["gmail:thread-one"]
+    assert [event for event, _detail, _result, _metadata in events] == ["mail.candidates_collected"]
+    assert events[-1][3]["matched_confirmation_emails"] == 1
+    assert events[-1][3]["search_list_rows"] == 6
+
+
+def test_mail_search_route_is_required_before_a_result_list_is_trusted():
+    """An inbox route is not a search result, even with a full mailbox rendered."""
+    config = {"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription"}
+
+    assert _mail_search_applied(_GmailSearchPage(), config)[0] is True
+    applied, route = _mail_search_applied(_GmailSearchPage(fragment="inbox"), config)
+
+    assert applied is False
+    assert route == "inbox"
+
+
+def test_mail_search_route_falls_back_to_the_applied_query_in_gmail_search_box():
+    """Gmail may keep its usual route while the submitted query is already applied."""
+    page = _GmailSearchBoxPage(query='in:anywhere is:unread subject:"Confirm your subscription"')
+    applied, route = _mail_search_applied(page, {"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription"})
+
+    assert applied is True
+    assert route == "inbox"
+
+    # A different query in the box says nothing about this subject.
+    other = _GmailSearchBoxPage(query="in:anywhere is:unread")
+    assert _mail_search_applied(other, {"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription"})[0] is False
+
+    # With no route at all the applied query in the box is the only signal.
+    applied, route = _mail_search_applied(_GmailSearchBoxPage(query='in:anywhere is:unread subject:"Confirm your subscription"', fragment=""), {"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription"})
+
+    assert (applied, route) == (True, "search-box")
+
+
+def test_mail_confirmation_review_does_not_scan_the_mailbox_while_gmail_is_still_on_it():
+    """The rows of the mailbox Gmail was on must not be read as search results."""
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-route",
+        "profile-review-route",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 3},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    inbox = _GmailSearchPage(fragment="inbox")
+    rows = MagicMock(return_value=[{"key": "gmail:inbox-row", "href": "#inbox/inbox-row"}])
+
+    with patch("app.observer._mail_review_candidate_rows", rows), patch("app.observer._mail_search_list_status", return_value={"visible_rows": 12, "no_results": False}):
+        for _ in range(_MAIL_REVIEW_ROUTE_WAIT_TICKS - 1):
+            _mail_collect_review_candidates(observer, inbox, observer.mail_workflow)
+            assert observer._mail_review_candidates == []
+            assert observer._mail_review_collection_ticks == 0
+            assert observer._mail_review_collection_done is False
+            assert observer._stop.is_set() is False
+            assert rows.call_count == 0
+
+        _mail_collect_review_candidates(observer, inbox, observer.mail_workflow)
+
+    assert rows.call_count == 0
+    assert observer._stop.is_set()
+    assert [event for event, _detail, _result, _metadata in events][-1] == "mail.failed"
+    assert "did not open a result list" in events[-1][1]
+    assert events[-1][3]["search_route"] == "inbox"
+
+    # Gmail finally leaves the mailbox, so the same run collects from the results.
+    observer._stop.clear()
+    with patch("app.observer._mail_review_candidate_rows", return_value=[{"key": "gmail:thread-one", "href": "#all/thread-one"}]), patch("app.observer._mail_search_list_status", return_value={"visible_rows": 4, "no_results": False}):
+        _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+
+    assert [candidate["key"] for candidate in observer._mail_review_candidates] == ["gmail:thread-one"]
+    assert observer._mail_review_collection_done is True
+
+
+def test_mail_confirmation_review_ignores_a_transient_empty_search_result_list():
+    """Gmail can render the empty state while the previous list is still visible."""
+    events: list[tuple[str, str, str, dict | None]] = []
+    observer = BrowserObserver(
+        "mail-review-transient",
+        "profile-review-transient",
+        9222,
+        purpose="mail",
+        mail_workflow={"action": "confirmation_review", "review_mode": "queue", "subject": "Confirm your subscription", "max_messages": 3},
+        report_event=lambda _session, event, detail, result, metadata=None: events.append((event, detail, result, metadata)),
+    )
+    status = {"visible_rows": 5, "no_results": True}
+    rows: list[dict[str, str]] = []
+
+    with patch("app.observer._mail_review_candidate_rows", side_effect=lambda _page, _config: list(rows)), patch("app.observer._mail_search_list_status", side_effect=lambda _page: dict(status)), patch("app.observer._mail_review_scroll_results", return_value=False):
+        for tick in range(1, _MAIL_REVIEW_MIN_COLLECTION_TICKS):
+            # The real result list renders while the run is still waiting.
+            if tick == 3:
+                status["no_results"] = False
+                rows.append({"key": "gmail:thread-one", "href": "#all/thread-one"})
+            _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+            assert observer._mail_review_collection_done is False
+            assert observer._stop.is_set() is False
+
+        _mail_collect_review_candidates(observer, _GmailSearchPage(), observer.mail_workflow)
+
+    assert observer._mail_review_collection_done is True
+    assert observer._stop.is_set() is False
+    assert [candidate["key"] for candidate in observer._mail_review_candidates] == ["gmail:thread-one"]
+    assert [event for event, _detail, _result, _metadata in events] == ["mail.candidates_collected"]
+    assert events[-1][3]["result_list_settled"] is False
+
+
+def test_mail_reply_does_not_require_a_scrollable_thread_before_scanning_reply():
+    class _ReplyControl(_FakeButton):
+        def is_visible(self, timeout: int = 300) -> bool:
+            return True
+
+        def get_attribute(self, name: str):
+            return "Reply" if name in {"aria-label", "data-tooltip"} else None
+
+    class _ShortThreadPage:
+        def __init__(self):
+            self.control = _ReplyControl("Reply")
+
+        def locator(self, selector: str):
+            if '[role="button"]' in selector:
+                return _FakeLocator([self.control])
+            return _FakeLocator([])
+
+        def evaluate(self, _script: str):
+            return False
+
+    page = _ShortThreadPage()
+
+    assert _mail_reply_surface_ready(page) is True  # type: ignore[arg-type]
+    assert _mail_scroll_reply_thread(page) is True  # type: ignore[arg-type]
+
+
+def test_mail_reply_does_not_treat_a_generic_sent_label_as_delivery_confirmation():
+    page = _FakePage("https://mail.google.com/mail/u/0/#inbox", text="Sent")
+
+    assert _mail_action_confirmation_visible(page, "reply") is False
+
+
+def test_mail_reply_fill_retries_with_trusted_typing_after_editor_rerender():
+    class _RerenderingEditor:
+        def __init__(self):
+            self.value = ""
+
+        def is_visible(self, timeout: int = 300) -> bool:
+            return True
+
+        def fill(self, _value: str, timeout: int = 1500):
+            # Simulate Gmail replacing the contenteditable immediately after
+            # Playwright fill() dispatches its input event.
+            self.value = ""
+
+        def click(self, timeout: int = 1200):
+            return None
+
+        def press(self, _key: str, timeout: int = 1200):
+            if _key == "Backspace":
+                self.value = ""
+
+        def type(self, value: str, delay: int = 5, timeout: int = 5000):
+            self.value = value
+
+        def inner_text(self, timeout: int = 800) -> str:
+            return self.value
+
+    class _EditorPage:
+        def __init__(self):
+            self.editor = _RerenderingEditor()
+
+        def locator(self, selector: str):
+            if "contenteditable" in selector:
+                return _FakeLocator([self.editor])
+            return _FakeLocator([])
+
+    page = _EditorPage()
+
+    assert _mail_fill_reply(page, "The reply survived the Gmail re-render.") is True  # type: ignore[arg-type]
+    assert page.editor.value == "The reply survived the Gmail re-render."
+
+
+def test_mail_reply_send_accepts_gmail_data_tooltip_text_variant():
+    class _SendControl(_FakeButton):
+        def is_visible(self, timeout: int = 300) -> bool:
+            return True
+
+        def get_attribute(self, name: str):
+            return "Send" if name == "data-tooltip-text" else None
+
+    class _SendPage:
+        def __init__(self):
+            self.control = _SendControl("")
+
+        def locator(self, _selector: str):
+            return _FakeLocator([self.control])
+
+    page = _SendPage()
+
+    assert _mail_click_reply_send(page) is True  # type: ignore[arg-type]
+    assert getattr(page.control, "clicked", False) is True
+
+
+def test_mail_move_search_scopes_remain_unchanged():
+    assert _mail_subject_query({"action": "spam_to_inbox", "subject": "Invoice"}) == 'in:spam subject:"Invoice"'
+    assert _mail_subject_query({"action": "promotions_to_spam", "subject": "Offer"}) == 'category:promotions subject:"Offer"'
+
+
+def test_account_preferences_prefers_a_picker_popup_over_personal_info_page():
+    personal_info = _FakePage(
+        "https://myaccount.google.com/personal-info",
+        text="Personal info Profile picture",
+    )
+    picker_popup = _FakePage(
+        "about:blank",
+        text="Add profile picture Browse Illustrations See more illustrations",
+    )
+    owner = type("Owner", (), {"pages": [personal_info, picker_popup]})()
+
+    assert _active_page(owner, "account_preferences") is picker_popup  # type: ignore[arg-type]
+
+
+def test_account_preferences_detects_nonsemantic_picker_inside_frame():
+    class _PickerBody:
+        def inner_text(self, timeout: int = 1000):
+            return "Add profile picture Browse Illustrations"
+
+        def locator(self, _selector: str):
+            return _FakeLocator([self])
+
+    class _PickerFrame:
+        frames = []
+
+        def locator(self, selector: str):
+            return _FakeLocator([_PickerBody()]) if selector == "body" else _FakeLocator([])
+
+        def get_by_text(self, _pattern):
+            return _FakeLocator([])
+
+    class _Page:
+        def __init__(self):
+            self.frames = [_PickerFrame()]
+
+        def locator(self, _selector: str):
+            return _FakeLocator([])
+
+        def get_by_text(self, _pattern):
+            return _FakeLocator([])
+
+    root = _visible_picker_root(_Page(), r"browse illustrations|add profile picture")  # type: ignore[arg-type]
+
+    assert root is not None
+
+
+def test_profile_illustration_selection_uses_image_tile_not_carousel_button(monkeypatch):
+    class _Tile:
+        def __init__(self):
+            self.clicked = False
+
+        def bounding_box(self):
+            return {"x": 10, "y": 10, "width": 94, "height": 94}
+
+        def get_attribute(self, _name: str):
+            return None
+
+        def locator(self, _selector: str):
+            return _FakeLocator([])
+
+        def click(self, **_kwargs):
+            self.clicked = True
+
+    class _Root:
+        def __init__(self, tile):
+            self.tile = tile
+
+        def inner_text(self):
+            return "Start exploring"
+
+        def locator(self, selector: str):
+            self.selector = selector
+            return _FakeLocator([self.tile])
+
+    tile = _Tile()
+    root = _Root(tile)
+    monkeypatch.setattr("app.observer._visible_picker_root", lambda *_args: root)
+
+    assert _click_random_profile_illustration(object()) is True  # type: ignore[arg-type]
+    assert tile.clicked is True
+    assert "img" in root.selector
+    assert "tabindex" not in root.selector
+    assert "button" not in root.selector
+
+
+def test_account_preferences_profile_save_labels_cover_localized_confirmation():
+    assert "guardar como foto de perfil" in _ACCOUNT_PREFERENCES_PROFILE_SAVE_LABELS
+    assert "save as profile picture" in _ACCOUNT_PREFERENCES_PROFILE_SAVE_LABELS
+    assert "enregistrer comme photo de profil" in _ACCOUNT_PREFERENCES_PROFILE_SAVE_LABELS
+
+
+def test_account_preferences_existing_image_menu_has_localized_illustration_entry():
+    assert "explorez les illustrations" in _ACCOUNT_PREFERENCES_ILLUSTRATION_LABELS
+    assert "explore illustrations" in _ACCOUNT_PREFERENCES_ILLUSTRATION_LABELS
+    assert "changez votre photo de profil" in _ACCOUNT_PREFERENCES_EXISTING_IMAGE_PICKER_MARKERS
+    assert "ilustraciones" in _ACCOUNT_PREFERENCES_PROFILE_PICKER_MARKERS

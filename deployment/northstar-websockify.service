@@ -1,0 +1,18 @@
+[Unit]
+Description=Loopback-only WebSocket gateway for Northstar's embedded desktop
+Requires=northstar-x11vnc.service
+After=northstar-x11vnc.service
+
+[Service]
+Type=simple
+User=northstar
+Group=northstar
+Environment=HOME=/var/lib/northstar
+ExecStart=/usr/bin/websockify 127.0.0.1:6080 127.0.0.1:5900
+Restart=on-failure
+RestartSec=2
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
