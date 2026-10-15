@@ -358,6 +358,37 @@ def test_group_proxy_assignment_replaces_only_selected_group_atomically() -> Non
             assert db.get(GmailAccount, second["id"]).proxy_id == proxy_id
 
 
+def test_group_proxy_assignment_recovers_legacy_proxy_without_inventory_row() -> None:
+    """Older account records remain assignable even before inventory backfill."""
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        first = client.post("/api/v1/accounts/single", json={"email": "proxy-legacy-source@example.com", "password": "secret", "group_id": group_id}).json()
+        second = client.post("/api/v1/accounts/single", json={"email": "proxy-legacy-target@example.com", "password": "secret", "group_id": group_id}).json()
+        assigned = client.post(
+            "/api/v1/proxies/assignments",
+            json={"account_ids": [first["id"]], "proxy": "legacy-user:legacy-pass:198.51.100.123:8080"},
+        )
+        assert assigned.status_code == 200, assigned.text
+        proxy_id = assigned.json()["proxy_id"]
+
+        # Simulate a proxy assignment from before the inventory table existed.
+        with SessionLocal() as db:
+            inventory = db.get(ProxyInventory, proxy_id)
+            assert inventory is not None
+            db.delete(inventory)
+            db.commit()
+
+        response = client.post(
+            f"/api/v1/proxies/{proxy_id}/group-assignments",
+            json={"group_id": group_id, "account_ids": [second["id"]]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["assigned_count"] == 1
+        with SessionLocal() as db:
+            assert db.get(GmailAccount, second["id"]).proxy_id == proxy_id
+            assert db.get(ProxyInventory, proxy_id) is not None
+
+
 def test_scoped_operator_can_assign_unassigned_inventory_only_inside_accessible_group() -> None:
     from unittest.mock import patch
 

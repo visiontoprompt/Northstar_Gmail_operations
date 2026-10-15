@@ -1994,14 +1994,10 @@ def replace_group_proxy_assignments(proxy_id: str, payload: ProxyGroupAssignment
     """Replace one proxy's assignments inside a single authorized account group."""
     _authorize_group(request, payload.group_id, "OPERATOR")
     user = _account_operator(request, db)
-    # Group access is the authorization boundary: inventory endpoints may be
-    # unassigned, but operators can only change mappings in their chosen group.
-    inventory_record = db.scalar(select(ProxyInventory).where(
-        ProxyInventory.id == proxy_id,
-        ProxyInventory.organization_id == settings.demo_org_id,
-    ))
-    if not inventory_record:
-        raise HTTPException(status_code=404, detail="Resource not found")
+    # Legacy account-level proxy records may not have an inventory row yet.
+    # The service validates that the endpoint exists in this organization and
+    # can rebuild its inventory record from an existing encrypted assignment.
+    # Group access remains the authorization boundary for the mutation.
     try:
         label = payload.label if "label" in payload.model_fields_set else _UNSET
         region = payload.region if "region" in payload.model_fields_set else _UNSET
