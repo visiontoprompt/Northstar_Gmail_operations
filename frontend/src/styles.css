@@ -2123,6 +2123,7 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
   .agent-chain-heading .button { align-self: flex-start; }
   .agent-chain-card-header { align-items: flex-start; flex-direction: column; }
 }
+
 /* Slightly increase the agent panel's reading size while keeping its dense form usable. */
 .newsletter-agent-settings > .panel-header h2 { font-size: 19px; }
 .newsletter-agent-settings > .panel-header p { font-size: 12px; }
@@ -2248,4 +2249,28 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-job-progress span, .desktop-account-row, .desktop-session-tab { transition: none; }
+}
+
+/* Browser Desktop scope: keep filters and actions outside the scrolling account list. */
+.desktop-account-rail { height: max(520px, calc(100dvh - 170px)); min-height: 0; max-height: none; }
+.desktop-rail-heading,
+.desktop-group-select,
+.desktop-selection-tools,
+.desktop-account-filters,
+.desktop-list-meta,
+.desktop-launch-controls { flex: 0 0 auto; }
+.desktop-account-list { min-height: 0; flex: 1 1 0; }
+.desktop-account-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; overflow: visible; padding: 0 13px 9px; }
+.desktop-account-filters button { width: 100%; min-width: 0; justify-content: space-between; }
+.desktop-account-filters button span { flex: 0 0 auto; }
+.desktop-bulk-close { display: grid; gap: 8px; padding: 10px; background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface)); border: 1px solid color-mix(in srgb, var(--color-danger) 23%, var(--color-line)); border-radius: 9px; }
+.desktop-bulk-close > div:first-child { display: grid; gap: 3px; }
+.desktop-bulk-close strong { color: var(--color-ink); font-size: 10px; }
+.desktop-bulk-close span, .desktop-bulk-close p { margin: 0; color: var(--color-muted); font-size: 9px; line-height: 1.4; }
+.desktop-bulk-close > button, .desktop-bulk-close > div:last-child { width: 100%; }
+.desktop-bulk-close > div:last-child { display: flex; gap: 7px; }
+.desktop-bulk-close > div:last-child .button { min-width: 0; flex: 1; justify-content: center; }
+@media (max-width: 820px) {
+  .desktop-account-rail { height: auto; max-height: none; min-height: 0; }
+  .desktop-account-list { min-height: 100px; max-height: 38vh; flex: 0 1 auto; }
 }

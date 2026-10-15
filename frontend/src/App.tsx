@@ -27,6 +27,7 @@ import {
   Mail,
   Maximize2,
   Moon,
+  Network,
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
@@ -56,7 +57,7 @@ import { runProxyTestQueue } from "./proxy-test";
 import { api } from "./api";
 import { OvhPage } from "./ovh/OvhPage";
 import { GoDaddyPage } from "./godaddy/GoDaddyPage";
-import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, type DesktopAccountFilter } from "./desktop-contract";
+import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, selectedLiveSessions, type DesktopAccountFilter } from "./desktop-contract";
 
 type Group = { id: string; name: string; description: string | null; capacity: number; account_count: number; ready_count: number; issue_count: number; status: string };
 type EmployeeGroupAccess = { group_id: string; group_name: string; access_level: "VIEWER" | "OPERATOR" | "MANAGER" };
@@ -486,7 +487,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
           {auth.permissions.is_admin && <NavItem active={activeView === "desktop"} icon={<Monitor size={17} />} label="Browser desktop" onClick={() => { setActiveView("desktop"); setMobileNav(false); }} />}
           <NavItem active={activeView === "newsletters"} icon={<Mail size={17} />} label="Newsletters" onClick={() => { setActiveView("newsletters"); setMobileNav(false); }} />
           <NavLabel>Infrastructure</NavLabel>
-          <NavItem active={activeView === "proxies"} icon={<KeyRound size={17} />} label="Proxies" onClick={() => { setActiveView("proxies"); setMobileNav(false); }} />
+          <NavItem active={activeView === "proxies"} icon={<Network size={17} />} label="Proxies" onClick={() => { setActiveView("proxies"); setMobileNav(false); }} />
           {auth.permissions.can_manage_workspace && <NavItem active={activeView === "vps"} icon={<Server size={17} />} label="VPS providers" onClick={() => { setActiveView("vps"); setMobileNav(false); }} />}
           {auth.permissions.can_manage_workspace && <NavItem active={activeView === "godaddy"} icon={<Globe2 size={17} />} label="GoDaddy DNS" onClick={() => { setActiveView("godaddy"); setMobileNav(false); }} />}
           <NavItem active={activeView === "credentials"} icon={<KeyRound size={17} />} label="Credentials" onClick={() => { setActiveView("credentials"); setMobileNav(false); }} />
@@ -902,6 +903,9 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRu
   const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(230, Math.min(380, Number(window.localStorage.getItem("northstar-desktop-inspector-width")) || 280)));
   const [closingSessionId, setClosingSessionId] = useState("");
   const [closeConfirmationSessionId, setCloseConfirmationSessionId] = useState("");
+  const [bulkCloseConfirmation, setBulkCloseConfirmation] = useState(false);
+  const [bulkClosing, setBulkClosing] = useState(false);
+  const [bulkCloseProgress, setBulkCloseProgress] = useState({ completed: 0, total: 0 });
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [concurrency, setConcurrency] = useState(4);
   const [maxConcurrency, setMaxConcurrency] = useState(10);
@@ -924,6 +928,7 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRu
   const inspectedSession = inspectedAccount ? activeByAccount.get(inspectedAccount.id) ?? null : selectedSession;
   const visibleSelectedIds = new Set(filteredAccounts.filter((account) => selectedIds.includes(account.id)).map((account) => account.id));
   const operationTargets = scope === "selected" ? filteredAccounts.filter((account) => visibleSelectedIds.has(account.id)) : filteredAccounts;
+  const selectedOpenSessions = selectedLiveSessions(sessions, new Set(selectedIds), new Set(filteredAccounts.map((account) => account.id)));
 
   useEffect(() => { window.localStorage.setItem("northstar-desktop-accounts-collapsed", String(accountRailCollapsed)); }, [accountRailCollapsed]);
   useEffect(() => { window.localStorage.setItem("northstar-desktop-inspector-open", String(inspectorOpen)); }, [inspectorOpen]);
@@ -1056,6 +1061,36 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRu
     } catch (requestError) { setError((requestError as Error).message || "The browser session could not be closed."); }
     finally { setClosingSessionId(""); }
   };
+  const closeSelectedBrowsers = async () => {
+    if (!bulkCloseConfirmation || !selectedOpenSessions.length || bulkClosing) return;
+    const targets = [...selectedOpenSessions];
+    setBulkClosing(true); setError(""); setNotice("");
+    setBulkCloseProgress({ completed: 0, total: targets.length });
+    let closed = 0;
+    const failures: string[] = [];
+    try {
+      for (const session of targets) {
+        try {
+          await api<Session>(`/api/v1/sessions/${session.id}/close`, { method: "POST" });
+          closed += 1;
+        } catch (requestError) {
+          failures.push(`${session.account_email}: ${(requestError as Error).message || "close failed"}`);
+        }
+        setBulkCloseProgress((current) => ({ ...current, completed: current.completed + 1 }));
+      }
+      setBulkCloseConfirmation(false);
+      if (failures.length) {
+        setError(`Closed ${closed} of ${targets.length} selected browser${targets.length === 1 ? "" : "s"}. ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? `; and ${failures.length - 3} more` : ""}`);
+      } else {
+        setNotice(`Closed all ${closed} selected browser${closed === 1 ? "" : "s"}.`);
+      }
+      try { await loadSessions(); onRefresh(); }
+      catch (requestError) { setError((requestError as Error).message || "The browser list could not refresh after closing sessions."); }
+    } finally {
+      setBulkClosing(false);
+      setBulkCloseProgress({ completed: 0, total: 0 });
+    }
+  };
   const selectAll = () => setSelectedIds((current) => {
     const visibleIds = new Set(filteredAccounts.map((account) => account.id));
     const allVisibleSelected = filteredAccounts.length > 0 && filteredAccounts.every((account) => current.includes(account.id));
@@ -1098,7 +1133,7 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRu
           {!loading && !filteredAccounts.length && <div className="desktop-list-state">{accounts.length ? "No accounts match this search." : "This group has no accounts."}</div>}
           {displayedAccounts.length < filteredAccounts.length && <button type="button" className="desktop-load-more" onClick={() => setVisibleAccountLimit((limit) => Math.min(filteredAccounts.length, limit + 100))}>Load 100 more · {filteredAccounts.length - displayedAccounts.length} remaining</button>}
         </div>
-        <div className="desktop-launch-controls"><div className="desktop-operation-heading"><div><span className="detail-label">SCOPED ACTION</span><strong>Choose an operation for this scope</strong></div><span>{operationTargets.length} accounts</span></div><label htmlFor="desktop-operation">Operation</label><select id="desktop-operation" value={operation} onChange={(event) => setOperation(event.target.value as RegistryAction)}><option value="login">Open browser sessions</option><option value="security">Browser security</option><option value="labels">Labels &amp; markers</option><option value="addons">Add-ons</option><option value="alerts">Google Alerts</option><option value="preferences">Account preferences</option><option value="mail">Mail workflow</option><option value="contacts">Import contacts</option><option value="apps">Google apps</option></select><div className="desktop-operation-row"><label htmlFor="desktop-scope">Apply to</label><select id="desktop-scope" value={scope} onChange={(event) => setScope(event.target.value as "selected" | "filtered")}><option value="selected">Selected accounts ({visibleSelectedIds.size})</option><option value="filtered">All filtered accounts ({filteredAccounts.length})</option></select></div>{operation === "login" && <label className="desktop-concurrency-label" htmlFor="desktop-concurrency">Sessions at a time</label>}{operation === "login" && <select id="desktop-concurrency" className="desktop-concurrency-select" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>{Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}</select>}<button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation()} disabled={launching || !operationTargets.length} aria-busy={launching}>{launching ? <span className="button-spinner" /> : operation === "login" ? <Play size={15} /> : <ArrowRight size={15} />}{launching ? "Starting…" : operation === "login" ? `Start ${operationTargets.length || "selected"} session${operationTargets.length === 1 ? "" : "s"}` : `Configure ${labelStatus(operation)}`}</button><small>{operation === "login" ? "Running browsers share the server desktop. Queue concurrency is capped by workspace policy." : "This opens the existing operation setup with the exact account scope shown above."}</small></div>
+        <div className="desktop-launch-controls">{(selectedOpenSessions.length > 0 || bulkClosing) && <section className="desktop-bulk-close" aria-label="Close selected browser sessions"><div><strong>{bulkClosing ? `Closing selected browsers · ${bulkCloseProgress.completed} of ${bulkCloseProgress.total}` : "Open browsers in selection"}</strong><span>{bulkClosing ? "Closing each selected window safely in sequence." : `${selectedOpenSessions.length} selected account${selectedOpenSessions.length === 1 ? "" : "s"} have a live browser.`}</span></div>{bulkCloseConfirmation ? <><p>Close Chrome for these selected accounts? Other browser windows stay open.</p><div><button type="button" className="button secondary small" onClick={() => setBulkCloseConfirmation(false)} disabled={bulkClosing}>Cancel</button><button type="button" className="button danger small" onClick={() => void closeSelectedBrowsers()} disabled={bulkClosing} aria-busy={bulkClosing}>{bulkClosing ? <span className="button-spinner" /> : <Power size={13} />}{bulkClosing ? `Closing ${bulkCloseProgress.completed}/${bulkCloseProgress.total}…` : `Confirm close (${selectedOpenSessions.length})`}</button></div></> : <button type="button" className="button danger small" onClick={() => setBulkCloseConfirmation(true)}><Power size={14} />Close selected browsers ({selectedOpenSessions.length})</button>}</section>}<div className="desktop-operation-heading"><div><span className="detail-label">SCOPED ACTION</span><strong>Choose an operation for this scope</strong></div><span>{operationTargets.length} accounts</span></div><label htmlFor="desktop-operation">Operation</label><select id="desktop-operation" value={operation} onChange={(event) => setOperation(event.target.value as RegistryAction)}><option value="login">Open browser sessions</option><option value="security">Browser security</option><option value="labels">Labels &amp; markers</option><option value="addons">Add-ons</option><option value="alerts">Google Alerts</option><option value="preferences">Account preferences</option><option value="mail">Mail workflow</option><option value="contacts">Import contacts</option><option value="apps">Google apps</option></select><div className="desktop-operation-row"><label htmlFor="desktop-scope">Apply to</label><select id="desktop-scope" value={scope} onChange={(event) => setScope(event.target.value as "selected" | "filtered")}><option value="selected">Selected accounts ({visibleSelectedIds.size})</option><option value="filtered">All filtered accounts ({filteredAccounts.length})</option></select></div>{operation === "login" && <label className="desktop-concurrency-label" htmlFor="desktop-concurrency">Sessions at a time</label>}{operation === "login" && <select id="desktop-concurrency" className="desktop-concurrency-select" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>{Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}</select>}<button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation()} disabled={launching || !operationTargets.length} aria-busy={launching}>{launching ? <span className="button-spinner" /> : operation === "login" ? <Play size={15} /> : <ArrowRight size={15} />}{launching ? "Starting…" : operation === "login" ? `Start ${operationTargets.length || "selected"} session${operationTargets.length === 1 ? "" : "s"}` : `Configure ${labelStatus(operation)}`}</button><small>{operation === "login" ? "Running browsers share the server desktop. Queue concurrency is capped by workspace policy." : "This opens the existing operation setup with the exact account scope shown above."}</small></div>
         </>}
       </aside>
       <div className="desktop-main">

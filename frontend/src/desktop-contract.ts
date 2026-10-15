@@ -8,6 +8,22 @@ export type DesktopAccountSummary = {
 
 export type DesktopAccountCounts = Record<DesktopAccountFilter, number>;
 
+export type DesktopLiveSession = { id: string; account_id: string; browser_alive?: boolean };
+
+/** Return at most one live browser per selected account inside the visible group/filter scope. */
+export function selectedLiveSessions<T extends DesktopLiveSession>(
+  sessions: readonly T[],
+  selectedAccountIds: ReadonlySet<string>,
+  eligibleAccountIds: ReadonlySet<string>,
+): T[] {
+  const seenAccounts = new Set<string>();
+  return sessions.filter((session) => {
+    if (!session.browser_alive || !selectedAccountIds.has(session.account_id) || !eligibleAccountIds.has(session.account_id) || seenAccounts.has(session.account_id)) return false;
+    seenAccounts.add(session.account_id);
+    return true;
+  });
+}
+
 export function searchDesktopAccounts<T extends DesktopAccountSummary>(accounts: T[], query: string): T[] {
   const normalized = query.trim().toLocaleLowerCase();
   return normalized ? accounts.filter((account) => account.email.toLocaleLowerCase().includes(normalized)) : accounts;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts } from "./desktop-contract";
+import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, selectedLiveSessions } from "./desktop-contract";
 
 const accounts = [
   { id: "a1", email: "anna@example.com", login_status: "AUTHENTICATED" },
@@ -28,5 +28,15 @@ describe("Browser Desktop account scope", () => {
     expect(canRunDesktopOperation("addons", [accounts[0]])).toBe(true);
     expect(canRunDesktopOperation("addons", [accounts[0], accounts[1]])).toBe(false);
     expect(canRunDesktopOperation("mail", [])).toBe(false);
+  });
+
+  it("closes only one live browser per selected account inside the current visible scope", () => {
+    const sessions = [
+      { id: "s1", account_id: "a1", browser_alive: true },
+      { id: "s1-old", account_id: "a1", browser_alive: true },
+      { id: "s2", account_id: "a2", browser_alive: false },
+      { id: "s3", account_id: "a3", browser_alive: true },
+    ];
+    expect(selectedLiveSessions(sessions, new Set(["a1", "a2", "a3"]), new Set(["a1", "a2"]))).toEqual([sessions[0]]);
   });
 });
