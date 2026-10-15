@@ -13,7 +13,7 @@ from datetime import timedelta, timezone
 from logging import getLogger
 from pathlib import Path
 
-from sqlalchemy import func, nullslast, or_, select, update
+from sqlalchemy import and_, func, not_, nullslast, or_, select, update
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import get_settings
@@ -565,12 +565,14 @@ def import_accounts(db: Session, organization_id: str, actor_id: str, group_id: 
 
 def account_response(account: GmailAccount) -> dict:
     # Profile authentication is the durable source of truth for a saved
-    # account. Older sessions can leave the denormalized login flag at
-    # REQUIRED, so reconcile that stale value at the API boundary unless a
-    # fresh login session is currently open.
+    # account. Older sessions can leave the denormalized login flag stale, so
+    # reconcile it at the API boundary even while a browser is currently open.
     login_status = account.login_status
     profile = account.browser_profile
-    if login_status in {"NOT_STARTED", "REQUIRED"} and profile and profile.authenticated_at and not profile.active_session_id:
+    # The authentication timestamp records durable proof that this profile has
+    # completed sign-in. Keep that proof effective while the profile is open;
+    # closing the browser must not be what changes the account's login status.
+    if login_status in {"NOT_STARTED", "REQUIRED"} and profile and profile.authenticated_at:
         login_status = "AUTHENTICATED"
     profile_status = "SAVED" if profile and profile.authenticated_at and not profile.active_session_id else account.profile_status
     proxy_endpoint = None
@@ -595,15 +597,16 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
     if group_id:
         filters.append(GmailAccount.group_id == group_id)
     scope = list(filters)
+    profile_has_auth = GmailAccount.browser_profile.has(BrowserProfile.authenticated_at.is_not(None))
     if status:
         if status == "AUTHENTICATED":
-            filters.append(or_(GmailAccount.login_status == "AUTHENTICATED", (GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]) & (GmailAccount.profile_status == "SAVED"))))
+            filters.append(or_(GmailAccount.login_status == "AUTHENTICATED", and_(GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]), profile_has_auth)))
         elif status == "NONEXISTENT":
             filters.append(GmailAccount.login_status.in_(["NONEXISTENT", "ACCOUNT_NOT_FOUND"]))
         elif status == "VERIFICATION_REQUIRED":
             filters.append(GmailAccount.login_status == "VERIFICATION_REQUIRED")
         elif status == "NEVER_LOGGED_IN":
-            filters.append(GmailAccount.login_status == "NOT_STARTED")
+            filters.append(and_(GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]), not_(profile_has_auth)))
         elif status == "NEEDS_ATTENTION":
             filters.append(or_(GmailAccount.readiness_status == "SETUP_ERROR", GmailAccount.login_status.in_(["NONEXISTENT", "ACCOUNT_NOT_FOUND", "VERIFICATION_REQUIRED", "NEEDS_ATTENTION", "UNKNOWN_PAGE"])))
         elif status in {"NOT_STARTED", "REQUIRED", "ACCOUNT_NOT_FOUND", "VERIFICATION_REQUIRED", "UNKNOWN_PAGE"}:
@@ -611,7 +614,8 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
         else:
             filters.append(GmailAccount.readiness_status == status)
     count_for = lambda extra: int(db.scalar(select(func.count(GmailAccount.id)).join(AccountGroup).where(*scope, *extra)) or 0)
-    authenticated = or_(GmailAccount.login_status == "AUTHENTICATED", (GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]) & (GmailAccount.profile_status == "SAVED")))
+    authenticated = or_(GmailAccount.login_status == "AUTHENTICATED", and_(GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]), profile_has_auth))
+    never_logged_in = and_(GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]), not_(profile_has_auth))
     attention = or_(GmailAccount.readiness_status == "SETUP_ERROR", GmailAccount.login_status.in_(["NONEXISTENT", "ACCOUNT_NOT_FOUND", "VERIFICATION_REQUIRED", "NEEDS_ATTENTION", "UNKNOWN_PAGE"]))
     status_counts = {
         "ALL": count_for([]),
@@ -621,7 +625,7 @@ def list_accounts(db: Session, organization_id: str, q: str | None, group_id: st
         "NEEDS_ATTENTION": count_for([attention]),
         "NONEXISTENT": count_for([GmailAccount.login_status.in_(["NONEXISTENT", "ACCOUNT_NOT_FOUND"])]),
         "VERIFICATION_REQUIRED": count_for([GmailAccount.login_status == "VERIFICATION_REQUIRED"]),
-        "NEVER_LOGGED_IN": count_for([GmailAccount.login_status == "NOT_STARTED"]),
+        "NEVER_LOGGED_IN": count_for([never_logged_in]),
     }
     total = db.scalar(select(func.count(GmailAccount.id)).join(AccountGroup).where(*filters)) or 0
     items = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).join(AccountGroup).where(*filters).order_by(GmailAccount.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).unique().all()

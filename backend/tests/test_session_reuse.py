@@ -46,6 +46,29 @@ def test_login_completion_saves_profile_for_later_reopen(monkeypatch) -> None:
         assert payload["profile_saved"] is True
         assert payload["profile_authenticated_at"] is not None
 
+        # A legacy/stale denormalized account status must not hide durable
+        # profile authentication while the browser session is still open.
+        from app.db import SessionLocal
+        from app.models import GmailAccount
+
+        db = SessionLocal()
+        try:
+            row = db.get(GmailAccount, account["id"])
+            row.login_status = "NOT_STARTED"
+            db.commit()
+        finally:
+            db.close()
+
+        active_detail = client.get(f"/api/v1/accounts/{account['id']}").json()
+        assert active_detail["login_status"] == "AUTHENTICATED"
+        active_list = client.get("/api/v1/accounts").json()
+        assert active_list["status_counts"]["AUTHENTICATED"] == 1
+        assert active_list["status_counts"]["NEVER_LOGGED_IN"] == 0
+        authenticated = client.get("/api/v1/accounts", params={"status": "AUTHENTICATED"}).json()
+        assert [item["id"] for item in authenticated["items"]] == [account["id"]]
+        never_logged = client.get("/api/v1/accounts", params={"status": "NEVER_LOGGED_IN"}).json()
+        assert never_logged["items"] == []
+
         detail = client.get(f"/api/v1/accounts/{account['id']}").json()
         assert detail["profile"]["status"] == "SAVED"
 
