@@ -8,11 +8,10 @@ machinery can be exercised without a live server.
 from __future__ import annotations
 
 import redis
-import fakeredis
 
 from ..config import get_settings
 
-_server: fakeredis.FakeServer | None = None
+_server: object | None = None
 _client: redis.Redis | None = None
 
 # Key namespace shared across the worker infrastructure.
@@ -23,6 +22,10 @@ def _build_client() -> redis.Redis:
     global _server
     settings = get_settings()
     if settings.redis_url.startswith("fakeredis"):
+        # Fakeredis is a development/test extra, so keep it out of the
+        # production import path when the app uses the real Redis service.
+        import fakeredis
+
         _server = fakeredis.FakeServer()
         return fakeredis.FakeRedis(server=_server, decode_responses=True)
     return redis.Redis.from_url(settings.redis_url, decode_responses=True)
