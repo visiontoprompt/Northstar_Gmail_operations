@@ -201,7 +201,11 @@ if [[ "$BOOTSTRAP_NEEDED" == true ]]; then
   runuser -u northstar -- sh -c 'set -a; . /etc/northstar/northstar.env; set +a; cd /opt/northstar/backend && .venv/bin/python -c "from sqlalchemy import select; from app.config import get_settings; from app.db import SessionLocal; from app.models import WorkspaceSettings; from app.service import get_workspace_settings; cfg=get_settings(); db=SessionLocal(); get_workspace_settings(db, cfg.demo_org_id); row=db.scalar(select(WorkspaceSettings).where(WorkspaceSettings.organization_id==cfg.demo_org_id)); row.default_login_concurrency=5; row.max_concurrent_operations=10; row.max_active_profiles=10; db.commit(); db.close()"'
 fi
 
-systemctl enable --now northstar
+systemctl enable northstar
+# The unit may already be active during an in-place upgrade. `enable --now`
+# does not reload the Python process in that case, leaving stale application
+# code in memory after rsync has installed the new checkout.
+systemctl restart northstar
 systemctl reload nginx
 SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')"
 if [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then ufw allow "${SSH_PORT}/tcp"; else ufw allow OpenSSH || ufw allow 22/tcp; fi
