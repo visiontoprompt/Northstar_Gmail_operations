@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 import app.backup as backup
+import app.backup_progress as backup_progress
 from app.backup import BackupError, _decrypt_file, _encrypt_file, _from_json_value, _json_value
 from app.models import Organization
 
@@ -52,6 +53,15 @@ def test_database_json_tags_round_trip_datetime_and_binary():
     assert _from_json_value(_json_value(value)) == value
 
 
+def test_backup_progress_is_scoped_to_its_administrator():
+    backup_progress.begin("test-progress-id", "admin-one", "download")
+    backup_progress.update("test-progress-id", "Exporting database tables", 2, 4)
+    assert backup_progress.get("test-progress-id", "admin-one")["percent"] == 50
+    assert backup_progress.get("test-progress-id", "admin-two") is None
+    backup_progress.finish("test-progress-id", True)
+    assert backup_progress.get("test-progress-id", "admin-one")["state"] == "complete"
+
+
 def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Path, monkeypatch):
     source_engine = create_engine(f"sqlite:///{tmp_path / 'source.db'}")
     target_engine = create_engine(f"sqlite:///{tmp_path / 'target.db'}")
@@ -68,14 +78,18 @@ def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Pa
     monkeypatch.setattr(backup, "get_settings", lambda: settings)
     with source_engine.begin() as connection:
         connection.execute(Organization.__table__.insert().values(id="org-source", name="Source", created_at=datetime(2026, 10, 15, tzinfo=timezone.utc)))
-    archive = backup.create_backup("a-long-and-safe-passphrase")
+    measured: list[tuple[str, int | None, int | None]] = []
+    archive = backup.create_backup("a-long-and-safe-passphrase", progress=lambda stage, done, total: measured.append((stage, done, total)))
+    assert any(stage == "Exporting database tables" and done == total for stage, done, total in measured)
+    assert any(stage == "Encrypting archive" and done == total for stage, done, total in measured)
     settings.profile_root = str(target_profile)
     with target_engine.begin() as connection:
             connection.execute(Organization.__table__.insert().values(id="org-target", name="Target", created_at=datetime(2026, 10, 15, tzinfo=timezone.utc)))
     try:
         with Session(target_engine, expire_on_commit=False) as session:
-            restored = backup.restore_backup(archive, "a-long-and-safe-passphrase", session, actor_id="admin-test", safety_backup_name="safety-test.nstar")
+            restored = backup.restore_backup(archive, "a-long-and-safe-passphrase", session, actor_id="admin-test", safety_backup_name="safety-test.nstar", progress=lambda stage, done, total: measured.append((stage, done, total)))
             assert restored["table_count"] == len(backup.Base.metadata.tables)
+            assert any(stage == "Restoring database tables" and done == total for stage, done, total in measured)
         with Session(target_engine) as session:
             assert [item.id for item in session.scalars(select(Organization)).all()] == ["org-source"]
         assert (target_profile / "profile-a" / "Preferences").read_text(encoding="utf-8") == "saved-profile"

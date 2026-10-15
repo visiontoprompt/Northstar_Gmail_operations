@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .config import get_settings
 from .backup import BackupError, MAX_UPLOAD_BYTES, create_backup, restore_backup, validate_backup_file
+from . import backup_progress
 from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountTagsUpdate, AccountPreferencesApplyRequest, AccountPreferencesResponse, AccountPreferencesUpdate, AccountResponse, AccountStructuredInput, AlertTopicResponse, AlertsOperationRequest, AuthStatusResponse, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialChangePlanConfirm, CredentialChangePlanCreate, CredentialChangePlanResponse, CredentialPlaintextResponse, CredentialRecordListResponse, CredentialRevisionResponse, CredentialRotateResponse, CredentialUpdate, EmployeeAuthResponse, EmployeeCreate, EmployeeGroupAccessResponse, EmployeeGroupAccessUpdate, EmployeeIdentityResponse, EmployeeLoginRequest, EmployeePasswordSet, EmployeePermissionsResponse, EmployeeResponse, EmployeeUpdate, GroupCreate, GroupMoveRequest, GroupResponse, GroupUpdate, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, MailWorkflowRequest, NewsletterAccountIdentityResponse, NewsletterAccountIdentityUpdate, NewsletterAccountTargetsRequest, NewsletterBulkDiscoveryResponse, NewsletterCatalogImportResponse, NewsletterConfirmationTestRequest, NewsletterConfirmationTestResponse, NewsletterCreate, NewsletterDirectorySeedResponse, NewsletterDiscoveryResponse, NewsletterGroupCreate, NewsletterGroupResponse, NewsletterGroupUpdate, NewsletterHealthResponse, NewsletterIdentityGenerateRequest, NewsletterIdentityGenerateResponse, NewsletterJobBulkDelete, NewsletterJobCreate, NewsletterJobListResponse, NewsletterJobResponse, NewsletterJobTaskSelection, NewsletterProfileCreate, NewsletterProfileDetailResponse, NewsletterProfileResponse, NewsletterProfileUpdate, NewsletterRediscoveryResponse, NewsletterResponse, NewsletterSkillResponse, NewsletterSignupTestRequest, NewsletterSignupTestResponse, NewsletterSubscriptionListResponse, NewsletterSubscriptionResponse, NewsletterUpdate, NotificationTestRequest, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, PasswordResetConfirm, PasswordResetRequest, ProxyAssignmentRequest, ProxyBulkImportRequest, ProxyBulkImportResponse, ProxyDeleteRequest, ProxyGroupAssignmentRequest, ProxyGroupDistributionRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest, WorkspaceSettingsResponse, WorkspaceSettingsUpdate
@@ -584,17 +585,30 @@ def save_workspace_settings(payload: WorkspaceSettingsUpdate, request: Request, 
     return get_workspace_settings(db, settings.demo_org_id)
 
 
+@app.get("/api/v1/backups/progress/{operation_id}")
+def workspace_backup_progress(operation_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    admin = _admin(request, db)
+    progress = backup_progress.get(operation_id, admin.employee_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail="Backup progress is unavailable.")
+    return progress
+
+
 @app.post("/api/v1/backups")
-def download_workspace_backup(request: Request, passphrase: str = Form(...), db: Session = Depends(get_db)) -> FileResponse:
+def download_workspace_backup(request: Request, passphrase: str = Form(...), operation_id: str | None = Form(None), db: Session = Depends(get_db)) -> FileResponse:
     admin = _admin(request, db)
     _require_backup_quiescence(db)
     if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another backup or restore operation is already running.")
+    if operation_id:
+        backup_progress.begin(operation_id, admin.employee_id, "download")
     try:
-        archive = create_backup(passphrase)
+        archive = create_backup(passphrase, progress=lambda stage, done, total: backup_progress.update(operation_id, stage, done, total))
     except BackupError as exc:
+        backup_progress.finish(operation_id, False)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        backup_progress.finish(operation_id, False)
         logger.error("Workspace backup generation failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail="The backup could not be generated. Check server storage and database health.") from exc
     finally:
@@ -603,17 +617,22 @@ def download_workspace_backup(request: Request, passphrase: str = Form(...), db:
         db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=settings.demo_org_id, actor_id=admin.employee_id, action="workspace.backup.created", target_type="workspace_backup", target_id="download", result="success", metadata_json={"format_version": 1}))
         db.commit()
     except Exception:
+        backup_progress.finish(operation_id, False)
         shutil.rmtree(archive.parent, ignore_errors=True)
         raise HTTPException(status_code=500, detail="The backup file was prepared, but its audit record could not be saved. Retry the backup.")
+    backup_progress.finish(operation_id, True)
     return FileResponse(archive, media_type="application/octet-stream", filename=f"northstar-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.nstar", background=BackgroundTask(shutil.rmtree, archive.parent, ignore_errors=True))
 
 
 @app.post("/api/v1/backups/restore")
-def restore_workspace_backup(request: Request, file: UploadFile = File(...), passphrase: str = Form(...), db: Session = Depends(get_db)) -> dict:
+def restore_workspace_backup(request: Request, file: UploadFile = File(...), passphrase: str = Form(...), operation_id: str | None = Form(None), db: Session = Depends(get_db)) -> dict:
     admin = _admin(request, db)
     _require_backup_quiescence(db)
     if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another backup or restore operation is already running.")
+    if operation_id:
+        backup_progress.begin(operation_id, admin.employee_id, "restore")
+    progress = lambda stage, done, total: backup_progress.update(operation_id, stage, done, total)
     temporary: Path | None = None
     uploaded: Path | None = None
     safety_archive: Path | None = None
@@ -627,22 +646,27 @@ def restore_workspace_backup(request: Request, file: UploadFile = File(...), pas
                 if total > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="Backup exceeds the 20 GB upload limit.")
                 target.write(chunk)
+                progress("Receiving archive", total, file.size)
         if not total:
             raise HTTPException(status_code=422, detail="Choose a Northstar backup file to restore.")
-        validate_backup_file(uploaded, passphrase)
+        validate_backup_file(uploaded, passphrase, progress=progress)
         # Preserve the current state first, encrypted with the same passphrase.
-        safety_archive = create_backup(passphrase, persistent=True)
-        result = restore_backup(uploaded, passphrase, db, actor_id=admin.employee_id, safety_backup_name=safety_archive.name)
+        safety_archive = create_backup(passphrase, persistent=True, progress=lambda stage, done, total: progress(f"Safety copy · {stage}", done, total))
+        result = restore_backup(uploaded, passphrase, db, actor_id=admin.employee_id, safety_backup_name=safety_archive.name, progress=progress)
         result["safety_backup"] = safety_archive.name
+        backup_progress.finish(operation_id, True)
         return result
     except BackupError as exc:
+        backup_progress.finish(operation_id, False)
         detail = str(exc)
         if safety_archive:
             detail += f" The pre-restore safety snapshot is {safety_archive.name}."
         raise HTTPException(status_code=422, detail=detail) from exc
     except HTTPException:
+        backup_progress.finish(operation_id, False)
         raise
     except Exception as exc:
+        backup_progress.finish(operation_id, False)
         logger.error("Workspace backup restore failed (%s); a safety snapshot may be available", type(exc).__name__)
         snapshot_note = f" Safety snapshot: {safety_archive.name}." if safety_archive else ""
         raise HTTPException(status_code=500, detail=f"Restore failed. The database transaction was rolled back where possible.{snapshot_note}") from exc

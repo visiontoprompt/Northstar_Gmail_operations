@@ -141,7 +141,7 @@ chmod 0750 "$INSTALL_ROOT/deployment/install-ubuntu.sh"
 
 cd "$INSTALL_ROOT/backend"
 /usr/local/bin/uv sync --no-dev --reinstall-package playwright
-"$INSTALL_ROOT/backend/.venv/bin/python" -m compileall -q "$INSTALL_ROOT/backend/app/operator_desktop.py" "$INSTALL_ROOT/backend/app/main.py" || fail "The browser desktop runtime failed its Python compile check."
+"$INSTALL_ROOT/backend/.venv/bin/python" -m compileall -q "$INSTALL_ROOT/backend/app/operator_desktop.py" "$INSTALL_ROOT/backend/app/main.py" "$INSTALL_ROOT/backend/app/backup.py" "$INSTALL_ROOT/backend/app/backup_progress.py" || fail "The application runtime failed its Python compile check."
 PLAYWRIGHT_NODE="$(find "$INSTALL_ROOT/backend/.venv/lib" -path '*/site-packages/playwright/driver/node' -type f -print -quit)"
 [[ -n "$PLAYWRIGHT_NODE" ]] || fail "Playwright's Node driver was not installed into the backend virtual environment."
 # The bundled driver may be extracted without its executable bit on some

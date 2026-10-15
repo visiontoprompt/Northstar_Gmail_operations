@@ -18,7 +18,7 @@ import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -37,6 +37,7 @@ HEADER_SIZE = len(MAGIC) + 1 + 16 + 12
 CHUNK_SIZE = 1024 * 1024
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 MIN_PASSPHRASE_LENGTH = 12
+ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
 class BackupError(ValueError):
@@ -61,19 +62,27 @@ def _encrypt_file(source: Path, destination: Path, passphrase: str) -> None:
         dst.write(encryptor.tag)
 
 
-def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passphrase: str) -> None:
+def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> None:
     """Stream tar contents directly into AES-GCM to avoid a plaintext tar copy."""
     salt, nonce = os.urandom(16), os.urandom(12)
     encryptor = Cipher(algorithms.AES(_passphrase_key(passphrase, salt)), modes.GCM(nonce)).encryptor()
+    # Measure source bytes once so archive progress represents actual bytes handled.
+    if progress:
+        progress("Measuring archive contents", None, None)
+    source_bytes = sum(path.stat().st_size for root in (content, profile_root) if root.exists() for path in root.rglob("*") if path.is_file() and not path.is_symlink())
     with destination.open("wb") as output:
         output.write(MAGIC + bytes([VERSION]) + salt + nonce)
 
         class EncryptedSink:
             written = 0
+            last_reported = 0
 
             def write(self, data: bytes) -> int:
                 output.write(encryptor.update(data))
                 self.written += len(data)
+                if progress and self.written - self.last_reported >= CHUNK_SIZE:
+                    progress("Encrypting archive", min(99, round(self.written * 100 / max(source_bytes, 1))), 100)
+                    self.last_reported = self.written
                 return len(data)
 
             def tell(self) -> int:
@@ -93,9 +102,11 @@ def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passp
                 archive.addfile(empty)
         output.write(encryptor.finalize())
         output.write(encryptor.tag)
+    if progress:
+        progress("Encrypting archive", 1, 1)
 
 
-def _decrypt_file(source: Path, destination: Path, passphrase: str) -> None:
+def _decrypt_file(source: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> None:
     with source.open("rb") as src:
         header = src.read(HEADER_SIZE)
         if len(header) != HEADER_SIZE or header[:len(MAGIC)] != MAGIC or header[len(MAGIC)] != VERSION:
@@ -119,6 +130,8 @@ def _decrypt_file(source: Path, destination: Path, passphrase: str) -> None:
                         raise BackupError("The backup file is incomplete.")
                     remaining -= len(chunk)
                     dst.write(decryptor.update(chunk))
+                    if progress:
+                        progress("Decrypting and authenticating", ciphertext_size - remaining, ciphertext_size)
                 dst.write(decryptor.finalize())
         except Exception:
             destination.unlink(missing_ok=True)
@@ -198,7 +211,7 @@ def _runtime_files(staging: Path) -> dict[str, Any]:
     return {"included": copied}
 
 
-def create_backup(passphrase: str, *, persistent: bool = False) -> Path:
+def create_backup(passphrase: str, *, persistent: bool = False, progress: ProgressCallback | None = None) -> Path:
     """Create and return an encrypted backup file in a temporary directory."""
     _passphrase_key(passphrase, os.urandom(16))  # validate before doing expensive work
     settings = get_settings()
@@ -216,7 +229,7 @@ def create_backup(passphrase: str, *, persistent: bool = False) -> Path:
         }
         tables = list(Base.metadata.sorted_tables)
         with engine.connect() as connection:
-            for table in tables:
+            for index, table in enumerate(tables):
                 target = content / "database" / f"{table.name}.jsonl"
                 count = 0
                 with target.open("w", encoding="utf-8") as output:
@@ -224,9 +237,11 @@ def create_backup(passphrase: str, *, persistent: bool = False) -> Path:
                         output.write(json.dumps(_json_value(dict(row)), separators=(",", ":"), ensure_ascii=False) + "\n")
                         count += 1
                 metadata["tables"].append({"name": table.name, "rows": count})
+                if progress:
+                    progress("Exporting database tables", index + 1, len(tables))
         (content / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         profile_root = Path(settings.profile_root).resolve()
-        _encrypt_archive(content, profile_root, encrypted, passphrase)
+        _encrypt_archive(content, profile_root, encrypted, passphrase, progress)
         if persistent:
             backup_dir = parent / "backups"
             backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -241,11 +256,10 @@ def create_backup(passphrase: str, *, persistent: bool = False) -> Path:
         raise
 
 
-def _safe_extract_profiles(archive: tarfile.TarFile, target: Path) -> None:
+def _safe_extract_profiles(archive: tarfile.TarFile, target: Path, progress: ProgressCallback | None = None) -> None:
     prefix = "northstar/profiles/"
-    for member in archive.getmembers():
-        if not member.name.startswith(prefix):
-            continue
+    members = [member for member in archive.getmembers() if member.name.startswith(prefix)]
+    for index, member in enumerate(members):
         output = _profile_output_path(member, target)
         if member.isdir():
             output.mkdir(parents=True, exist_ok=True)
@@ -258,6 +272,8 @@ def _safe_extract_profiles(archive: tarfile.TarFile, target: Path) -> None:
             with source, output.open("wb") as destination:
                 shutil.copyfileobj(source, destination, length=CHUNK_SIZE)
             output.chmod(0o600)
+        if progress:
+            progress("Restoring browser profiles", index + 1, len(members))
 
 
 def _profile_output_path(member: tarfile.TarInfo, target: Path) -> Path:
@@ -292,12 +308,14 @@ def _validate_database_payload(archive: tarfile.TarFile) -> tuple[dict[str, Any]
     return metadata, known
 
 
-def validate_backup_file(upload: Path, passphrase: str) -> dict[str, Any]:
+def validate_backup_file(upload: Path, passphrase: str, progress: ProgressCallback | None = None) -> dict[str, Any]:
     """Authenticate and check archive structure before any live-state snapshot or mutation."""
     with tempfile.TemporaryDirectory(prefix="northstar-verify-") as temporary:
         plain = Path(temporary) / "payload.tar"
-        _decrypt_file(upload, plain, passphrase)
+        _decrypt_file(upload, plain, passphrase, progress)
         try:
+            if progress:
+                progress("Checking archive contents", None, None)
             with tarfile.open(plain, "r:") as archive:
                 metadata, _ = _validate_database_payload(archive)
                 for member in archive.getmembers():
@@ -308,7 +326,7 @@ def validate_backup_file(upload: Path, passphrase: str) -> dict[str, Any]:
             raise BackupError("The backup archive is incomplete or damaged.") from exc
 
 
-def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str, safety_backup_name: str) -> dict[str, Any]:
+def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str, safety_backup_name: str, progress: ProgressCallback | None = None) -> dict[str, Any]:
     """Verify, then replace application DB/profile data from an archive."""
     staging_root = Path(tempfile.mkdtemp(prefix="northstar-restore-"))
     plain = staging_root / "payload.tar"
@@ -318,12 +336,12 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
     profile_swapped = False
     config_target: Path | None = None
     try:
-        _decrypt_file(upload, plain, passphrase)
+        _decrypt_file(upload, plain, passphrase, progress)
         with tarfile.open(plain, "r:") as archive:
             metadata, tables = _validate_database_payload(archive)
             profile_stage = live_profile.with_name(f".{live_profile.name}.restore-{uuid.uuid4().hex}")
             profile_stage.mkdir(parents=True, exist_ok=False)
-            _safe_extract_profiles(archive, profile_stage)
+            _safe_extract_profiles(archive, profile_stage, progress)
             # Save a secure copy of deployment-managed credentials for recovery.
             # The process does not overwrite /etc files or change its live keys.
             config_target = Path(get_settings().profile_root).resolve().parent / f"restored-deployment-config-{uuid.uuid4().hex[:8]}"
@@ -340,7 +358,7 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
             # The current transaction rolls back all DB changes if any table fails.
             for table in reversed(list(tables.values())):
                 db.execute(delete(table))
-            for table in tables.values():
+            for index, table in enumerate(tables.values()):
                 source = archive.extractfile(f"northstar/database/{table.name}.jsonl")
                 if source is None:
                     continue
@@ -353,6 +371,8 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
                         if not isinstance(row, dict) or not set(row).issubset(allowed):
                             raise BackupError(f"The backup has invalid data for table {table.name}.")
                         db.execute(insert(table).values(**row))
+                if progress:
+                    progress("Restoring database tables", index + 1, len(tables))
             db.add(AuditEvent(
                 id=f"audit_{uuid.uuid4().hex[:18]}",
                 organization_id=get_settings().demo_org_id,
@@ -370,6 +390,8 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
             profile_stage.rename(live_profile)
             profile_swapped = True
             db.commit()
+            if progress:
+                progress("Committing restored workspace", 1, 1)
             shutil.rmtree(displaced_profile, ignore_errors=True)
             return {"restored_at": datetime.now(timezone.utc).isoformat(), "table_count": len(tables), "tables": metadata["tables"], "profile_root_restored": True, "deployment_config_staged": str(config_target)}
     except Exception:

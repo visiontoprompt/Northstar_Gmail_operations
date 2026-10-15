@@ -2374,6 +2374,18 @@ html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"]
 .backup-confirm input { margin-top: 1px; accent-color: var(--color-primary); }
 .backup-security { margin-top: 1px; }
 .backup-security span { line-height: 1.6; }
+.backup-progress { margin: 0 0 18px; padding: 18px 20px; border: 1px solid var(--color-line); border-radius: 14px; background: var(--color-surface); box-shadow: 0 8px 24px rgba(12, 24, 31, .06); }
+.backup-progress-header { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.backup-progress-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 10px; background: color-mix(in srgb, var(--color-primary) 12%, transparent); color: var(--color-primary); }
+.backup-progress-header > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.backup-progress-header strong { font-size: 13px; color: var(--color-ink); }
+.backup-progress-header small { color: var(--color-muted); font-size: 11px; }
+.backup-progress-header b { margin-left: auto; color: var(--color-primary); font-size: 15px; font-variant-numeric: tabular-nums; }
+.backup-progress-track { height: 7px; margin-top: 14px; overflow: hidden; border-radius: 99px; background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); }
+.backup-progress-track > span { display: block; height: 100%; border-radius: inherit; background: var(--color-primary); transition: width .18s ease; }
+.backup-progress-track.indeterminate > span { width: 32%; animation: backup-progress-move 1.3s ease-in-out infinite alternate; }
+.backup-progress > p { margin: 9px 0 0; color: var(--color-muted); font-size: 10px; }
+@keyframes backup-progress-move { from { transform: translateX(-100%); } to { transform: translateX(320%); } }
 .settings-tabs { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 @media (max-width: 1100px) { .settings-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } .backup-grid { grid-template-columns: 1fr; } }
