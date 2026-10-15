@@ -117,7 +117,7 @@ npm install
 npm run dev
 ```
 
-The Vite proxy sends `/api` requests to `http://localhost:8000`.
+The Vite proxy sends `/api` requests to `http://localhost:8000`. Frontend dependency audits also run from this directory with `npm audit`; the npm lockfile is `frontend/package-lock.json`, and there is no root-level npm lockfile.
 
 ## Security boundary
 
