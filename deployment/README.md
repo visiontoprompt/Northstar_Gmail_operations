@@ -58,3 +58,13 @@ sudo systemctl restart northstar
 The OVH page displays job stages and per-proxy outcomes. `Proxy ready` is shown only when all 15 authenticated checks return the corresponding Floating IP as their IPv4 exit address.
 
 To update the application, copy the updated project checkout to the server and rerun the installer. Existing environment values are backed up and retained; the existing database and administrator are not reset. The deployment uses an initial baseline Alembic migration for a fresh database. For a database already containing production data, take and test a backup and compare its schema before using this deployment flow.
+
+## Workspace backup and restore
+
+Administrators can create or restore a workspace backup from **Settings → Backups**. The archive contains every application database table (including encrypted account and provider credentials), the configured browser profile directory, a runtime-secret snapshot, and readable deployment files such as `/etc/northstar/northstar.env` and the configured OpenStack `clouds.yaml`. Deployment secrets are included only inside the encrypted archive.
+
+Each archive uses a passphrase-derived key and AES-256-GCM integrity protection. Use a unique passphrase of at least 12 characters, store it separately from the downloaded `.nstar` file, and keep the file off the application server. The passphrase is never stored by Northstar and cannot be reset. Close browser sessions and wait for active account/newsletter jobs to finish before backup or restore. Allow several times the archive size in free disk space during restore for the uploaded archive, verification, live profiles, and safety snapshot.
+
+Restore replaces the application database and browser profile directory. Before making that change, Northstar creates a safety snapshot encrypted with the same passphrase, retains it under `/var/lib/northstar/backups/`, and downloads it to the browser when the current admin session remains valid. Restore also stages the recovered runtime configuration under `/var/lib/northstar/restored-deployment-config-*/` with owner-only permissions; it does not overwrite live system configuration. On a new server, review and install that configuration securely before starting the restored database. In particular, preserve the source `SECRET_KEY` (or restore the encrypted snapshot of it) so existing encrypted credential records remain decryptable. `clouds.yaml` contains OpenStack credentials and must retain restrictive permissions.
+
+The installer scopes Nginx's 20 GB request limit to the admin-only backup routes; the rest of the API keeps its normal upload limit. Rerun `deployment/install-ubuntu.sh` after updating this release so Nginx receives the backup upload configuration.

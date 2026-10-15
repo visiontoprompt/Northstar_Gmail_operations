@@ -1,19 +1,24 @@
 import uuid
 import secrets
 import logging
+import shutil
+import tempfile
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import threading
 import time
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .config import get_settings
+from .backup import BackupError, MAX_UPLOAD_BYTES, create_backup, restore_backup, validate_backup_file
 from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountTagsUpdate, AccountPreferencesApplyRequest, AccountPreferencesResponse, AccountPreferencesUpdate, AccountResponse, AccountStructuredInput, AlertTopicResponse, AlertsOperationRequest, AuthStatusResponse, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialChangePlanConfirm, CredentialChangePlanCreate, CredentialChangePlanResponse, CredentialPlaintextResponse, CredentialRecordListResponse, CredentialRevisionResponse, CredentialRotateResponse, CredentialUpdate, EmployeeAuthResponse, EmployeeCreate, EmployeeGroupAccessResponse, EmployeeGroupAccessUpdate, EmployeeIdentityResponse, EmployeeLoginRequest, EmployeePasswordSet, EmployeePermissionsResponse, EmployeeResponse, EmployeeUpdate, GroupCreate, GroupMoveRequest, GroupResponse, GroupUpdate, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, MailWorkflowRequest, NewsletterAccountIdentityResponse, NewsletterAccountIdentityUpdate, NewsletterAccountTargetsRequest, NewsletterBulkDiscoveryResponse, NewsletterCatalogImportResponse, NewsletterConfirmationTestRequest, NewsletterConfirmationTestResponse, NewsletterCreate, NewsletterDirectorySeedResponse, NewsletterDiscoveryResponse, NewsletterGroupCreate, NewsletterGroupResponse, NewsletterGroupUpdate, NewsletterHealthResponse, NewsletterIdentityGenerateRequest, NewsletterIdentityGenerateResponse, NewsletterJobBulkDelete, NewsletterJobCreate, NewsletterJobListResponse, NewsletterJobResponse, NewsletterJobTaskSelection, NewsletterProfileCreate, NewsletterProfileDetailResponse, NewsletterProfileResponse, NewsletterProfileUpdate, NewsletterRediscoveryResponse, NewsletterResponse, NewsletterSkillResponse, NewsletterSignupTestRequest, NewsletterSignupTestResponse, NewsletterSubscriptionListResponse, NewsletterSubscriptionResponse, NewsletterUpdate, NotificationTestRequest, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, PasswordResetConfirm, PasswordResetRequest, ProxyAssignmentRequest, ProxyBulkImportRequest, ProxyBulkImportResponse, ProxyDeleteRequest, ProxyGroupAssignmentRequest, ProxyGroupDistributionRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest, WorkspaceSettingsResponse, WorkspaceSettingsUpdate
@@ -74,6 +79,7 @@ from .worker.worker import start_login_worker, stop_login_worker
 from .runtime import focus_local_browser_profile
 
 settings = get_settings()
+_BACKUP_OPERATION_LOCK = threading.Lock()
 
 _AUTH_LIMIT_LOCK = threading.Lock()
 _AUTH_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = {}
@@ -163,6 +169,18 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allo
 
 
 @app.middleware("http")
+async def pause_mutations_during_backup(request: Request, call_next):
+    if (
+        _BACKUP_OPERATION_LOCK.locked()
+        and request.url.path.startswith("/api/v1/")
+        and not request.url.path.startswith("/api/v1/backups")
+        and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+    ):
+        return JSONResponse(status_code=503, headers={"Retry-After": "30"}, content={"detail": "Workspace changes are temporarily paused while an encrypted backup or restore is running. Retry shortly."})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def require_workspace_auth(request: Request, call_next):
     """Resolve the employee session before any workspace API handler runs."""
     if request.method != "OPTIONS" and request.url.path.startswith("/api/v1/") and request.url.path not in {"/api/v1/health", "/api/v1/auth/status", "/api/v1/auth/setup", "/api/v1/auth/login", "/api/v1/auth/password-reset/request", "/api/v1/auth/password-reset/confirm"}:
@@ -204,6 +222,18 @@ def _actor(request: Request, db: Session) -> str:
 
 def _admin(request: Request, db: Session):
     return require_admin(_current_user(request, db))
+
+
+def _require_backup_quiescence(db: Session) -> None:
+    active_session = db.scalar(select(BrowserSession.id).where(BrowserSession.organization_id == settings.demo_org_id, BrowserSession.state.in_(["STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"]), BrowserSession.closed_at.is_(None)).limit(1))
+    if active_session:
+        raise HTTPException(status_code=409, detail="Close all active browser sessions before creating or restoring a backup.")
+    active_login = db.scalar(select(LoginJobItem.id).where(LoginJobItem.organization_id == settings.demo_org_id, LoginJobItem.state == "RUNNING").limit(1))
+    if active_login:
+        raise HTTPException(status_code=409, detail="Wait for running account jobs to finish before creating or restoring a backup.")
+    active_newsletter = db.scalar(select(NewsletterJob.id).where(NewsletterJob.organization_id == settings.demo_org_id, NewsletterJob.status == "RUNNING").limit(1))
+    if active_newsletter:
+        raise HTTPException(status_code=409, detail="Wait for running newsletter jobs to finish before creating or restoring a backup.")
 
 
 def _account_operator(request: Request, db: Session):
@@ -538,6 +568,87 @@ def save_workspace_settings(payload: WorkspaceSettingsUpdate, request: Request, 
     if notification_values:
         update_notification_settings(db, settings.demo_org_id, admin.employee_id, notification_values)
     return get_workspace_settings(db, settings.demo_org_id)
+
+
+@app.post("/api/v1/backups")
+def download_workspace_backup(request: Request, passphrase: str = Form(...), db: Session = Depends(get_db)) -> FileResponse:
+    admin = _admin(request, db)
+    _require_backup_quiescence(db)
+    if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another backup or restore operation is already running.")
+    try:
+        archive = create_backup(passphrase)
+    except BackupError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Workspace backup generation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="The backup could not be generated. Check server storage and database health.") from exc
+    finally:
+        _BACKUP_OPERATION_LOCK.release()
+    try:
+        db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=settings.demo_org_id, actor_id=admin.employee_id, action="workspace.backup.created", target_type="workspace_backup", target_id="download", result="success", metadata_json={"format_version": 1}))
+        db.commit()
+    except Exception:
+        shutil.rmtree(archive.parent, ignore_errors=True)
+        raise HTTPException(status_code=500, detail="The backup file was prepared, but its audit record could not be saved. Retry the backup.")
+    return FileResponse(archive, media_type="application/octet-stream", filename=f"northstar-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.nstar", background=BackgroundTask(shutil.rmtree, archive.parent, ignore_errors=True))
+
+
+@app.post("/api/v1/backups/restore")
+def restore_workspace_backup(request: Request, file: UploadFile = File(...), passphrase: str = Form(...), db: Session = Depends(get_db)) -> dict:
+    admin = _admin(request, db)
+    _require_backup_quiescence(db)
+    if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another backup or restore operation is already running.")
+    temporary: Path | None = None
+    uploaded: Path | None = None
+    safety_archive: Path | None = None
+    try:
+        temporary = Path(tempfile.mkdtemp(prefix="northstar-upload-"))
+        uploaded = temporary / "backup.nstar"
+        total = 0
+        with uploaded.open("wb") as target:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Backup exceeds the 20 GB upload limit.")
+                target.write(chunk)
+        if not total:
+            raise HTTPException(status_code=422, detail="Choose a Northstar backup file to restore.")
+        validate_backup_file(uploaded, passphrase)
+        # Preserve the current state first, encrypted with the same passphrase.
+        safety_archive = create_backup(passphrase, persistent=True)
+        result = restore_backup(uploaded, passphrase, db, actor_id=admin.employee_id, safety_backup_name=safety_archive.name)
+        result["safety_backup"] = safety_archive.name
+        return result
+    except BackupError as exc:
+        detail = str(exc)
+        if safety_archive:
+            detail += f" The pre-restore safety snapshot is {safety_archive.name}."
+        raise HTTPException(status_code=422, detail=detail) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Workspace backup restore failed (%s); a safety snapshot may be available", type(exc).__name__)
+        snapshot_note = f" Safety snapshot: {safety_archive.name}." if safety_archive else ""
+        raise HTTPException(status_code=500, detail=f"Restore failed. The database transaction was rolled back where possible.{snapshot_note}") from exc
+    finally:
+        file.file.close()
+        if temporary:
+            shutil.rmtree(temporary, ignore_errors=True)
+        _BACKUP_OPERATION_LOCK.release()
+
+
+@app.get("/api/v1/backups/safety/{backup_name}")
+def download_restore_safety_backup(backup_name: str, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    _admin(request, db)
+    if not backup_name.startswith("restore-safety-") or not backup_name.endswith(".nstar") or "/" in backup_name or "\\" in backup_name:
+        raise HTTPException(status_code=404, detail="Safety backup not found.")
+    backup_dir = Path(settings.profile_root).resolve().parent / "backups"
+    archive = (backup_dir / backup_name).resolve()
+    if not archive.is_relative_to(backup_dir.resolve()) or not archive.is_file():
+        raise HTTPException(status_code=404, detail="Safety backup not found.")
+    return FileResponse(archive, media_type="application/octet-stream", filename=backup_name)
 
 
 @app.get("/api/v1/infrastructure/ovh")

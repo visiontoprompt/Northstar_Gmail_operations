@@ -2353,3 +2353,28 @@ html[data-theme="dark"] .ovh-recovery-badge { color: #c4d1cb; background: #34423
 html[data-theme="dark"] .ovh-recovery-badge.healthy { color: #9ce3c8; background: #19392e; }
 html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"] .ovh-recovery-badge.wrong_exit_ip, html[data-theme="dark"] .ovh-recovery-badge.failed { color: #ffaaa4; background: #422827; }
 @media (max-width: 640px) { .ovh-recovery-heading { flex-direction: column; } .ovh-recovery-count { align-self: flex-start; } }
+
+/* Admin backup and restore surface */
+.backup-workspace { display: grid; gap: 14px; }
+.backup-intro { display: flex; align-items: center; gap: 12px; padding: 15px 18px; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); }
+.backup-intro > div { flex: 1; min-width: 0; }
+.backup-intro h2, .backup-card h3 { margin: 0; color: var(--color-ink); font-size: 15px; }
+.backup-intro p, .backup-card p { margin: 4px 0 0; color: var(--color-muted); font-size: 11px; line-height: 1.5; }
+.backup-mark, .backup-card-icon { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 11%, var(--color-surface)); border: 1px solid var(--color-line); border-radius: 10px; }
+.backup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.backup-card { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; gap: 13px; padding: 19px; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
+.backup-card-heading { display: flex; align-items: flex-start; gap: 11px; }
+.backup-card-heading > div { min-width: 0; }
+.backup-card .field { width: 100%; margin: 0; }
+.backup-card .field input[type="file"] { max-width: 100%; font-size: 11px; }
+.backup-card .field small, .backup-help { color: var(--color-muted); font-size: 10px; line-height: 1.5; }
+.backup-card .button { min-height: 40px; }
+.backup-card > .button + .button { margin-top: -4px; }
+.backup-confirm { display: flex; align-items: flex-start; gap: 9px; color: var(--color-ink-soft); font-size: 11px; line-height: 1.45; }
+.backup-confirm input { margin-top: 1px; accent-color: var(--color-primary); }
+.backup-security { margin-top: 1px; }
+.backup-security span { line-height: 1.6; }
+.settings-tabs { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .settings-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } .backup-grid { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .settings-tabs { grid-template-columns: 1fr; } .backup-intro { align-items: flex-start; flex-wrap: wrap; } .backup-intro .settings-chip { margin-left: 50px; } }
