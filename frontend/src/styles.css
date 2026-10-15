@@ -2144,11 +2144,16 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 }
 
 /* Browser desktop: panels are independently collapsible so the live display can take the available width. */
-.app-shell.desktop-nav-hidden > .sidebar { display: none; }
 .page-content:has(.browser-desktop-page) { max-width: none; }
+.page-content:has(.browser-desktop-page) { padding: 14px 20px 12px; }
 .browser-desktop-page { width: 100%; }
+.browser-desktop-page { gap: 8px; }
+.browser-desktop-page .page-heading { margin-bottom: 2px; }
+.browser-desktop-page .page-heading h1 { margin-top: 5px; font-size: clamp(25px, 2.3vw, 32px); }
+.browser-desktop-page .page-heading p { max-width: 520px; margin-top: 5px; font-size: 12px; line-height: 1.3; }
 .browser-desktop-page .heading-actions { align-items: center; }
 .desktop-nav-toggle { white-space: nowrap; }
+.browser-desktop-page .desktop-notice { min-height: 36px; padding-block: 5px; }
 .desktop-workspace { grid-template-columns: minmax(265px, 300px) minmax(0, 1fr); gap: 12px; }
 .desktop-workspace.inspector-open { grid-template-columns: minmax(265px, 300px) minmax(0, 1fr) minmax(230px, var(--desktop-inspector-width, 280px)); }
 .desktop-workspace.accounts-collapsed { grid-template-columns: 52px minmax(0, 1fr); }
@@ -2174,6 +2179,8 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 .desktop-run-operation { width: 100%; min-height: 39px; justify-content: center; }
 .desktop-launch-controls { gap: 7px; }
 .desktop-main { min-width: 0; align-self: stretch; }
+.browser-desktop-page .desktop-workspace { align-items: stretch; }
+.browser-desktop-page .desktop-workarea { height: min(850px, max(340px, calc(100dvh - 365px))); min-height: 340px; }
 .desktop-inspector { position: sticky; top: 12px; display: flex; max-height: calc(100vh - 165px); min-width: 0; flex-direction: column; gap: 0; overflow: auto; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
 .desktop-inspector-heading { position: sticky; z-index: 1; top: 0; display: flex; min-height: 61px; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 13px; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
 .desktop-inspector-heading h2 { margin-top: 4px; color: var(--color-ink); font-size: 14px; }
@@ -2230,6 +2237,7 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
   .desktop-workarea { height: min(65vh, 680px); min-height: 360px; }
 }
 @media (max-width: 560px) {
+  .page-content:has(.browser-desktop-page) { padding: 12px 10px; }
   .browser-desktop-page .page-heading { display: block; }
   .browser-desktop-page .heading-actions { margin-top: 13px; }
   .desktop-nav-toggle { flex: 1; }

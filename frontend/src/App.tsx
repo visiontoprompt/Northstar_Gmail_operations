@@ -241,7 +241,6 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [mobileNav, setMobileNav] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("northstar-sidebar-collapsed") === "true");
-  const [desktopNavHidden, setDesktopNavHidden] = useState(() => window.localStorage.getItem("northstar-desktop-nav-hidden") === "true");
   const [activeView, setActiveView] = useState<WorkspaceView>(() => {
     const stored = window.localStorage.getItem("northstar-active-view");
     const views: WorkspaceView[] = ["overview", "accounts", "groups", "employees", "issues", "sessions", "desktop", "proxies", "profiles", "credentials", "newsletters", "vps", "godaddy", "settings"];
@@ -451,8 +450,8 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   useEffect(() => { document.documentElement.dataset.theme = appTheme; window.localStorage.setItem("northstar-app-theme", appTheme); }, [appTheme]);
   useEffect(() => { window.localStorage.setItem("northstar-active-view", activeView); }, [activeView]);
   useEffect(() => { if (!auth.permissions.is_admin && (activeView === "employees" || activeView === "settings" || activeView === "desktop")) setActiveView("overview"); }, [activeView, auth.permissions.is_admin]);
+  useEffect(() => { if (activeView === "desktop") setSidebarCollapsed(true); }, [activeView]);
   useEffect(() => { window.localStorage.setItem("northstar-sidebar-collapsed", String(sidebarCollapsed)); }, [sidebarCollapsed]);
-  useEffect(() => { window.localStorage.setItem("northstar-desktop-nav-hidden", String(desktopNavHidden)); }, [desktopNavHidden]);
   useEffect(() => {
     if (!auth.permissions.is_admin) { setHeaderOvhLinks([]); return; }
     let cancelled = false;
@@ -472,7 +471,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const ovhPowerKind = (status: string) => { const value = status.toUpperCase(); return ["RUNNING", "ACTIVE", "ENABLED", "STARTED"].includes(value) ? "on" : ["STOPPED", "OFF", "SHUTOFF", "HALTED", "SHELVED", "SUSPENDED"].includes(value) ? "off" : "unknown"; };
 
   return (
-    <div className={`app-shell${activeView === "desktop" && desktopNavHidden ? " desktop-nav-hidden" : ""}`}>
+    <div className="app-shell">
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="Primary navigation">
         <div className="brand-lockup"><div className="brand-mark"><Layers3 size={18} /></div><div className="brand-copy"><strong>Northstar</strong><span>Gmail operations</span></div><button type="button" className="sidebar-collapse-toggle" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}>{sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button></div>
         <nav className="nav-groups">
@@ -506,7 +505,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
           {activeView === "groups" && <GroupsPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenGroup={(groupId) => { setSelectedGroup(groupId); setActiveView("accounts"); }} onNotify={notify} />}
           {activeView === "employees" && auth.permissions.is_admin && <EmployeesPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onNotify={notify} />}
           {activeView === "issues" && <IssuesPage refreshKey={refreshKey} onRefresh={reload} onOpenAccount={async (accountId) => { try { setActiveAccount(await api<Account>(`/api/v1/accounts/${accountId}`)); } catch (requestError) { notify("error", (requestError as Error).message); } }} />}
-          {activeView === "desktop" && auth.permissions.is_admin && <BrowserDesktopPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenSession={(session) => setActiveSession(session)} onRunOperation={(kind, targets) => runRegistryAction(kind, targets)} navHidden={desktopNavHidden} onToggleNavigation={() => setDesktopNavHidden((hidden) => !hidden)} />}
+          {activeView === "desktop" && auth.permissions.is_admin && <BrowserDesktopPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenSession={(session) => setActiveSession(session)} onRunOperation={(kind, targets) => runRegistryAction(kind, targets)} navHidden={sidebarCollapsed} onToggleNavigation={() => setSidebarCollapsed((collapsed) => !collapsed)} />}
           {activeView === "settings" && auth.permissions.is_admin && <SettingsPage onNotify={notify} />}
           {activeView === "vps" && auth.permissions.can_manage_workspace && <OvhPage onOpenSettings={() => setActiveView("settings")} onNotify={notify} />}
           {activeView === "godaddy" && auth.permissions.can_manage_workspace && <GoDaddyPage onNotify={notify} />}
@@ -1075,7 +1074,7 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRu
   const currentGroup = groups.find((group) => group.id === groupId);
   const jobCompleted = job?.items.filter((item) => ["SUCCEEDED", "ATTENTION", "FAILED", "CANCELLED"].includes(item.state)).length ?? 0;
   return <div className="browser-desktop-page">
-    <WorkspacePageHeader eyebrow="SERVER BROWSER" title="Browser desktop" description="Manage account sessions, run scoped operations, and switch between live Chrome windows." icon={<Monitor size={20} />} action={<><button type="button" className="button secondary small desktop-nav-toggle" onClick={onToggleNavigation} aria-label={navHidden ? "Show application navigation" : "Hide application navigation"} title={navHidden ? "Show application navigation" : "Hide application navigation"}>{navHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}{navHidden ? "Show navigation" : "Hide navigation"}</button><span className={`desktop-state ${enabled ? "ready" : enabled === false ? "off" : "unknown"}`}><i />{enabled ? "Desktop online" : enabled === false ? "Desktop unavailable" : "Checking"}</span></>} />
+    <WorkspacePageHeader eyebrow="SERVER BROWSER" title="Browser desktop" description="Manage account sessions, run scoped operations, and switch between live Chrome windows." icon={<Monitor size={20} />} action={<><button type="button" className="button secondary small desktop-nav-toggle" onClick={onToggleNavigation} aria-label={navHidden ? "Expand application navigation" : "Collapse application navigation"} title={navHidden ? "Expand application navigation" : "Collapse application navigation"}>{navHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}{navHidden ? "Expand navigation" : "Collapse navigation"}</button><span className={`desktop-state ${enabled ? "ready" : enabled === false ? "off" : "unknown"}`}><i />{enabled ? "Desktop online" : enabled === false ? "Desktop unavailable" : "Checking"}</span></>} />
     {error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={() => { setError(""); void Promise.all([loadAccounts(), loadSessions()]).catch((requestError) => setError((requestError as Error).message)); }}>Retry</button></div>}
     {notice && <div className="desktop-notice" role="status"><Check size={16} /><span>{notice}</span><button type="button" className="icon-button" aria-label="Dismiss message" onClick={() => setNotice("")}><X size={15} /></button></div>}
     {enabled && <section className={`desktop-workspace${accountRailCollapsed ? " accounts-collapsed" : ""}${inspectorOpen ? " inspector-open" : ""}`} style={{ "--desktop-inspector-width": `${inspectorWidth}px` } as React.CSSProperties} aria-label="Browser desktop workspace">
