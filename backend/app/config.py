@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     # no provider call, so it is on by default; switching it off restores the
     # old "manual review unless a profile or the agent is ready" behaviour.
     newsletter_live_form_enabled: bool = True
+    ovh_proxy_recovery_enabled: bool = True
+    ovh_proxy_recovery_project_id: str = "239fa25938524e2f87575cc424a2b6fc"
+    ovh_proxy_recovery_instance_id: str = "e998e455-3c20-40f3-bd9b-63d74a57d4de"
+    ovh_proxy_recovery_region: str = "US-EAST-VA-1"
+    ovh_proxy_recovery_port: int = 18080
+    ovh_proxy_recovery_username: str | None = None
+    ovh_proxy_recovery_password: str | None = None
+    ovh_proxy_recovery_ip_check_url: str = "https://api4.ipify.org"
+    ovh_proxy_recovery_probe_attempts: int = 3
+    ovh_proxy_recovery_readiness_timeout_seconds: int = 600
+    ovh_proxy_recovery_network_grace_seconds: int = 90
+    ovh_proxy_recovery_poll_seconds: int = 5
+    openstack_cloud: str = "northstar-ovh-us"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

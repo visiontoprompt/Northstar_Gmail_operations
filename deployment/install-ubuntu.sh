@@ -98,6 +98,29 @@ else
   chown root:northstar "$ENV_FILE"; chmod 0640 "$ENV_FILE"
 fi
 
+# Preserve existing operator values while adding defaults for the optional
+# external Neutron-backed Floating IP recovery integration.
+install -d -o root -g northstar -m 0750 "$ENV_DIR/openstack"
+ensure_env_setting() {
+  local key="$1" value="$2"
+  if ! grep -q "^${key}=" "$ENV_FILE"; then printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"; fi
+}
+ensure_env_setting OVH_PROXY_RECOVERY_ENABLED true
+ensure_env_setting OVH_PROXY_RECOVERY_PROJECT_ID 239fa25938524e2f87575cc424a2b6fc
+ensure_env_setting OVH_PROXY_RECOVERY_INSTANCE_ID e998e455-3c20-40f3-bd9b-63d74a57d4de
+ensure_env_setting OVH_PROXY_RECOVERY_REGION US-EAST-VA-1
+ensure_env_setting OVH_PROXY_RECOVERY_PORT 18080
+ensure_env_setting OVH_PROXY_RECOVERY_USERNAME ""
+ensure_env_setting OVH_PROXY_RECOVERY_PASSWORD ""
+ensure_env_setting OVH_PROXY_RECOVERY_IP_CHECK_URL https://api4.ipify.org
+ensure_env_setting OVH_PROXY_RECOVERY_READINESS_TIMEOUT_SECONDS 600
+ensure_env_setting OVH_PROXY_RECOVERY_NETWORK_GRACE_SECONDS 90
+ensure_env_setting OVH_PROXY_RECOVERY_PROBE_ATTEMPTS 3
+ensure_env_setting OVH_PROXY_RECOVERY_POLL_SECONDS 5
+ensure_env_setting OPENSTACK_CLOUD northstar-ovh-us
+ensure_env_setting OS_CLIENT_CONFIG_FILE "$ENV_DIR/openstack/clouds.yaml"
+chown root:northstar "$ENV_FILE"; chmod 0640 "$ENV_FILE"
+
 # Copy this checkout, excluding local environments, secrets, and build caches.
 install -d -o root -g root -m 0755 "$INSTALL_ROOT"
 if [[ "$APP_ROOT" != "$INSTALL_ROOT" ]]; then

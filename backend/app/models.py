@@ -292,6 +292,29 @@ class OvhProxyGroupLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class OvhProxyRecoveryJob(Base):
+    """Durable progress and saved Neutron bindings for post-start recovery."""
+
+    __tablename__ = "ovh_proxy_recovery_jobs"
+    __table_args__ = (UniqueConstraint("organization_id", "lock_key", name="uq_ovh_proxy_recovery_active"),)
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_key: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
+    lock_key: Mapped[str | None] = mapped_column(String(256))
+    service_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(String(500), nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    results: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class GoDaddyAccount(Base):
     __tablename__ = "godaddy_accounts"
     __table_args__ = (UniqueConstraint("organization_id", "label", name="uq_godaddy_account_label"),)

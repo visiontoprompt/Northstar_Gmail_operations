@@ -15,6 +15,9 @@ type Resource = {
 type Inventory = { items: Resource[]; errors: string[] };
 type Action = { resource: Resource; action: "start" | "stop" };
 type ProxyGroupLink = { id: string; proxy_group: string; resource_type: Resource["resource_type"]; service_name: string; instance_id: string | null; server_name: string; status: string; ip: string | null };
+type ProxyRecoveryJob = { id: string; status: string; stage: string; message: string; total_count: number; completed_count: number; cancel_requested: boolean; results: { floating_ip: string; status: string; exit_ip?: string; error?: string | null; attempts?: number; latency_ms?: number; recovered?: boolean }[]; created_at: string; updated_at: string };
+const RECOVERY_PROJECT_ID = "239fa25938524e2f87575cc424a2b6fc";
+const RECOVERY_INSTANCE_ID = "e998e455-3c20-40f3-bd9b-63d74a57d4de";
 
 const keyOf = (resource: Resource) => `${resource.resource_type}:${resource.service_name}:${resource.instance_id ?? ""}`;
 const stopped = (status: string) => /^(stopped|off|shutoff|halted|shelved|suspended)$/i.test(status);
@@ -29,6 +32,7 @@ export function OvhPage({ onOpenSettings, onNotify, canManageSettings = true }: 
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [proxyGroups, setProxyGroups] = useState<string[]>([]);
   const [groupLinks, setGroupLinks] = useState<ProxyGroupLink[]>([]);
+  const [recoveryJob, setRecoveryJob] = useState<ProxyRecoveryJob | null>(null);
   const [linkSelection, setLinkSelection] = useState<Record<string, string>>({});
   const loadingRef = useRef(false);
   const load = useCallback(async (quiet = false) => {
@@ -39,12 +43,14 @@ export function OvhPage({ onOpenSettings, onNotify, canManageSettings = true }: 
       const next = await api<Inventory>("/api/v1/infrastructure/ovh");
       setInventory(next);
       setLastUpdated(new Date());
-      const [linkResult, proxyResult] = await Promise.allSettled([
+      const [linkResult, proxyResult, recoveryResult] = await Promise.allSettled([
         api<{ items: ProxyGroupLink[] }>("/api/v1/infrastructure/ovh/proxy-groups"),
         api<Array<{ proxy_group?: string | null }>>("/api/v1/proxies"),
+        api<ProxyRecoveryJob>(`/api/v1/infrastructure/ovh/recovery/latest?service_name=${encodeURIComponent(RECOVERY_PROJECT_ID)}&instance_id=${encodeURIComponent(RECOVERY_INSTANCE_ID)}`),
       ]);
       if (linkResult.status === "fulfilled") setGroupLinks(linkResult.value.items);
       if (proxyResult.status === "fulfilled") setProxyGroups([...new Set(proxyResult.value.map((item) => item.proxy_group).filter((name): name is string => Boolean(name)))].sort((a, b) => a.localeCompare(b)));
+      if (recoveryResult.status === "fulfilled") setRecoveryJob(recoveryResult.value);
       setError("");
     } catch (requestError) {
       setError((requestError as Error).message || "Could not load OVH resources.");
@@ -53,6 +59,17 @@ export function OvhPage({ onOpenSettings, onNotify, canManageSettings = true }: 
       if (!quiet) setLoading(false);
     }
   }, []);
+  useEffect(() => {
+    if (!recoveryJob || !["QUEUED", "STARTING", "WAITING", "PROBING", "RECOVERING", "VERIFYING", "STOPPING"].includes(recoveryJob.status)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try { const latest = await api<ProxyRecoveryJob>(`/api/v1/infrastructure/ovh/recovery/${encodeURIComponent(recoveryJob.id)}`); if (!cancelled) setRecoveryJob(latest); }
+      catch { /* Keep last known progress visible during brief polling failures. */ }
+    };
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void poll(); }, 2000);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [recoveryJob?.id, recoveryJob?.status]);
   const linkGroup = async (resource: Resource) => {
     const key = keyOf(resource);
     const proxy_group = linkSelection[key];
@@ -80,8 +97,10 @@ export function OvhPage({ onOpenSettings, onNotify, canManageSettings = true }: 
     if (!action) return;
     setPending(true);
     try {
-      await api("/api/v1/infrastructure/ovh/power", { method: "POST", body: JSON.stringify({ resource_type: action.resource.resource_type, service_name: action.resource.service_name, instance_id: action.resource.instance_id, action: action.action }) });
-      onNotify("success", `${action.action === "start" ? "Start" : "Stop"} requested for ${action.resource.name}. Status will update when OVH completes the task.`);
+      const result = await api<{ status: string; recovery_job?: ProxyRecoveryJob }>("/api/v1/infrastructure/ovh/power", { method: "POST", body: JSON.stringify({ resource_type: action.resource.resource_type, service_name: action.resource.service_name, instance_id: action.resource.instance_id, action: action.action }) });
+      if (result.recovery_job) setRecoveryJob(result.recovery_job);
+      if (action.action === "stop") void load(true);
+      onNotify("success", result.recovery_job ? `Start requested. Proxy recovery ${result.recovery_job.id} is running with live per-IP verification.` : `${action.action === "start" ? "Start" : "Stop"} requested for ${action.resource.name}. Status will update when OVH completes the task.`);
       setAction(null);
       void load(true);
     } catch (requestError) {
@@ -95,6 +114,7 @@ export function OvhPage({ onOpenSettings, onNotify, canManageSettings = true }: 
     <section className="ovh-overview" aria-label="OVH resource totals"><div><Server size={18} /><span>VPS services</span><strong>{vpsCount}</strong></div><div><Cloud size={18} /><span>Public Cloud instances</span><strong>{instanceCount}</strong></div><div><Power size={18} /><span>Running</span><strong>{inventory?.items.filter((item) => running(item.status)).length ?? 0}</strong></div></section>
     {error && <div className="inline-error" role="alert"><AlertCircle size={18} /><span>{error}</span>{canManageSettings && error.includes("Settings") && <button type="button" className="text-button" onClick={onOpenSettings}>Open settings</button>}<button type="button" className="text-button" onClick={() => void load()}>Retry</button></div>}
     {inventory?.errors.map((message) => <div className="inline-error" role="status" key={message}><AlertCircle size={18} /><span>{message}</span></div>)}
+    {recoveryJob && <section className={`ovh-recovery-panel ${recoveryJob.status === "PROXY_READY" ? "ready" : recoveryJob.status === "FAILED" ? "failed" : "running"}`} aria-live="polite"><div className="ovh-recovery-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> FLOATING IP RECOVERY · {recoveryJob.stage.replaceAll("_", " ")}</div><h2>{recoveryJob.status === "PROXY_READY" ? "Proxy ready" : recoveryJob.status === "FAILED" ? "Proxy recovery needs attention" : recoveryJob.status === "CANCELLED" ? "Recovery stopped safely" : "Restoring proxy connectivity"}</h2><p>{recoveryJob.message}</p></div><strong className="ovh-recovery-count">{recoveryJob.completed_count}/{recoveryJob.total_count} checked</strong></div>{["QUEUED", "STARTING", "WAITING", "PROBING", "RECOVERING", "VERIFYING", "STOPPING"].includes(recoveryJob.status) && <progress value={recoveryJob.completed_count} max={Math.max(1, recoveryJob.total_count)} aria-label="Proxy recovery progress" />}{recoveryJob.results.length > 0 && <div className="ovh-recovery-results">{recoveryJob.results.map((result) => <div className="ovh-recovery-result" key={result.floating_ip}><code>{result.floating_ip}</code><span className={`ovh-recovery-badge ${result.status.toLowerCase()}`}>{result.status.replaceAll("_", " ")}</span>{result.exit_ip && <small>Exit {result.exit_ip}</small>}{result.latency_ms != null && <small>{result.latency_ms} ms</small>}{result.error && <small className="ovh-recovery-error">{result.error}</small>}</div>)}</div>}</section>}
     <section className="workspace-panel"><div className="panel-header"><div><h2>OVHcloud inventory</h2><p>Automatically refreshes every minute while this page is visible{lastUpdated ? ` · last checked ${lastUpdated.toLocaleTimeString()}` : ""}.</p></div><span className="inventory-count">{inventory?.items.length ?? 0} resources</span></div>
       {loading && !inventory ? <div className="table-state loading-state" role="status"><span className="spinner" /><strong>Loading OVH resources</strong></div> : inventory && inventory.items.length === 0 ? <div className="table-state"><Server size={22} /><strong>No accessible resources</strong><p>Check the API region and the token permissions in Settings, then refresh.</p></div> : <div className="ovh-resource-list">{inventory?.items.map((resource) => {
         const resourceKey = keyOf(resource);

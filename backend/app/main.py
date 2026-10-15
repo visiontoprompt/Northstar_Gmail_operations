@@ -21,6 +21,7 @@ from .schemas import MailWorkflowBulkRequest, OvhPowerRequest, OvhProxyGroupLink
 from .schemas import ProxyGroupCreateRequest, ProxyGroupUpdateRequest, GoDaddyAccountCreate, GoDaddyAccountUpdate, GoDaddyDnsGroupReplace, GoDaddyDnsRecord
 from .godaddy_service import GoDaddyError, create_client as godaddy_client, list_accounts as list_godaddy_accounts, remove_account as remove_godaddy_account, save_account as save_godaddy_account
 from .ovh_service import OvhError, configured_client, record_power_action
+from .ovh_proxy_recovery import RecoveryError, create_recovery_job, fail_recovery_job, get_recovery_job, latest_recovery_job, recovery_configured, recovery_target, request_recovery_cancel, resume_recovery_jobs, start_recovery_thread, validate_openstack_config
 from .auth import CurrentUser, SESSION_COOKIE, authenticate_request, create_employee_session, employee_auth_response, require_admin, require_user, set_employee_password, verify_password
 from .newsletter_service import (
     NewsletterValidationError,
@@ -152,6 +153,7 @@ async def lifespan(_app: FastAPI):
     )
     if settings.worker_enabled:
         start_login_worker()
+    resume_recovery_jobs()
     yield
     stop_login_worker()
 
@@ -602,13 +604,59 @@ def delete_ovh_proxy_group_link(link_id: str, request: Request, db: Session = De
 @app.post("/api/v1/infrastructure/ovh/power", status_code=status.HTTP_202_ACCEPTED)
 def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     admin = _account_operator(request, db)
+    target_recovery = payload.resource_type == "instance" and bool(payload.instance_id) and recovery_target(payload.service_name, payload.instance_id or "")
+    recovery_job = None
     try:
+        if payload.action == "stop" and target_recovery:
+            if not request_recovery_cancel(settings.demo_org_id, payload.service_name, payload.instance_id or ""):
+                raise HTTPException(status_code=409, detail="Proxy recovery is finishing an in-flight restore. Retry Stop shortly; the VM was not stopped.")
+        if payload.action == "start" and target_recovery:
+            configured, reason = recovery_configured()
+            if not configured:
+                raise HTTPException(status_code=422, detail=f"Automatic Floating IP recovery is not configured: {reason}")
+            try:
+                validate_openstack_config()
+            except RecoveryError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            try:
+                recovery_job = create_recovery_job(settings.demo_org_id, payload.service_name, payload.instance_id or "", admin.employee_id, start=False)
+            except RecoveryError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         with configured_client(db, settings.demo_org_id) as client:
             client.power(payload.resource_type, payload.service_name, payload.instance_id, payload.action)
         record_power_action(db, settings.demo_org_id, admin.employee_id, payload.resource_type, payload.service_name, payload.instance_id, payload.action)
-        return {"status": "accepted", "resource_type": payload.resource_type, "service_name": payload.service_name, "instance_id": payload.instance_id, "action": payload.action}
+        if recovery_job:
+            start_recovery_thread(recovery_job["id"])
+        return {"status": "accepted", "resource_type": payload.resource_type, "service_name": payload.service_name, "instance_id": payload.instance_id, "action": payload.action, "recovery_job": recovery_job}
     except OvhError as exc:
+        if recovery_job:
+            fail_recovery_job(recovery_job["id"], "OVH rejected the Start request; no proxy recovery was performed.")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if recovery_job:
+            fail_recovery_job(recovery_job["id"], "The Start request failed; no proxy recovery was performed.")
+        logger.error("OVH power action failed; exception detail redacted")
+        raise HTTPException(status_code=502, detail="OVH power action failed. Check API service logs.") from exc
+
+
+@app.get("/api/v1/infrastructure/ovh/recovery/latest")
+def ovh_latest_recovery(service_name: str, instance_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _account_operator(request, db)
+    job = latest_recovery_job(settings.demo_org_id, service_name, instance_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="No recovery job was found for this instance.")
+    return job
+
+
+@app.get("/api/v1/infrastructure/ovh/recovery/{job_id}")
+def ovh_recovery_status(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _account_operator(request, db)
+    job = get_recovery_job(settings.demo_org_id, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Recovery job not found.")
+    return job
 
 
 @app.get("/api/v1/infrastructure/godaddy/accounts")

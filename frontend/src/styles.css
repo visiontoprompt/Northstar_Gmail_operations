@@ -2327,3 +2327,29 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
   .proxy-assignment-summary { flex-wrap: wrap; }
   .proxy-assignment-summary > span { flex-basis: calc(100% - 130px); }
 }
+
+.ovh-recovery-panel { display: grid; gap: 14px; margin: 14px 0; padding: 18px; background: var(--color-surface); border: 1px solid var(--color-line); border-left: 4px solid #d99a25; border-radius: 13px; box-shadow: var(--shadow-card); }
+.ovh-recovery-panel.ready { border-left-color: var(--color-success); }
+.ovh-recovery-panel.failed { border-left-color: var(--color-danger); }
+.ovh-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.ovh-recovery-heading h2 { margin: 7px 0 4px; color: var(--color-ink); font-family: var(--font-display); font-size: 18px; }
+.ovh-recovery-heading p { max-width: 850px; margin: 0; color: var(--color-muted); font-size: 12px; line-height: 1.5; }
+.ovh-recovery-count { flex: 0 0 auto; padding: 7px 10px; color: var(--color-ink-soft); background: var(--color-surface-muted); border: 1px solid var(--color-line); border-radius: 9px; font-family: var(--font-data); font-size: 11px; }
+.ovh-recovery-panel progress { width: 100%; height: 7px; accent-color: var(--color-primary); }
+.ovh-recovery-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 7px; max-height: 260px; overflow: auto; }
+.ovh-recovery-result { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 5px 8px; padding: 9px 10px; background: var(--color-surface-muted); border: 1px solid var(--color-line); border-radius: 9px; }
+.ovh-recovery-result > code { color: var(--color-ink); font-family: var(--font-data); font-size: 11px; }
+.ovh-recovery-result small { grid-column: 1 / -1; color: var(--color-muted); font-size: 10px; }
+.ovh-recovery-result .ovh-recovery-error { color: var(--color-danger); }
+.ovh-recovery-badge { padding: 3px 6px; border-radius: 6px; color: #57665f; background: #e8eeeb; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.ovh-recovery-badge.healthy { color: #126b53; background: #dff3ea; }
+.ovh-recovery-badge.auth_failed, .ovh-recovery-badge.wrong_exit_ip, .ovh-recovery-badge.failed { color: #a42d27; background: #fde9e7; }
+.ovh-recovery-badge.rebinding { color: #8a5a07; background: #fff0d2; }
+html[data-theme="dark"] .ovh-recovery-panel { background: #17211e; border-color: #33423d; }
+html[data-theme="dark"] .ovh-recovery-heading h2, html[data-theme="dark"] .ovh-recovery-result > code { color: #e2ebe7; }
+html[data-theme="dark"] .ovh-recovery-count, html[data-theme="dark"] .ovh-recovery-result { color: #cad6d1; background: #202c28; border-color: #354640; }
+html[data-theme="dark"] .ovh-recovery-heading p, html[data-theme="dark"] .ovh-recovery-result small { color: #9aaca5; }
+html[data-theme="dark"] .ovh-recovery-badge { color: #c4d1cb; background: #34423d; }
+html[data-theme="dark"] .ovh-recovery-badge.healthy { color: #9ce3c8; background: #19392e; }
+html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"] .ovh-recovery-badge.wrong_exit_ip, html[data-theme="dark"] .ovh-recovery-badge.failed { color: #ffaaa4; background: #422827; }
+@media (max-width: 640px) { .ovh-recovery-heading { flex-direction: column; } .ovh-recovery-count { align-self: flex-start; } }
