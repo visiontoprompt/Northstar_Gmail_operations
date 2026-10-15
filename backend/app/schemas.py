@@ -597,9 +597,18 @@ class ProxyBulkImportResponse(BaseModel):
 
 
 class ProxyAssignmentRequest(BaseModel):
-    account_ids: list[str] = Field(min_length=1, max_length=300)
+    account_ids: list[str] = Field(min_length=1, max_length=10000)
     proxy_id: str | None = Field(default=None, max_length=96)
     proxy: str | None = Field(default=None, max_length=512)
+    label: str | None = Field(default=None, max_length=160)
+    region: str | None = Field(default=None, max_length=80)
+
+
+class ProxyGroupAssignmentRequest(BaseModel):
+    """Replace one proxy's assignments inside a single authorized account group."""
+
+    group_id: str = Field(min_length=1, max_length=96)
+    account_ids: list[str] = Field(default_factory=list, max_length=10000)
     label: str | None = Field(default=None, max_length=160)
     region: str | None = Field(default=None, max_length=80)
 

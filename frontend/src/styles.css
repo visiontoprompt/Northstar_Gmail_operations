@@ -2310,3 +2310,20 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
   .desktop-account-rail { height: auto; max-height: none; min-height: 0; }
   .desktop-account-list { min-height: 100px; max-height: 38vh; flex: 0 1 auto; }
 }
+
+/* Group-scoped proxy assignment controls stay compact with large inventories. */
+.proxy-assignment-toolbar { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(280px, 1.1fr); gap: 12px; margin: 14px 0 10px; }
+.proxy-assignment-toolbar .field { min-width: 0; margin: 0; }
+.proxy-assignment-toolbar .field > span { display: block; margin-bottom: 6px; color: var(--color-muted); font-size: 11px; font-weight: 600; }
+.proxy-assignment-toolbar select, .proxy-assignment-toolbar input { width: 100%; min-height: 40px; }
+.proxy-assignment-summary { display: flex; align-items: center; gap: 12px; padding: 9px 11px; border: 1px solid var(--color-line); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--color-surface-muted); }
+.proxy-assignment-summary strong { color: var(--color-ink); font-size: 12px; }
+.proxy-assignment-summary > span { flex: 1; color: var(--color-muted); font-size: 11px; }
+.proxy-assignment-summary .text-button { white-space: nowrap; }
+.proxy-modal .assignment-list { max-height: min(42vh, 430px); }
+.proxy-show-more { display: flex; margin: 10px auto 0; }
+@media (max-width: 640px) {
+  .proxy-assignment-toolbar { grid-template-columns: 1fr; }
+  .proxy-assignment-summary { flex-wrap: wrap; }
+  .proxy-assignment-summary > span { flex-basis: calc(100% - 130px); }
+}

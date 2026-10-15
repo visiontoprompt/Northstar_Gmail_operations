@@ -3350,7 +3350,7 @@ def _proxy_config_for_id(db: Session, organization_id: str, proxy_id: str):
     return proxy, account
 
 
-def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, account_ids: list[str], proxy_id: str | None = None, proxy_value: str | None = None, label: str | None | object = _UNSET, region: str | None | object = _UNSET) -> dict:
+def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, account_ids: list[str], proxy_id: str | None = None, proxy_value: str | None = None, label: str | None | object = _UNSET, region: str | None | object = _UNSET, *, commit: bool = True) -> dict:
     """Assign one existing or newly entered proxy to many accounts."""
     if not account_ids:
         raise ImportValidationError("Choose at least one account")
@@ -3389,8 +3389,51 @@ def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, acco
         account.proxy_region = safe_region
         account.proxy_status = "ASSIGNED"
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.assigned", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_id": proxy.proxy_id, "proxy_authentication": "authenticated" if proxy.authenticated else "anonymous"}))
-    db.commit()
+    if commit:
+        db.commit()
     return {"proxy_id": proxy.proxy_id, "updated_count": len(accounts), "account_ids": [account.id for account in accounts]}
+
+
+def replace_proxy_group_assignments(db: Session, organization_id: str, actor_id: str, group_id: str, proxy_id: str, account_ids: list[str], label: str | None | object = _UNSET, region: str | None | object = _UNSET) -> dict:
+    """Atomically replace a proxy's membership within one account group.
+
+    Accounts in other groups retain their assignments. This supports shared
+    proxy inventory across separately permissioned users without allowing a
+    scoped operator to alter another group's account mappings.
+    """
+    if len(account_ids) != len(set(account_ids)):
+        raise ImportValidationError("The selected account list contains duplicates")
+    group = db.scalar(select(AccountGroup).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id))
+    if group is None:
+        raise ImportValidationError("Account group not found")
+    if _proxy_inventory_record(db, organization_id, proxy_id) is None and db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id)) is None:
+        raise ImportValidationError("Proxy assignment not found")
+    group_accounts = db.scalars(
+        select(GmailAccount)
+        .options(joinedload(GmailAccount.browser_profile))
+        .where(GmailAccount.organization_id == organization_id, GmailAccount.group_id == group_id, GmailAccount.lifecycle_status != "ARCHIVED")
+        .order_by(GmailAccount.email)
+        .with_for_update()
+    ).all()
+    account_map = {account.id: account for account in group_accounts}
+    if any(account_id not in account_map for account_id in account_ids):
+        raise ImportValidationError("Select accounts only from the chosen account group")
+    current_ids = {account.id for account in group_accounts if account.proxy_id == proxy_id}
+    selected_ids = set(account_ids)
+    removed_ids = sorted(current_ids - selected_ids)
+    touched_ids = selected_ids | set(removed_ids)
+    if any(account_map[account_id].browser_profile and account_map[account_id].browser_profile.lock_state == "LOCKED" for account_id in touched_ids):
+        raise ImportValidationError("Close active sessions for the affected accounts before changing proxies")
+    try:
+        if account_ids:
+            assign_proxy_accounts(db, organization_id, actor_id, account_ids, proxy_id=proxy_id, label=label, region=region, commit=False)
+        if removed_ids:
+            remove_proxy_assignments(db, organization_id, actor_id, proxy_id, removed_ids, commit=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"proxy_id": proxy_id, "group_id": group_id, "assigned_count": len(account_ids), "unassigned_count": len(removed_ids), "account_ids": sorted(selected_ids)}
 
 
 def distribute_proxies_to_group(db: Session, organization_id: str, actor_id: str, group_id: str, proxy_ids: list[str], accounts_per_proxy: int | None, mode: str = "limit") -> dict:
@@ -3471,7 +3514,7 @@ def distribute_proxies_to_group(db: Session, organization_id: str, actor_id: str
     return {"group_id": group_id, "account_count": len(targets), "changed_count": changed, "mode": mode, "accounts_per_proxy": accounts_per_proxy if mode == "limit" else None, "distribution": group_loads}
 
 
-def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, proxy_id: str, account_ids: list[str] | None = None) -> int:
+def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, proxy_id: str, account_ids: list[str] | None = None, *, commit: bool = True) -> int:
     if _proxy_inventory_record(db, organization_id, proxy_id) is None and db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id)) is None:
         raise ImportValidationError("Proxy assignment not found")
     query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()
@@ -3488,7 +3531,8 @@ def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, p
             payload.pop("proxy", None)
             account.secret.encrypted_payload = SecretCipher().encrypt(payload)
         db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.unassigned", target_type="gmail_account", target_id=account.id, result="success", metadata_json={"proxy_id": proxy_id}))
-    db.commit()
+    if commit:
+        db.commit()
     return len(accounts)
 
 

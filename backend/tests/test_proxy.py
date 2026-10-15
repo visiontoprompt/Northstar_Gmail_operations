@@ -334,6 +334,52 @@ def test_unassign_keeps_proxy_inventory_available_for_reassignment() -> None:
         assert client.get("/api/v1/proxies").json()[0]["account_count"] == 1
 
 
+def test_group_proxy_assignment_replaces_only_selected_group_atomically() -> None:
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        group_one, group_two = groups[0]["id"], groups[1]["id"]
+        first = client.post("/api/v1/accounts/single", json={"email": "proxy-group-one@example.com", "password": "secret", "group_id": group_one}).json()
+        second = client.post("/api/v1/accounts/single", json={"email": "proxy-group-two@example.com", "password": "secret", "group_id": group_two}).json()
+        imported = client.post("/api/v1/proxies/import", json={"lines": "198.51.100.121:8080 | Shared proxy"})
+        assert imported.status_code == 201, imported.text
+        proxy_id = imported.json()["rows"][0]["proxy_id"]
+
+        first_assignment = client.post(f"/api/v1/proxies/{proxy_id}/group-assignments", json={"group_id": group_one, "account_ids": [first["id"]]})
+        second_assignment = client.post(f"/api/v1/proxies/{proxy_id}/group-assignments", json={"group_id": group_two, "account_ids": [second["id"]]})
+        assert first_assignment.status_code == 200, first_assignment.text
+        assert second_assignment.status_code == 200, second_assignment.text
+
+        # Clearing group one must preserve the same shared proxy in group two.
+        cleared = client.post(f"/api/v1/proxies/{proxy_id}/group-assignments", json={"group_id": group_one, "account_ids": []})
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["unassigned_count"] == 1
+        with SessionLocal() as db:
+            assert db.get(GmailAccount, first["id"]).proxy_id is None
+            assert db.get(GmailAccount, second["id"]).proxy_id == proxy_id
+
+
+def test_scoped_operator_can_assign_unassigned_inventory_only_inside_accessible_group() -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        allowed_group, blocked_group = groups[0]["id"], groups[1]["id"]
+        allowed = client.post("/api/v1/accounts/single", json={"email": "proxy-group-scope-allowed@example.com", "password": "secret", "group_id": allowed_group}).json()
+        blocked = client.post("/api/v1/accounts/single", json={"email": "proxy-group-scope-blocked@example.com", "password": "secret", "group_id": blocked_group}).json()
+        imported = client.post("/api/v1/proxies/import", json={"lines": "198.51.100.122:8080 | New inventory"}).json()
+        proxy_id = imported["rows"][0]["proxy_id"]
+
+    operator = CurrentUser("operator_group_scoped", "org_demo", "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {allowed_group: "OPERATOR"})
+    with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            allowed_result = client.post(f"/api/v1/proxies/{proxy_id}/group-assignments", json={"group_id": allowed_group, "account_ids": [allowed["id"]]})
+            assert allowed_result.status_code == 200, allowed_result.text
+            denied = client.post(f"/api/v1/proxies/{proxy_id}/group-assignments", json={"group_id": blocked_group, "account_ids": [blocked["id"]]})
+            assert denied.status_code == 404
+
+
 def test_group_operator_can_assign_proxy_only_inside_their_groups() -> None:
     from unittest.mock import patch
 
