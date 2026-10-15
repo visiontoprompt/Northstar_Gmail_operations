@@ -108,12 +108,16 @@ if [[ "$APP_ROOT" != "$INSTALL_ROOT" ]]; then
     "$APP_ROOT/" "$INSTALL_ROOT/"
 fi
 chown -R root:northstar "$INSTALL_ROOT"
-find "$INSTALL_ROOT" -type d -exec chmod 0755 {} +
-find "$INSTALL_ROOT" -type f -exec chmod 0644 {} +
+# Keep source files readable while preserving executable bits inside an
+# existing virtualenv. The venv is excluded from rsync above so upgrades can
+# reuse it, which means a blanket chmod here would break Playwright's Node
+# driver and every generated command in .venv/bin.
+find "$INSTALL_ROOT" -path "$INSTALL_ROOT/backend/.venv" -prune -o -type d -exec chmod 0755 {} +
+find "$INSTALL_ROOT" -path "$INSTALL_ROOT/backend/.venv" -prune -o -type f -exec chmod 0644 {} +
 chmod 0750 "$INSTALL_ROOT/deployment/install-ubuntu.sh"
 
 cd "$INSTALL_ROOT/backend"
-/usr/local/bin/uv sync --no-dev
+/usr/local/bin/uv sync --no-dev --reinstall-package playwright
 cd "$INSTALL_ROOT/frontend"
 npm ci
 npm run build
