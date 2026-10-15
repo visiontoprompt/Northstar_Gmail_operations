@@ -118,6 +118,12 @@ chmod 0750 "$INSTALL_ROOT/deployment/install-ubuntu.sh"
 
 cd "$INSTALL_ROOT/backend"
 /usr/local/bin/uv sync --no-dev --reinstall-package playwright
+PLAYWRIGHT_NODE="$(find "$INSTALL_ROOT/backend/.venv/lib" -path '*/site-packages/playwright/driver/node' -type f -print -quit)"
+[[ -n "$PLAYWRIGHT_NODE" ]] || fail "Playwright's Node driver was not installed into the backend virtual environment."
+# The bundled driver may be extracted without its executable bit on some
+# filesystems/package builds; Playwright starts this file directly as the
+# northstar user, so make the required permission explicit.
+chmod 0755 "$PLAYWRIGHT_NODE"
 cd "$INSTALL_ROOT/frontend"
 npm ci
 npm run build
