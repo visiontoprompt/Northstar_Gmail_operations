@@ -49,7 +49,7 @@ curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin s
 
 getent group northstar >/dev/null || groupadd --system northstar
 id -u northstar >/dev/null 2>&1 || useradd --system --gid northstar --home-dir "$DATA_ROOT" --shell /usr/sbin/nologin northstar
-install -d -o northstar -g northstar -m 0750 "$DATA_ROOT" "$DATA_ROOT/browser-profiles" "$DATA_ROOT/contact-files"
+install -d -o northstar -g northstar -m 0750 "$DATA_ROOT" "$DATA_ROOT/browser-profiles" "$DATA_ROOT/contact-files" "$DATA_ROOT/tmp"
 install -d -o root -g northstar -m 0750 "$ENV_DIR"
 
 BOOTSTRAP_NEEDED=false
