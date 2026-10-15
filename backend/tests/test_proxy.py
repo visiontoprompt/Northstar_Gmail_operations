@@ -389,6 +389,21 @@ def test_group_proxy_assignment_recovers_legacy_proxy_without_inventory_row() ->
             assert db.get(ProxyInventory, proxy_id) is not None
 
 
+def test_proxy_assignment_postgres_lock_targets_accounts_not_outer_joined_tables() -> None:
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.orm import joinedload
+
+    statement = (
+        select(GmailAccount)
+        .options(joinedload(GmailAccount.browser_profile))
+        .with_for_update(of=GmailAccount)
+    )
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert f"FOR UPDATE OF {GmailAccount.__tablename__}" in compiled
+
+
 def test_scoped_operator_can_assign_unassigned_inventory_only_inside_accessible_group() -> None:
     from unittest.mock import patch
 

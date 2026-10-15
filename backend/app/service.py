@@ -3370,7 +3370,10 @@ def assign_proxy_accounts(db: Session, organization_id: str, actor_id: str, acco
         (label.strip() if isinstance(label, str) and label.strip() else None) if label is not _UNSET else None,
         (region.strip() if isinstance(region, str) and region.strip() else None) if region is not _UNSET else None,
     )
-    accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id.in_(account_ids), GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()).all()
+    # Keep PostgreSQL row locks scoped to the account table. The optional
+    # secret relationship is joined with an outer join, which PostgreSQL
+    # rejects when an unrestricted FOR UPDATE tries to lock both tables.
+    accounts = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id.in_(account_ids), GmailAccount.lifecycle_status != "ARCHIVED").with_for_update(of=GmailAccount)).all()
     if len(accounts) != len(set(account_ids)):
         raise ImportValidationError("One or more selected accounts could not be found")
     safe_label = (label.strip() if label and label.strip() else None) if label is not _UNSET else (source_account.proxy_label if source_account else observation.label or proxy.display_endpoint)
@@ -3413,7 +3416,7 @@ def replace_proxy_group_assignments(db: Session, organization_id: str, actor_id:
         .options(joinedload(GmailAccount.browser_profile))
         .where(GmailAccount.organization_id == organization_id, GmailAccount.group_id == group_id, GmailAccount.lifecycle_status != "ARCHIVED")
         .order_by(GmailAccount.email)
-        .with_for_update()
+        .with_for_update(of=GmailAccount)
     ).all()
     account_map = {account.id: account for account in group_accounts}
     if any(account_id not in account_map for account_id in account_ids):
@@ -3458,7 +3461,7 @@ def distribute_proxies_to_group(db: Session, organization_id: str, actor_id: str
     if any(record.test_status != "HEALTHY" for record in records):
         raise ImportValidationError("Test the selected proxies first; all must be healthy")
     configs = {record.id: _proxy_config_for_id(db, organization_id, record.id)[0] for record in records}
-    targets = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.group_id == group_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email).with_for_update()).all()
+    targets = db.scalars(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.group_id == group_id, GmailAccount.lifecycle_status != "ARCHIVED").order_by(GmailAccount.email).with_for_update(of=GmailAccount)).all()
     if not targets:
         raise ImportValidationError("The selected group has no active accounts")
     if any(account.browser_profile and account.browser_profile.lock_state == "LOCKED" for account in targets):
