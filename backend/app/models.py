@@ -354,6 +354,9 @@ class BrowserSession(Base):
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), nullable=False, index=True)
     account_id: Mapped[str] = mapped_column(ForeignKey("gmail_accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     profile_id: Mapped[str] = mapped_column(ForeignKey("browser_profiles.id"), nullable=False, index=True)
+    # Operator who opened this browser window. Account groups govern account
+    # access; this field governs the private live desktop and session history.
+    owner_employee_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
     state: Mapped[str] = mapped_column(String(32), default="STARTING", nullable=False, index=True)
     login_state: Mapped[str] = mapped_column(String(40), default="REQUIRED", nullable=False)
     runtime_type: Mapped[str] = mapped_column(String(32), default="LOCAL_HANDOFF", nullable=False)

@@ -1817,10 +1817,13 @@ def list_newsletter_jobs(
     organization_id: str,
     account_group_ids: set[str] | None = None,
     limit: int = 50,
+    created_by: str | None = None,
 ) -> tuple[list[dict], int]:
     query = select(NewsletterJob).where(NewsletterJob.organization_id == organization_id)
     if account_group_ids is not None:
         query = query.where(NewsletterJob.account_group_id.in_(account_group_ids))
+    if created_by is not None:
+        query = query.where(NewsletterJob.created_by == created_by)
     total = len(db.scalars(query).all())
     rows = db.scalars(query.order_by(NewsletterJob.created_at.desc()).limit(limit)).all()
     return [newsletter_job_response(db, row) for row in rows], total
@@ -1831,11 +1834,14 @@ def get_newsletter_job(
     organization_id: str,
     job_id: str,
     account_group_ids: set[str] | None = None,
+    created_by: str | None = None,
 ) -> dict | None:
     job = db.scalar(select(NewsletterJob).where(NewsletterJob.organization_id == organization_id, NewsletterJob.id == job_id))
     if not job:
         return None
     if account_group_ids is not None and job.account_group_id not in account_group_ids:
+        return None
+    if created_by is not None and job.created_by != created_by:
         return None
     return newsletter_job_response(db, job, include_tasks=True)
 

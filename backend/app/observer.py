@@ -263,6 +263,7 @@ class BrowserObserver:
         profile_dir: str | None = None,
         executable: str | None = None,
         headless: bool = False,
+        display: str | None = None,
         start_url: str | None = None,
         observe_session_page=object,
         resolve_credentials=None,
@@ -291,6 +292,7 @@ class BrowserObserver:
         self.profile_dir = profile_dir
         self.executable = executable
         self.headless = headless
+        self.display = display
         self.start_url = start_url or "https://accounts.google.com/"
         self._observe_session_page = observe_session_page
         self._resolve_credentials = resolve_credentials
@@ -1048,6 +1050,8 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
         pass
     logger.info("session %s: launching the saved profile with %s", observer.session_id, executable)
     launch_kwargs = {}
+    if observer.display and not observer.headless:
+        launch_kwargs["env"] = {**os.environ, "DISPLAY": observer.display}
     if observer._resolve_proxy is not None:
         try:
             proxy = observer._resolve_proxy(observer.session_id)

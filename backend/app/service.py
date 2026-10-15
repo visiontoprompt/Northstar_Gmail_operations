@@ -26,6 +26,7 @@ from .schemas import NEWSLETTER_SIGNABLE_PROFILE_STATUSES, AccountStructuredInpu
 from .security import SecretCipher, mask_recovery
 from .notifications import notification_settings, publish, safe_notification_settings
 from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, local_browser_profiles_alive, remove_local_profile, resolve_browser_executable
+from .operator_desktop import ensure_operator_desktop
 from .observer import BrowserObserver
 from .newsletter_discovery import NewsletterDiscoveryError, validate_newsletter_runtime_url
 from .newsletter_execution import AGENT_LEARNING, DETERMINISTIC, LIVE_FORM, MANUAL, SKILL_REPLAY, choose_newsletter_execution_mode
@@ -1519,8 +1520,11 @@ def create_mail_workflow_job(db: Session, organization_id: str, actor_id: str, g
     return create_login_job(db, organization_id, actor_id, group_id, account_ids, concurrency_limit, operation_type="mail", operation_config=workflow)
 
 
-def list_login_jobs(db: Session, organization_id: str, limit: int = 25) -> list[dict]:
-    rows = db.scalars(select(LoginJob).where(LoginJob.organization_id == organization_id).order_by(LoginJob.created_at.desc()).limit(limit)).all()
+def list_login_jobs(db: Session, organization_id: str, limit: int = 25, created_by: str | None = None) -> list[dict]:
+    query = select(LoginJob).where(LoginJob.organization_id == organization_id).order_by(LoginJob.created_at.desc()).limit(limit)
+    if created_by is not None:
+        query = query.where(LoginJob.created_by == created_by)
+    rows = db.scalars(query).all()
     return [_login_job_response(row, []) for row in rows]
 
 
@@ -1660,6 +1664,12 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
     # The observer launches the account's own saved profile as a normal Chrome
     # window through Playwright's persistent context: the command line carries
     # no --remote-debugging-port / --enable-automation flags for Google to see.
+    try:
+        desktop = ensure_operator_desktop(actor_id) if settings.browser_desktop_enabled else {"display": os.environ.get("DISPLAY")}
+    except Exception as exc:  # noqa: BLE001 - fail closed instead of sharing the legacy display
+        logger.error("private browser desktop initialization failed for session %s: %s", session_id, type(exc).__name__)
+        _record_observer_status(session_id, organization_id, actor_id, False, "The operator's private browser desktop could not be started")
+        return False
     observer = BrowserObserver(
         session_id,
         profile_id,
@@ -1667,6 +1677,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
         profile_dir=str((Path(settings.profile_root) / profile_id).resolve()),
         executable=resolve_browser_executable(),
         headless=bool((newsletter_config or {}).get("headless_browser")) if purpose == "newsletter" else False,
+        display=str(desktop.get("display") or "") or None,
         start_url=(
             "https://contacts.google.com/"
             if purpose == "contacts"
@@ -3031,8 +3042,10 @@ def get_session(db: Session, organization_id: str, session_id: str) -> BrowserSe
     return db.scalar(select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id, BrowserSession.id == session_id))
 
 
-def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25, group_id: str | None = None, latest_per_account: bool = False, purpose: str | None = None, outcome: str | None = None, visible_group_ids: set[str] | None = None) -> list[dict]:
+def list_sessions(db: Session, organization_id: str, account_id: str | None, limit: int = 25, group_id: str | None = None, latest_per_account: bool = False, purpose: str | None = None, outcome: str | None = None, visible_group_ids: set[str] | None = None, owner_employee_id: str | None = None) -> list[dict]:
     query = select(BrowserSession).options(joinedload(BrowserSession.account), joinedload(BrowserSession.profile)).where(BrowserSession.organization_id == organization_id).order_by(BrowserSession.created_at.desc()).limit(limit)
+    if owner_employee_id is not None:
+        query = query.where(BrowserSession.owner_employee_id == owner_employee_id)
     if visible_group_ids is not None:
         query = query.where(BrowserSession.account_id.in_(select(GmailAccount.id).where(GmailAccount.group_id.in_(visible_group_ids or {"__no_access__"}))))
     if account_id:
@@ -3040,7 +3053,10 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
     if group_id:
         query = query.join(BrowserSession.account).where(GmailAccount.group_id == group_id)
     if latest_per_account:
-        ranked = select(BrowserSession.id, func.row_number().over(partition_by=BrowserSession.account_id, order_by=(BrowserSession.created_at.desc(), BrowserSession.id.desc())).label("session_rank")).where(BrowserSession.organization_id == organization_id).subquery()
+        ranked_query = select(BrowserSession.id, func.row_number().over(partition_by=BrowserSession.account_id, order_by=(BrowserSession.created_at.desc(), BrowserSession.id.desc())).label("session_rank")).where(BrowserSession.organization_id == organization_id)
+        if owner_employee_id is not None:
+            ranked_query = ranked_query.where(BrowserSession.owner_employee_id == owner_employee_id)
+        ranked = ranked_query.subquery()
         query = query.join(ranked, BrowserSession.id == ranked.c.id).where(ranked.c.session_rank == 1)
     if purpose:
         query = query.where(BrowserSession.metadata_json["purpose"].as_string() == purpose)
@@ -3985,6 +4001,12 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
             db, organization_id, actor_id, account.id
         )["values"]
         observer_mail_workflow["_confirmation_email"] = account.email
+    if get_settings().browser_desktop_enabled:
+        try:
+            ensure_operator_desktop(actor_id)
+        except Exception as exc:  # noqa: BLE001 - refuse to start in the shared legacy display
+            logger.error("private browser desktop unavailable for operator: %s", type(exc).__name__)
+            raise BrowserLaunchError("Your private browser desktop is unavailable. Retry or contact an administrator.") from exc
     session_id = _new_id("session")
     launched, process_id = launch_local_browser(profile.id, session_id)
     logger.info("session %s: browser launch result=%s process_id=%s (browser_launch_enabled=%s, observer_enabled=%s)", session_id, launched, process_id, get_settings().browser_launch_enabled, get_settings().browser_observer_enabled)
@@ -4020,7 +4042,7 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     runtime_type = "LOCAL_CHROME_HEADLESS_EPHEMERAL" if external_newsletter and headless_newsletter else "LOCAL_CHROME_EPHEMERAL" if external_newsletter else "LOCAL_CHROME"
     session_metadata["headless_browser"] = headless_newsletter
     session_metadata["browser_mode"] = "HEADLESS" if headless_newsletter else "VISIBLE"
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type=runtime_type, metadata_json=session_metadata)
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, owner_employee_id=actor_id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type=runtime_type, metadata_json=session_metadata)
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
@@ -4181,7 +4203,7 @@ def start_alerts_operation(db: Session, organization_id: str, actor_id: str, acc
     return get_session(db, organization_id, session.id)
 
 
-def close_active_sessions(db: Session, organization_id: str, actor_id: str, group_ids: set[str] | None = None) -> dict:
+def close_active_sessions(db: Session, organization_id: str, actor_id: str, group_ids: set[str] | None = None, owner_employee_id: str | None = None) -> dict:
     """Stop every active browser process in the requested account boundary."""
     query = (
         select(BrowserSession.id)
@@ -4194,6 +4216,8 @@ def close_active_sessions(db: Session, organization_id: str, actor_id: str, grou
     )
     if group_ids is not None:
         query = query.where(GmailAccount.group_id.in_(group_ids))
+    if owner_employee_id is not None:
+        query = query.where(BrowserSession.owner_employee_id == owner_employee_id)
     session_ids = db.scalars(query).all()
     closed_ids: list[str] = []
     for session_id in session_ids:
@@ -4205,12 +4229,12 @@ def close_active_sessions(db: Session, organization_id: str, actor_id: str, grou
     return {"closed_count": len(closed_ids), "session_ids": closed_ids}
 
 
-def close_group_sessions(db: Session, organization_id: str, actor_id: str, group_id: str) -> dict:
+def close_group_sessions(db: Session, organization_id: str, actor_id: str, group_id: str, owner_employee_id: str | None = None) -> dict:
     """Stop every active browser process belonging to a group."""
     group = db.scalar(select(AccountGroup).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id))
     if not group:
         raise ImportValidationError("Group not found")
-    return {"group_id": group_id, **close_active_sessions(db, organization_id, actor_id, {group_id})}
+    return {"group_id": group_id, **close_active_sessions(db, organization_id, actor_id, {group_id}, owner_employee_id)}
 
 
 def start_mail_workflow(db: Session, organization_id: str, actor_id: str, account_id: str, workflow: dict[str, object]) -> BrowserSession:

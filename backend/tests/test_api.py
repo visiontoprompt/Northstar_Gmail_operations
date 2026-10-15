@@ -101,10 +101,12 @@ def test_account_operator_can_access_desktop_and_infrastructure_but_not_admin_pa
         operator = CurrentUser("operator_scoped", settings.demo_org_id, "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {group_id: "OPERATOR"})
         ovh_client = MagicMock()
         ovh_client.__enter__.return_value.list_resources.return_value = {"items": [], "errors": []}
-        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator), patch("app.main.configured_client", return_value=ovh_client):
+        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator), patch("app.main.ensure_operator_desktop", return_value={"display": ":123", "websocket_port": 30123}), patch("app.main.configured_client", return_value=ovh_client):
             with TestClient(app) as client:
                 assert client.get("/api/v1/desktop/status").json() == {"enabled": True}
-                assert client.get("/api/v1/desktop/authorize").status_code == 204
+                desktop_authorized = client.get("/api/v1/desktop/authorize")
+                assert desktop_authorized.status_code == 204
+                assert desktop_authorized.headers["x-desktop-websocket-port"] == "30123"
                 runtime = client.get("/api/v1/desktop/runtime")
                 assert runtime.status_code == 200
                 assert set(runtime.json()) == {"default_login_concurrency", "max_active_profiles"}
@@ -114,6 +116,38 @@ def test_account_operator_can_access_desktop_and_infrastructure_but_not_admin_pa
                 assert client.get("/api/v1/settings").status_code == 403
     finally:
         settings.browser_desktop_enabled = original_enabled
+
+
+def test_browser_sessions_and_controls_are_private_to_the_operator_who_opened_them() -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        group = client.get("/api/v1/groups").json()[0]
+        account = client.post("/api/v1/accounts/single", json={"email": "private-desktop@example.com", "password": "secret", "group_id": group["id"]}).json()
+        first = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        client.post(f"/api/v1/sessions/{first['id']}/close")
+
+    operator_one = CurrentUser("operator_one", settings.demo_org_id, "Operator One", "one@example.com", "ACCOUNT_OPERATOR", {group["id"]: "OPERATOR"})
+    operator_two = CurrentUser("operator_two", settings.demo_org_id, "Operator Two", "two@example.com", "ACCOUNT_OPERATOR", {group["id"]: "OPERATOR"})
+    with patch("app.main.authenticate_request", return_value=operator_one), patch("app.auth.authenticate_request", return_value=operator_one):
+        with TestClient(app) as client:
+            owned = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+            assert owned.status_code == 201
+            own_session_id = owned.json()["id"]
+            assert [row["id"] for row in client.get("/api/v1/sessions?limit=100").json()] == [own_session_id]
+
+    with patch("app.main.authenticate_request", return_value=operator_two), patch("app.auth.authenticate_request", return_value=operator_two):
+        with TestClient(app) as client:
+            assert client.get("/api/v1/sessions?limit=100").json() == []
+            assert client.get(f"/api/v1/sessions/{own_session_id}").status_code == 404
+            assert client.post(f"/api/v1/sessions/{own_session_id}/close").status_code == 404
+            assert client.post("/api/v1/sessions/close-active").json()["closed_count"] == 0
+
+    with TestClient(app) as client:
+        # The development fallback principal is distinct from both operators.
+        assert client.get(f"/api/v1/sessions/{own_session_id}").status_code == 404
 
 
 def test_bulk_preview_masks_secret_material() -> None:

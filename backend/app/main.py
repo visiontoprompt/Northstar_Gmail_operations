@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 from .config import get_settings
 from .backup import BackupError, MAX_UPLOAD_BYTES, create_backup, restore_backup, validate_backup_file
 from .db import Base, SessionLocal, engine, get_db, verify_production_schema
-from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
+from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountTagsUpdate, AccountPreferencesApplyRequest, AccountPreferencesResponse, AccountPreferencesUpdate, AccountResponse, AccountStructuredInput, AlertTopicResponse, AlertsOperationRequest, AuthStatusResponse, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialChangePlanConfirm, CredentialChangePlanCreate, CredentialChangePlanResponse, CredentialPlaintextResponse, CredentialRecordListResponse, CredentialRevisionResponse, CredentialRotateResponse, CredentialUpdate, EmployeeAuthResponse, EmployeeCreate, EmployeeGroupAccessResponse, EmployeeGroupAccessUpdate, EmployeeIdentityResponse, EmployeeLoginRequest, EmployeePasswordSet, EmployeePermissionsResponse, EmployeeResponse, EmployeeUpdate, GroupCreate, GroupMoveRequest, GroupResponse, GroupUpdate, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, MailWorkflowRequest, NewsletterAccountIdentityResponse, NewsletterAccountIdentityUpdate, NewsletterAccountTargetsRequest, NewsletterBulkDiscoveryResponse, NewsletterCatalogImportResponse, NewsletterConfirmationTestRequest, NewsletterConfirmationTestResponse, NewsletterCreate, NewsletterDirectorySeedResponse, NewsletterDiscoveryResponse, NewsletterGroupCreate, NewsletterGroupResponse, NewsletterGroupUpdate, NewsletterHealthResponse, NewsletterIdentityGenerateRequest, NewsletterIdentityGenerateResponse, NewsletterJobBulkDelete, NewsletterJobCreate, NewsletterJobListResponse, NewsletterJobResponse, NewsletterJobTaskSelection, NewsletterProfileCreate, NewsletterProfileDetailResponse, NewsletterProfileResponse, NewsletterProfileUpdate, NewsletterRediscoveryResponse, NewsletterResponse, NewsletterSkillResponse, NewsletterSignupTestRequest, NewsletterSignupTestResponse, NewsletterSubscriptionListResponse, NewsletterSubscriptionResponse, NewsletterUpdate, NotificationTestRequest, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, PasswordResetConfirm, PasswordResetRequest, ProxyAssignmentRequest, ProxyBulkImportRequest, ProxyBulkImportResponse, ProxyDeleteRequest, ProxyGroupAssignmentRequest, ProxyGroupDistributionRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest, WorkspaceSettingsResponse, WorkspaceSettingsUpdate
 from .schemas import MailWorkflowBulkRequest, OvhPowerRequest, OvhProxyGroupLinkRequest
 from .schemas import ProxyGroupCreateRequest, ProxyGroupUpdateRequest, GoDaddyAccountCreate, GoDaddyAccountUpdate, GoDaddyDnsGroupReplace, GoDaddyDnsRecord
@@ -28,6 +28,7 @@ from .godaddy_service import GoDaddyError, create_client as godaddy_client, list
 from .ovh_service import OvhError, configured_client, record_power_action
 from .ovh_proxy_recovery import RecoveryError, create_recovery_job, fail_recovery_job, get_recovery_job, latest_recovery_job, recovery_configured, recovery_target, request_recovery_cancel, resume_recovery_jobs, start_recovery_thread, validate_openstack_config
 from .auth import CurrentUser, SESSION_COOKIE, authenticate_request, create_employee_session, employee_auth_response, require_admin, require_user, set_employee_password, verify_password
+from .operator_desktop import ensure_operator_desktop
 from .newsletter_service import (
     NewsletterValidationError,
     create_newsletter,
@@ -190,8 +191,8 @@ async def require_workspace_auth(request: Request, call_next):
             if user is None:
                 return JSONResponse(status_code=401, headers={"WWW-Authenticate": "Cookie"}, content={"detail": "Sign in to the workspace"})
             request.state.user = user
+            path_parts = [part for part in request.url.path.split("/") if part]
             if not user.is_admin:
-                path_parts = [part for part in request.url.path.split("/") if part]
                 account_id = path_parts[path_parts.index("accounts") + 1] if "accounts" in path_parts and len(path_parts) > path_parts.index("accounts") + 1 else None
                 if account_id and account_id not in {"single", "bulk"}:
                     account = auth_db.get(GmailAccount, account_id)
@@ -200,13 +201,13 @@ async def require_workspace_auth(request: Request, call_next):
                         minimum = "MANAGER"
                     if not account or not user.can_access_group(account.group_id, minimum):
                         return JSONResponse(status_code=404, content={"detail": "Resource not found"})
-                if "sessions" in path_parts and len(path_parts) > path_parts.index("sessions") + 1:
-                    session_id = path_parts[path_parts.index("sessions") + 1]
-                    session = auth_db.get(BrowserSession, session_id)
-                    account = auth_db.get(GmailAccount, session.account_id) if session else None
-                    minimum = "VIEWER" if request.method in {"GET", "HEAD"} else "OPERATOR"
-                    if not account or not user.can_access_group(account.group_id, minimum):
-                        return JSONResponse(status_code=404, content={"detail": "Resource not found"})
+            if "sessions" in path_parts and len(path_parts) > path_parts.index("sessions") + 1 and path_parts[path_parts.index("sessions") + 1] not in {"close-active", "history"}:
+                session_id = path_parts[path_parts.index("sessions") + 1]
+                session = auth_db.get(BrowserSession, session_id)
+                account = auth_db.get(GmailAccount, session.account_id) if session else None
+                minimum = "VIEWER" if request.method in {"GET", "HEAD"} else "OPERATOR"
+                if not account or not user.can_access_group(account.group_id, minimum) or not session or session.owner_employee_id != user.employee_id:
+                    return JSONResponse(status_code=404, content={"detail": "Resource not found"})
         finally:
             auth_db.close()
     return await call_next(request)
@@ -424,10 +425,15 @@ def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -
 
     Viewing and control access follows the signed-in operator's group scope.
     """
-    _account_operator(request, db)
+    user = _account_operator(request, db)
     if not settings.browser_desktop_enabled:
         raise HTTPException(status_code=404, detail="The browser desktop is not enabled")
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    try:
+        desktop = ensure_operator_desktop(user.employee_id)
+    except Exception as exc:  # noqa: BLE001 - no fallback to the shared desktop
+        logger.error("private desktop could not be initialized for authenticated operator: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Your private browser desktop could not be started") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT, headers={"X-Desktop-Websocket-Port": str(desktop["websocket_port"])})
 
 
 @app.get("/api/v1/desktop/status")
@@ -1136,9 +1142,9 @@ def account_credential_change_plans(account_id: str, db: Session = Depends(get_d
 
 
 @app.post("/api/v1/credential-change-plans/{plan_id}/start", response_model=CredentialChangePlanResponse)
-def start_account_credential_change_plan(plan_id: str, db: Session = Depends(get_db)) -> dict:
+def start_account_credential_change_plan(plan_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return start_credential_change_plan(db, settings.demo_org_id, "admin_demo", plan_id)
+        return start_credential_change_plan(db, settings.demo_org_id, _actor(request, db), plan_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 422, detail=str(exc)) from exc
 
@@ -1160,20 +1166,33 @@ def cancel_account_credential_change_plan(plan_id: str, db: Session = Depends(ge
 
 
 @app.post("/api/v1/login-jobs", response_model=LoginJobResponse, status_code=status.HTTP_201_CREATED)
-def create_bulk_login_job(payload: LoginJobCreate, db: Session = Depends(get_db)) -> dict:
+def create_bulk_login_job(payload: LoginJobCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return create_login_job(db, settings.demo_org_id, "admin_demo", payload.group_id, payload.account_ids, payload.concurrency_limit)
+        user = _account_operator(request, db)
+        return create_login_job(db, settings.demo_org_id, user.employee_id, payload.group_id, payload.account_ids, payload.concurrency_limit)
     except ImportValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/login-jobs", response_model=list[LoginJobResponse])
-def login_jobs(limit: int = Query(default=25, ge=1, le=100), db: Session = Depends(get_db)) -> list[dict]:
-    return list_login_jobs(db, settings.demo_org_id, limit)
+def login_jobs(limit: int = Query(default=25, ge=1, le=100), request: Request = None, db: Session = Depends(get_db)) -> list[dict]:
+    user = _current_user(request, db)
+    return list_login_jobs(db, settings.demo_org_id, limit, created_by=user.employee_id)
+
+
+def _operable_login_job(job_id: str, request: Request, db: Session):
+    user = _current_user(request, db)
+    job = db.scalar(select(LoginJob).where(LoginJob.organization_id == settings.demo_org_id, LoginJob.id == job_id, LoginJob.created_by == user.employee_id))
+    if not job:
+        raise HTTPException(status_code=404, detail="Login batch not found")
+    if job.group_id and not user.can_access_group(job.group_id, "OPERATOR"):
+        raise HTTPException(status_code=404, detail="Login batch not found")
+    return user
 
 
 @app.get("/api/v1/login-jobs/{job_id}", response_model=LoginJobResponse)
-def login_job_detail(job_id: str, db: Session = Depends(get_db)) -> dict:
+def login_job_detail(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _operable_login_job(job_id, request, db)
     job = get_login_job(db, settings.demo_org_id, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Login batch not found")
@@ -1181,32 +1200,36 @@ def login_job_detail(job_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/api/v1/login-jobs/{job_id}/start", response_model=LoginJobResponse)
-def start_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def start_bulk_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "RUNNING")
-        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+        user = _operable_login_job(job_id, request, db)
+        update_login_job_state(db, settings.demo_org_id, user.employee_id, job_id, "RUNNING")
+        return dispatch_login_job(db, settings.demo_org_id, user.employee_id, job_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/pause", response_model=LoginJobResponse)
-def pause_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def pause_bulk_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "PAUSED")
+        user = _operable_login_job(job_id, request, db)
+        return update_login_job_state(db, settings.demo_org_id, user.employee_id, job_id, "PAUSED")
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/dispatch", response_model=LoginJobResponse)
-def dispatch_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def dispatch_bulk_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+        user = _operable_login_job(job_id, request, db)
+        return dispatch_login_job(db, settings.demo_org_id, user.employee_id, job_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/login-jobs/{job_id}/progress", response_model=LoginJobProgressResponse)
-def login_job_progress_endpoint(job_id: str, db: Session = Depends(get_db)) -> dict:
+def login_job_progress_endpoint(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _operable_login_job(job_id, request, db)
     progress = login_job_progress(db, settings.demo_org_id, job_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Login batch not found")
@@ -1214,25 +1237,28 @@ def login_job_progress_endpoint(job_id: str, db: Session = Depends(get_db)) -> d
 
 
 @app.post("/api/v1/login-jobs/{job_id}/dispatch-next", response_model=LoginJobResponse)
-def dispatch_next_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def dispatch_next_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+        user = _operable_login_job(job_id, request, db)
+        return dispatch_login_job(db, settings.demo_org_id, user.employee_id, job_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "start" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/resume", response_model=LoginJobResponse)
-def resume_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def resume_bulk_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return resume_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+        user = _operable_login_job(job_id, request, db)
+        return resume_login_job(db, settings.demo_org_id, user.employee_id, job_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "resume" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/login-jobs/{job_id}/cancel", response_model=LoginJobResponse)
-def cancel_bulk_login_job(job_id: str, db: Session = Depends(get_db)) -> dict:
+def cancel_bulk_login_job(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "CANCELLED")
+        user = _operable_login_job(job_id, request, db)
+        return update_login_job_state(db, settings.demo_org_id, user.employee_id, job_id, "CANCELLED")
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
@@ -1804,6 +1830,8 @@ def newsletter_signup_test(newsletter_id: str, payload: NewsletterSignupTestRequ
         return {"session": None, "newsletter_id": newsletter_id, "profile_id": payload.profile_id or "", "subscription_id": subscription.id, "result": "SKIPPED_ALREADY_SUBSCRIBED"}
     if subscription and subscription.state in {"SUBMITTED", "WAITING_CONFIRMATION"}:
         active_session = _active_newsletter_session(db, payload.account_id, newsletter_id)
+        if active_session and active_session.owner_employee_id != user.employee_id:
+            active_session = None
         subscription.last_checked_at = datetime.now(timezone.utc)
         db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex}", organization_id=settings.demo_org_id, actor_id=user.employee_id, action="newsletter.signup.skipped", target_type="newsletter_subscription", target_id=subscription.id, result="success", metadata_json={"account_id": payload.account_id, "newsletter_id": newsletter_id, "skip_reason": "AWAITING_CONFIRMATION", "active_session_id": active_session.id if active_session else None}))
         db.commit()
@@ -1830,7 +1858,7 @@ def newsletter_signup_test(newsletter_id: str, payload: NewsletterSignupTestRequ
 def newsletter_signup_test_detail(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     user = _current_user(request, db)
     session = get_session(db, settings.demo_org_id, session_id)
-    if not session or (session.metadata_json or {}).get("purpose") != "newsletter":
+    if not session or session.owner_employee_id != user.employee_id or (session.metadata_json or {}).get("purpose") != "newsletter":
         raise HTTPException(status_code=404, detail="Newsletter signup test not found")
     if not user.is_admin and not user.can_access_group(session.account.group_id, "VIEWER"):
         raise HTTPException(status_code=404, detail="Resource not found")
@@ -1855,7 +1883,7 @@ def newsletter_confirmation_test(newsletter_id: str, payload: NewsletterConfirma
 def newsletter_confirmation_test_detail(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     user = _current_user(request, db)
     session = get_session(db, settings.demo_org_id, session_id)
-    if not session or (session.metadata_json or {}).get("purpose") != "newsletter_confirm":
+    if not session or session.owner_employee_id != user.employee_id or (session.metadata_json or {}).get("purpose") != "newsletter_confirm":
         raise HTTPException(status_code=404, detail="Newsletter confirmation test not found")
     if not user.is_admin and not user.can_access_group(session.account.group_id, "VIEWER"):
         raise HTTPException(status_code=404, detail="Resource not found")
@@ -1885,8 +1913,8 @@ def create_newsletter_job_route(payload: NewsletterJobCreate, request: Request, 
 
 @app.get("/api/v1/newsletter-jobs", response_model=NewsletterJobListResponse)
 def newsletter_jobs(limit: int = Query(default=50, ge=1, le=200), request: Request = None, db: Session = Depends(get_db)) -> dict:
-    _current_user(request, db)
-    items, total = list_newsletter_jobs(db, settings.demo_org_id, account_group_ids=_visible_groups(request, db), limit=limit)
+    user = _current_user(request, db)
+    items, total = list_newsletter_jobs(db, settings.demo_org_id, account_group_ids=_visible_groups(request, db), limit=limit, created_by=user.employee_id)
     return {"items": items, "total": total}
 
 
@@ -1915,8 +1943,8 @@ def newsletter_job_account_targets(payload: NewsletterAccountTargetsRequest, req
 
 @app.get("/api/v1/newsletter-jobs/{job_id}", response_model=NewsletterJobResponse)
 def newsletter_job_detail(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    _current_user(request, db)
-    job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=_visible_groups(request, db))
+    user = _current_user(request, db)
+    job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=_visible_groups(request, db), created_by=user.employee_id)
     if not job:
         raise HTTPException(status_code=404, detail="Newsletter job not found")
     return job
@@ -1936,7 +1964,7 @@ def delete_newsletter_jobs_route(payload: NewsletterJobBulkDelete, request: Requ
     user = _current_user(request, db)
     visible_groups = _visible_groups(request, db)
     for job_id in payload.job_ids:
-        job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=visible_groups)
+        job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=visible_groups, created_by=user.employee_id)
         if not job or (not user.is_admin and not user.can_access_group(job["account_group_id"], "OPERATOR")):
             raise HTTPException(status_code=404, detail="One or more newsletter jobs were not found")
     try:
@@ -1948,7 +1976,7 @@ def delete_newsletter_jobs_route(payload: NewsletterJobBulkDelete, request: Requ
 
 def _operable_newsletter_job(job_id: str, request: Request, db: Session):
     user = _current_user(request, db)
-    job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=_visible_groups(request, db))
+    job = get_newsletter_job(db, settings.demo_org_id, job_id, account_group_ids=_visible_groups(request, db), created_by=user.employee_id)
     if not job:
         raise HTTPException(status_code=404, detail="Newsletter job not found")
     if not user.is_admin and not user.can_access_group(job["account_group_id"], "OPERATOR"):
@@ -2050,10 +2078,11 @@ def audit_events(account_id: str | None = None, limit: int = Query(default=25, g
 
 @app.get("/api/v1/sessions", response_model=list[BrowserSessionResponse])
 def sessions(account_id: str | None = None, group_id: str | None = None, latest_per_account: bool = False, purpose: str | None = Query(default=None, max_length=40), outcome: str | None = Query(default=None, max_length=32), limit: int = Query(default=25, ge=1, le=100), request: Request = None, db: Session = Depends(get_db)) -> list[dict]:
+    user = _current_user(request, db)
     visible = _visible_groups(request, db)
     if visible is not None and group_id and group_id not in visible:
         raise HTTPException(status_code=404, detail="Resource not found")
-    return list_sessions(db, settings.demo_org_id, account_id, limit, group_id=group_id, latest_per_account=latest_per_account, purpose=purpose, outcome=outcome, visible_group_ids=visible)
+    return list_sessions(db, settings.demo_org_id, account_id, limit, group_id=group_id, latest_per_account=latest_per_account, purpose=purpose, outcome=outcome, visible_group_ids=visible, owner_employee_id=user.employee_id)
 
 
 @app.delete("/api/v1/sessions/history")
@@ -2235,7 +2264,8 @@ def remove_proxy(proxy_id: str, payload: ProxyDeleteRequest, request: Request, d
 
 
 @app.get("/api/v1/sessions/{session_id}", response_model=BrowserSessionResponse)
-def session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
+def session_detail(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _current_user(request, db)
     session = get_session(db, settings.demo_org_id, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2243,18 +2273,18 @@ def session_detail(session_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/api/v1/accounts/{account_id}/sessions", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def open_login_session(account_id: str, payload: SessionStartRequest | None = None, db: Session = Depends(get_db)) -> dict:
+def open_login_session(account_id: str, request: Request, payload: SessionStartRequest | None = None, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_login_session(db, settings.demo_org_id, "admin_demo", account_id, purpose=payload.purpose if payload else "login"))
+        return session_response(start_login_session(db, settings.demo_org_id, _actor(request, db), account_id, purpose=payload.purpose if payload else "login"))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/accounts/{account_id}/contacts-import", response_model=ContactsImportResponse, status_code=status.HTTP_201_CREATED)
-def contacts_import(account_id: str, payload: ContactsImportRequest, db: Session = Depends(get_db)) -> dict:
+def contacts_import(account_id: str, payload: ContactsImportRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        session, contact_file, email_count = start_contacts_import(db, settings.demo_org_id, "admin_demo", account_id, payload.file_id, payload.emails)
+        session, contact_file, email_count = start_contacts_import(db, settings.demo_org_id, _actor(request, db), account_id, payload.file_id, payload.emails)
         return {
             "session_id": session.id,
             "account_id": account_id,
@@ -2267,27 +2297,27 @@ def contacts_import(account_id: str, payload: ContactsImportRequest, db: Session
 
 
 @app.post("/api/v1/accounts/{account_id}/labels-markers", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def labels_markers_operation(account_id: str, db: Session = Depends(get_db)) -> dict:
+def labels_markers_operation(account_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_labels_markers_operation(db, settings.demo_org_id, "admin_demo", account_id))
+        return session_response(start_labels_markers_operation(db, settings.demo_org_id, _actor(request, db), account_id))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/accounts/{account_id}/security", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def security_operation(account_id: str, db: Session = Depends(get_db)) -> dict:
+def security_operation(account_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_security_operation(db, settings.demo_org_id, "admin_demo", account_id))
+        return session_response(start_security_operation(db, settings.demo_org_id, _actor(request, db), account_id))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/accounts/{account_id}/addons", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def addons_operation(account_id: str, db: Session = Depends(get_db)) -> dict:
+def addons_operation(account_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_addons_operation(db, settings.demo_org_id, "admin_demo", account_id))
+        return session_response(start_addons_operation(db, settings.demo_org_id, _actor(request, db), account_id))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
@@ -2300,9 +2330,9 @@ def google_alert_topics(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @app.post("/api/v1/accounts/{account_id}/alerts", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def alerts_operation(account_id: str, payload: AlertsOperationRequest, db: Session = Depends(get_db)) -> dict:
+def alerts_operation(account_id: str, payload: AlertsOperationRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(start_alerts_operation(db, settings.demo_org_id, "admin_demo", account_id, payload.topic_count, payload.topics))
+        return session_response(start_alerts_operation(db, settings.demo_org_id, _actor(request, db), account_id, payload.topic_count, payload.topics))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
@@ -2314,7 +2344,7 @@ def stop_group_sessions(group_id: str, request: Request, db: Session = Depends(g
     if not user.is_admin and not user.can_access_group(group_id, "OPERATOR"):
         raise HTTPException(status_code=404, detail="Resource not found")
     try:
-        return close_group_sessions(db, settings.demo_org_id, user.employee_id, group_id)
+        return close_group_sessions(db, settings.demo_org_id, user.employee_id, group_id, owner_employee_id=user.employee_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -2323,39 +2353,41 @@ def stop_group_sessions(group_id: str, request: Request, db: Session = Depends(g
 def stop_all_active_sessions(request: Request, db: Session = Depends(get_db)) -> dict:
     user = _current_user(request, db)
     group_ids = None if user.is_admin else set(user.group_access)
-    return close_active_sessions(db, settings.demo_org_id, user.employee_id, group_ids)
+    return close_active_sessions(db, settings.demo_org_id, user.employee_id, group_ids, owner_employee_id=user.employee_id)
 
 
 @app.post("/api/v1/accounts/{account_id}/mail-workflow", response_model=BrowserSessionResponse, status_code=status.HTTP_201_CREATED)
-def mail_workflow_operation(account_id: str, payload: MailWorkflowRequest, db: Session = Depends(get_db)) -> dict:
+def mail_workflow_operation(account_id: str, payload: MailWorkflowRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
         workflow = payload.model_dump()
-        return session_response(start_mail_workflow(db, settings.demo_org_id, "admin_demo", account_id, workflow))
+        return session_response(start_mail_workflow(db, settings.demo_org_id, _actor(request, db), account_id, workflow))
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=409 if "already has" in message or "archived" in message else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/mail-workflow/jobs", response_model=LoginJobResponse, status_code=status.HTTP_201_CREATED)
-def create_mail_workflow_job_route(payload: MailWorkflowBulkRequest, db: Session = Depends(get_db)) -> dict:
+def create_mail_workflow_job_route(payload: MailWorkflowBulkRequest, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
         workflow = payload.model_dump(exclude={"group_id", "account_ids", "concurrency_limit"})
-        return create_mail_workflow_job(db, settings.demo_org_id, "admin_demo", payload.group_id, payload.account_ids, payload.concurrency_limit, workflow)
+        return create_mail_workflow_job(db, settings.demo_org_id, _actor(request, db), payload.group_id, payload.account_ids, payload.concurrency_limit, workflow)
     except ImportValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/mail-workflow/jobs/{job_id}/start", response_model=LoginJobResponse)
-def start_mail_workflow_job_route(job_id: str, db: Session = Depends(get_db)) -> dict:
+def start_mail_workflow_job_route(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "RUNNING")
-        return dispatch_login_job(db, settings.demo_org_id, "admin_demo", job_id)
+        user = _operable_login_job(job_id, request, db)
+        update_login_job_state(db, settings.demo_org_id, user.employee_id, job_id, "RUNNING")
+        return dispatch_login_job(db, settings.demo_org_id, user.employee_id, job_id)
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/mail-workflow/jobs/{job_id}/progress", response_model=LoginJobProgressResponse)
-def mail_workflow_job_progress_route(job_id: str, db: Session = Depends(get_db)) -> dict:
+def mail_workflow_job_progress_route(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    _operable_login_job(job_id, request, db)
     progress = login_job_progress(db, settings.demo_org_id, job_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Mail workflow job not found")
@@ -2363,9 +2395,10 @@ def mail_workflow_job_progress_route(job_id: str, db: Session = Depends(get_db))
 
 
 @app.post("/api/v1/mail-workflow/jobs/{job_id}/cancel", response_model=LoginJobResponse)
-def cancel_mail_workflow_job_route(job_id: str, db: Session = Depends(get_db)) -> dict:
+def cancel_mail_workflow_job_route(job_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return update_login_job_state(db, settings.demo_org_id, "admin_demo", job_id, "CANCELLED")
+        user = _operable_login_job(job_id, request, db)
+        return update_login_job_state(db, settings.demo_org_id, user.employee_id, job_id, "CANCELLED")
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "cannot move" in str(exc).lower() else 404, detail=str(exc)) from exc
 
@@ -2398,25 +2431,25 @@ def remove_contact_file(file_id: str, request: Request, db: Session = Depends(ge
 
 
 @app.post("/api/v1/sessions/{session_id}/events", response_model=BrowserSessionResponse)
-def session_event(session_id: str, payload: SessionEventCreate, db: Session = Depends(get_db)) -> dict:
+def session_event(session_id: str, payload: SessionEventCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(record_session_event(db, settings.demo_org_id, "admin_demo", session_id, payload.event_type, payload.detail))
+        return session_response(record_session_event(db, settings.demo_org_id, _actor(request, db), session_id, payload.event_type, payload.detail))
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "closed" in str(exc) else 422, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/sessions/{session_id}/close", response_model=BrowserSessionResponse)
-def end_login_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+def end_login_session(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        return session_response(close_session(db, settings.demo_org_id, "admin_demo", session_id))
+        return session_response(close_session(db, settings.demo_org_id, _actor(request, db), session_id))
     except ImportValidationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/sessions/{session_id}/observations", response_model=PageObservationResponse)
-def session_page_observation(session_id: str, payload: PageObservationCreate, db: Session = Depends(get_db)) -> dict:
+def session_page_observation(session_id: str, payload: PageObservationCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
-        signal, action, session = observe_session_page(db, settings.demo_org_id, "admin_demo", session_id, payload.url, payload.title, payload.text)
+        signal, action, session = observe_session_page(db, settings.demo_org_id, _actor(request, db), session_id, payload.url, payload.title, payload.text)
         return {"signal": signal, "action": action, "session": session_response(session)}
     except ImportValidationError as exc:
         raise HTTPException(status_code=409 if "closed" in str(exc) else 404, detail=str(exc)) from exc

@@ -1225,7 +1225,7 @@ function BrowserDesktopPage({ isActive, groups, refreshKey, onRefresh, onOpenSes
       </aside>}
     </section>}
     {enabled === false && <section className="desktop-setup-note"><Monitor size={21} /><div><strong>The server desktop is not enabled yet</strong><span>The Ubuntu installer configures the virtual display, window manager, and protected browser viewer.</span></div></section>}
-    <div className="desktop-security-note"><ShieldCheck size={15} /><span>Account sessions use separate saved Chrome profiles on the server. Closing this page does not close those sessions.</span></div>
+    <div className="desktop-security-note"><ShieldCheck size={15} /><span>Your browser desktop and sessions are private to your signed-in operator. Closing this page does not close your sessions; account access still follows your assigned groups.</span></div>
   </div>;
 }
 
