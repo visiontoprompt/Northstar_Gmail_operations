@@ -30,6 +30,8 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   MoveRight,
   Pencil,
   Play,
@@ -54,6 +56,7 @@ import { runProxyTestQueue } from "./proxy-test";
 import { api } from "./api";
 import { OvhPage } from "./ovh/OvhPage";
 import { GoDaddyPage } from "./godaddy/GoDaddyPage";
+import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, type DesktopAccountFilter } from "./desktop-contract";
 
 type Group = { id: string; name: string; description: string | null; capacity: number; account_count: number; ready_count: number; issue_count: number; status: string };
 type EmployeeGroupAccess = { group_id: string; group_name: string; access_level: "VIEWER" | "OPERATOR" | "MANAGER" };
@@ -238,6 +241,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [mobileNav, setMobileNav] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("northstar-sidebar-collapsed") === "true");
+  const [desktopNavHidden, setDesktopNavHidden] = useState(() => window.localStorage.getItem("northstar-desktop-nav-hidden") === "true");
   const [activeView, setActiveView] = useState<WorkspaceView>(() => {
     const stored = window.localStorage.getItem("northstar-active-view");
     const views: WorkspaceView[] = ["overview", "accounts", "groups", "employees", "issues", "sessions", "desktop", "proxies", "profiles", "credentials", "newsletters", "vps", "godaddy", "settings"];
@@ -339,9 +343,9 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     try { setActiveSession(await api<Session>(`/api/v1/accounts/${account.id}/sessions`, { method: "POST", body: JSON.stringify({ purpose: account.profile.status === "SAVED" ? "reuse" : "login" }) })); reload(); }
     catch (requestError) { notify("error", (requestError as Error).message); }
   };
-  const runRegistryAction = async (kind: RegistryAction) => {
+  const runRegistryAction = async (kind: RegistryAction, explicitTargets?: Account[]) => {
     try {
-      const targets = await resolveActionAccounts();
+      const targets = explicitTargets ?? await resolveActionAccounts();
       if (!targets.length) { notify("info", actionScope === "group" ? "Choose a group with accounts first." : "Select at least one account first."); return; }
       if (kind === "login") {
         if (targets.length === 1) { await openLogin(targets[0]); return; }
@@ -448,6 +452,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   useEffect(() => { window.localStorage.setItem("northstar-active-view", activeView); }, [activeView]);
   useEffect(() => { if (!auth.permissions.is_admin && (activeView === "employees" || activeView === "settings" || activeView === "desktop")) setActiveView("overview"); }, [activeView, auth.permissions.is_admin]);
   useEffect(() => { window.localStorage.setItem("northstar-sidebar-collapsed", String(sidebarCollapsed)); }, [sidebarCollapsed]);
+  useEffect(() => { window.localStorage.setItem("northstar-desktop-nav-hidden", String(desktopNavHidden)); }, [desktopNavHidden]);
   useEffect(() => {
     if (!auth.permissions.is_admin) { setHeaderOvhLinks([]); return; }
     let cancelled = false;
@@ -467,7 +472,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const ovhPowerKind = (status: string) => { const value = status.toUpperCase(); return ["RUNNING", "ACTIVE", "ENABLED", "STARTED"].includes(value) ? "on" : ["STOPPED", "OFF", "SHUTOFF", "HALTED", "SHELVED", "SUSPENDED"].includes(value) ? "off" : "unknown"; };
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${activeView === "desktop" && desktopNavHidden ? " desktop-nav-hidden" : ""}`}>
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="Primary navigation">
         <div className="brand-lockup"><div className="brand-mark"><Layers3 size={18} /></div><div className="brand-copy"><strong>Northstar</strong><span>Gmail operations</span></div><button type="button" className="sidebar-collapse-toggle" aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}>{sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button></div>
         <nav className="nav-groups">
@@ -501,7 +506,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
           {activeView === "groups" && <GroupsPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenGroup={(groupId) => { setSelectedGroup(groupId); setActiveView("accounts"); }} onNotify={notify} />}
           {activeView === "employees" && auth.permissions.is_admin && <EmployeesPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onNotify={notify} />}
           {activeView === "issues" && <IssuesPage refreshKey={refreshKey} onRefresh={reload} onOpenAccount={async (accountId) => { try { setActiveAccount(await api<Account>(`/api/v1/accounts/${accountId}`)); } catch (requestError) { notify("error", (requestError as Error).message); } }} />}
-          {activeView === "desktop" && auth.permissions.is_admin && <BrowserDesktopPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenSession={(session) => setActiveSession(session)} />}
+          {activeView === "desktop" && auth.permissions.is_admin && <BrowserDesktopPage groups={groups} refreshKey={refreshKey} onRefresh={reload} onOpenSession={(session) => setActiveSession(session)} onRunOperation={(kind, targets) => runRegistryAction(kind, targets)} navHidden={desktopNavHidden} onToggleNavigation={() => setDesktopNavHidden((hidden) => !hidden)} />}
           {activeView === "settings" && auth.permissions.is_admin && <SettingsPage onNotify={notify} />}
           {activeView === "vps" && auth.permissions.can_manage_workspace && <OvhPage onOpenSettings={() => setActiveView("settings")} onNotify={notify} />}
           {activeView === "godaddy" && auth.permissions.can_manage_workspace && <GoDaddyPage onNotify={notify} />}
@@ -882,13 +887,22 @@ function SessionsPage({ groups, refreshKey, onRefresh, canDeleteHistory, onDelet
   return <div className="infra-page"><InfrastructureHeader eyebrow="RUNTIME CONTROL" title="Sessions" description="Review every profile-backed action and its evidence-based outcome for each account." icon={<Clock3 size={20} />} onRefresh={onRefresh} loading={loading} /><section className="summary-grid" aria-label="Session summary"><SummaryCard label={scope === "latest" ? "Accounts in view" : "Activity records"} value={sessions.length.toString()} note={scopeLabel} icon={<Clock3 size={17} />} /><SummaryCard label="Completed" value={completedCount.toString()} note="Recorded terminal success" icon={<Check size={17} />} tone="teal" /><SummaryCard label="Interrupted" value={interruptedCount.toString()} note="Needs attention" icon={<Activity size={17} />} tone="amber" /><SummaryCard label="Not finished" value={unfinishedCount.toString()} note={`${failedCount} failed · ${openCount} open · ${savedCount} saved`} icon={<XCircle size={17} />} /></section><section className="infra-panel"><div className="panel-header"><div><h2>{scopeLabel}</h2><p>{scope === "latest" ? "One latest action per account. Switch to All activity to inspect completed and interrupted history." : "All stored session actions in the selected scope, ordered by most recent event."}</p></div><div className="session-context-controls"><div className="group-context"><span>GROUP CONTEXT</span><label className="select-wrap"><select aria-label="Filter sessions by account group" value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="all">All groups</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.account_count} accounts</option>)}</select><ChevronDown size={15} /></label></div><div className="group-context"><span>VIEW</span><label className="select-wrap"><select aria-label="Choose session view" value={scope} onChange={(event) => setScope(event.target.value as "latest" | "all")}><option value="latest">Latest per account</option><option value="all">All activity</option></select><ChevronDown size={15} /></label></div>{canDeleteHistory && <button type="button" className="button danger small session-history-delete" disabled={deleting} onClick={() => { if (!window.confirm("Delete all closed session history? Active sessions will stay open, and audit events are retained.")) return; setDeleting(true); void onDeleteHistory().catch((requestError) => setError((requestError as Error).message)).finally(() => setDeleting(false)); }}><Trash2 size={14} />{deleting ? "Deleting…" : "Delete history"}</button>}</div></div><div className="session-filter-row"><InventoryToolbar value={query} onChange={setQuery} onClear={() => setQuery("")} placeholder="Search account, action, session, or outcome" status={status} onStatusChange={setStatus} statuses={[{ value: "IN_PROGRESS", label: "In progress" }, { value: "COMPLETED", label: "Completed" }, { value: "INTERRUPTED", label: "Interrupted" }, { value: "NOT_FINISHED", label: "Not finished" }, { value: "FAILED", label: "Failed" }]} loading={loading} onRefresh={onRefresh} /><label className="filter-select session-action-filter"><Filter size={15} /><span className="sr-only">Filter sessions by action</span><select aria-label="Filter sessions by action" value={action} onChange={(event) => setAction(event.target.value)}><option value="ALL">All actions</option>{actionOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>{error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={onRefresh}>Retry</button></div>}{!loading && !filtered.length ? <div className="table-state empty-state"><div className="empty-icon"><Clock3 size={21} /></div><strong>No session activity matches this view</strong><span>Try a different action, outcome, group, or view scope.</span></div> : <div className="table-scroll"><table className="infra-table sessions-table"><caption className="sr-only">{scopeLabel} session activity</caption><thead><tr><th>Account</th><th>Action</th><th>Outcome</th><th>Gmail state</th><th>Profile</th><th>Runtime</th><th>Last event</th><th><span className="sr-only">Open</span></th></tr></thead><tbody>{filtered.map((session) => <tr key={session.id}><td><button type="button" className="infra-link" onClick={() => onOpenAccount(session.account_id)}><strong>{session.account_email}</strong><small className="mono">{session.id}</small></button></td><td><strong className="session-action-label">{session.action ?? labelStatus(session.purpose ?? "login")}</strong><small className="table-subtext">{session.duration_seconds != null ? `${session.duration_seconds}s duration` : "Duration pending"}</small></td><td><InventoryStatus status={session.operation_status ?? "NOT_FINISHED"} /><small className="table-subtext">{session.status_detail ?? labelStatus(session.state)}</small></td><td><InventoryStatus status={session.login_state || session.state} /><small className="table-subtext">{labelStatus(session.state)}</small></td><td><span className="metadata-cell"><span className={`status-dot ${session.profile_saved ? "teal" : "neutral"}`} />{session.profile_saved ? "Saved" : "Reserved"}</span></td><td><span className="table-subtext">{labelStatus(session.runtime_type)}</span><small className="table-subtext">{session.browser_opened ? "Browser open" : "Browser closed"}</small></td><td><span className="table-subtext">{formatDateTime(session.last_event_at)}</span></td><td><button type="button" className="row-open" aria-label={`Open session for ${session.account_email}`} onClick={() => onOpenSession(session)}><ArrowRight size={16} /></button></td></tr>)}</tbody></table></div>}</section><footer className="page-footer"><span>Northstar Operations</span><span>Session ledger · {scopeLabel.toLowerCase()}</span></footer></div>;
 }
 
-function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { groups: Group[]; refreshKey: number; onRefresh: () => void; onOpenSession: (session: Session) => void }) {
+function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession, onRunOperation, navHidden, onToggleNavigation }: { groups: Group[]; refreshKey: number; onRefresh: () => void; onOpenSession: (session: Session) => void; onRunOperation: (kind: RegistryAction, accounts: Account[]) => void; navHidden: boolean; onToggleNavigation: () => void }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [groupId, setGroupId] = useState(() => window.localStorage.getItem("northstar-desktop-group") || "");
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<DesktopAccountFilter>("ALL");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [visibleAccountLimit, setVisibleAccountLimit] = useState(100);
+  const [scope, setScope] = useState<"selected" | "filtered">("selected");
+  const [operation, setOperation] = useState<RegistryAction>("login");
+  const [accountRailCollapsed, setAccountRailCollapsed] = useState(() => window.localStorage.getItem("northstar-desktop-accounts-collapsed") === "true");
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.localStorage.getItem("northstar-desktop-inspector-open") !== "false");
+  const [inspectorWidth, setInspectorWidth] = useState(() => Math.max(230, Math.min(380, Number(window.localStorage.getItem("northstar-desktop-inspector-width")) || 280)));
+  const [closingSessionId, setClosingSessionId] = useState("");
+  const [closeConfirmationSessionId, setCloseConfirmationSessionId] = useState("");
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [concurrency, setConcurrency] = useState(4);
   const [maxConcurrency, setMaxConcurrency] = useState(10);
@@ -900,9 +914,22 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { 
   const [notice, setNotice] = useState("");
   const viewerRef = useRef<HTMLIFrameElement>(null);
   const liveBrowserCount = sessions.filter((session) => session.browser_alive).length;
-  const filteredAccounts = accounts.filter((account) => !query.trim() || account.email.toLowerCase().includes(query.trim().toLowerCase()));
+  const searchedAccounts = searchDesktopAccounts(accounts, query);
   const activeByAccount = new Map(sessions.map((session) => [session.account_id, session]));
+  const liveAccountIds = new Set(sessions.filter((session) => session.browser_alive).map((session) => session.account_id));
+  const statusCounts = countDesktopAccounts(searchedAccounts, liveAccountIds);
+  const filteredAccounts = filterDesktopAccounts(searchedAccounts, statusFilter, liveAccountIds);
+  const displayedAccounts = filteredAccounts.slice(0, visibleAccountLimit);
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions.find((session) => session.browser_alive) ?? null;
+  const inspectedAccount = accounts.find((account) => selectedIds.includes(account.id)) ?? accounts.find((account) => account.id === selectedSession?.account_id) ?? null;
+  const inspectedSession = inspectedAccount ? activeByAccount.get(inspectedAccount.id) ?? null : selectedSession;
+  const visibleSelectedIds = new Set(filteredAccounts.filter((account) => selectedIds.includes(account.id)).map((account) => account.id));
+  const operationTargets = scope === "selected" ? filteredAccounts.filter((account) => visibleSelectedIds.has(account.id)) : filteredAccounts;
+
+  useEffect(() => { window.localStorage.setItem("northstar-desktop-accounts-collapsed", String(accountRailCollapsed)); }, [accountRailCollapsed]);
+  useEffect(() => { window.localStorage.setItem("northstar-desktop-inspector-open", String(inspectorOpen)); }, [inspectorOpen]);
+  useEffect(() => { window.localStorage.setItem("northstar-desktop-inspector-width", String(inspectorWidth)); }, [inspectorWidth]);
+  useEffect(() => { setVisibleAccountLimit(100); }, [groupId, query, statusFilter]);
 
   useEffect(() => {
     if (!groupId && groups.length) setGroupId(groups[0].id);
@@ -978,9 +1005,8 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { 
     finally { setFocusing(""); }
   };
 
-  const startSelected = async () => {
-    const chosen = accounts.filter((account) => selectedIds.includes(account.id));
-    if (!chosen.length) { setError("Select one or more accounts from this group first."); return; }
+  const startAccounts = async (chosen: Account[]) => {
+    if (!chosen.length) { setError(scope === "selected" ? "Select one or more accounts from this group first." : "No accounts match the current group and filters."); return; }
     setLaunching(true); setError(""); setNotice("");
     try {
       const existing = chosen.map((account) => activeByAccount.get(account.id)).filter((session): session is Session => Boolean(session));
@@ -1009,9 +1035,35 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { 
     } catch (requestError) { setError((requestError as Error).message || "The selected browser sessions could not be started."); }
     finally { setLaunching(false); }
   };
+  const runChosenOperation = async () => {
+    if (!operationTargets.length) { setError(scope === "selected" ? "Select one or more accounts first." : "No accounts match the current group and filters."); return; }
+    if (operation === "login") { await startAccounts(operationTargets); return; }
+    if (!canRunDesktopOperation(operation, operationTargets)) {
+      setError("This operation requires authenticated accounts. Filter to Authenticated or adjust the selection, then retry.");
+      return;
+    }
+    setError(""); setNotice("");
+    onRunOperation(operation, operationTargets);
+  };
+  const closeSelectedSession = async () => {
+    if (!inspectedSession || closeConfirmationSessionId !== inspectedSession.id) return;
+    setClosingSessionId(inspectedSession.id); setError("");
+    try {
+      await api<Session>(`/api/v1/sessions/${inspectedSession.id}/close`, { method: "POST" });
+      setCloseConfirmationSessionId("");
+      setNotice(`Browser session closed for ${inspectedSession.account_email}.`);
+      await loadSessions();
+      onRefresh();
+    } catch (requestError) { setError((requestError as Error).message || "The browser session could not be closed."); }
+    finally { setClosingSessionId(""); }
+  };
+  const selectAll = () => setSelectedIds((current) => {
+    const visibleIds = new Set(filteredAccounts.map((account) => account.id));
+    const allVisibleSelected = filteredAccounts.length > 0 && filteredAccounts.every((account) => current.includes(account.id));
+    return allVisibleSelected ? current.filter((id) => !visibleIds.has(id)) : [...new Set([...current, ...visibleIds])];
+  });
 
   const toggleAccount = (accountId: string) => setSelectedIds((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
-  const selectAll = () => setSelectedIds((current) => current.length === filteredAccounts.length ? [] : filteredAccounts.map((account) => account.id));
   const cancelJob = async () => {
     if (!job) return;
     setLaunching(true); setError("");
@@ -1023,16 +1075,19 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { 
   const currentGroup = groups.find((group) => group.id === groupId);
   const jobCompleted = job?.items.filter((item) => ["SUCCEEDED", "ATTENTION", "FAILED", "CANCELLED"].includes(item.state)).length ?? 0;
   return <div className="browser-desktop-page">
-    <WorkspacePageHeader eyebrow="SERVER BROWSER" title="Browser desktop" description="Choose an account group, open browser sessions, and switch between their windows from one live desktop." icon={<Monitor size={20} />} action={<span className={`desktop-state ${enabled ? "ready" : enabled === false ? "off" : "unknown"}`}><i />{enabled ? "Desktop online" : enabled === false ? "Desktop unavailable" : "Checking"}</span>} />
+    <WorkspacePageHeader eyebrow="SERVER BROWSER" title="Browser desktop" description="Manage account sessions, run scoped operations, and switch between live Chrome windows." icon={<Monitor size={20} />} action={<><button type="button" className="button secondary small desktop-nav-toggle" onClick={onToggleNavigation} aria-label={navHidden ? "Show application navigation" : "Hide application navigation"} title={navHidden ? "Show application navigation" : "Hide application navigation"}>{navHidden ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}{navHidden ? "Show navigation" : "Hide navigation"}</button><span className={`desktop-state ${enabled ? "ready" : enabled === false ? "off" : "unknown"}`}><i />{enabled ? "Desktop online" : enabled === false ? "Desktop unavailable" : "Checking"}</span></>} />
     {error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={() => { setError(""); void Promise.all([loadAccounts(), loadSessions()]).catch((requestError) => setError((requestError as Error).message)); }}>Retry</button></div>}
     {notice && <div className="desktop-notice" role="status"><Check size={16} /><span>{notice}</span><button type="button" className="icon-button" aria-label="Dismiss message" onClick={() => setNotice("")}><X size={15} /></button></div>}
-    {enabled && <section className="desktop-workspace" aria-label="Browser desktop workspace">
+    {enabled && <section className={`desktop-workspace${accountRailCollapsed ? " accounts-collapsed" : ""}${inspectorOpen ? " inspector-open" : ""}`} style={{ "--desktop-inspector-width": `${inspectorWidth}px` } as React.CSSProperties} aria-label="Browser desktop workspace">
       <aside className="desktop-account-rail" aria-label="Account launcher">
-        <div className="desktop-rail-heading"><div><span className="detail-label">ACCOUNT SCOPE</span><h2>Launch sessions</h2></div><span className="panel-count">{currentGroup?.account_count ?? 0}</span></div>
+        {accountRailCollapsed ? <div className="desktop-rail-collapsed"><button type="button" className="icon-button" aria-label="Expand account launcher" title="Expand account launcher" onClick={() => setAccountRailCollapsed(false)}><PanelLeftOpen size={17} /></button><span className="desktop-rail-count" title={`${currentGroup?.account_count ?? accounts.length} accounts in scope`}><UsersRound size={15} />{currentGroup?.account_count ?? accounts.length}</span><span className="desktop-rail-selected" title={`${selectedIds.length} selected`}>{selectedIds.length}</span></div> : <>
+        <div className="desktop-rail-heading"><div><span className="detail-label">ACCOUNT SCOPE</span><h2>Launch sessions</h2></div><span className="panel-count">{currentGroup?.account_count ?? accounts.length}</span><button type="button" className="icon-button desktop-rail-collapse" aria-label="Collapse account launcher" title="Collapse account launcher" onClick={() => setAccountRailCollapsed(true)}><PanelLeftClose size={16} /></button></div>
         <label className="desktop-group-select"><span>Account group</span><select aria-label="Choose an account group" value={groupId} onChange={(event) => { setGroupId(event.target.value); window.localStorage.setItem("northstar-desktop-group", event.target.value); setSelectedIds([]); setJob(null); setError(""); }}><option value="all">All groups</option>{groups.map((group) => <option value={group.id} key={group.id}>{group.name} · {group.account_count}</option>)}</select></label>
-        <div className="desktop-selection-tools"><label className="desktop-search"><Search size={15} /><input aria-label="Search group accounts" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find an account" />{query && <button type="button" aria-label="Clear account search" onClick={() => setQuery("")}><X size={13} /></button>}</label><button type="button" className="text-button" onClick={selectAll} disabled={!filteredAccounts.length}>{selectedIds.length === filteredAccounts.length && filteredAccounts.length ? "Clear" : "Select all"}</button></div>
+        <div className="desktop-selection-tools"><label className="desktop-search"><Search size={15} /><input aria-label="Search group accounts" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find an account" />{query && <button type="button" aria-label="Clear account search" onClick={() => setQuery("")}><X size={13} /></button>}</label><button type="button" className="text-button" onClick={selectAll} disabled={!filteredAccounts.length}>{filteredAccounts.length && filteredAccounts.every((account) => selectedIds.includes(account.id)) ? "Clear" : `Select all ${filteredAccounts.length}`}</button></div>
+        <div className="desktop-account-filters" role="group" aria-label="Filter accounts by status">{([{ value: "ALL", label: "All" }, { value: "AUTHENTICATED", label: "Authenticated" }, { value: "VERIFICATION_REQUIRED", label: "Verification" }, { value: "NEVER_LOGGED_IN", label: "Never logged in" }, { value: "BROWSER_OPEN", label: "Browser open" }] as const).map((filter) => <button type="button" key={filter.value} aria-pressed={statusFilter === filter.value} className={statusFilter === filter.value ? "active" : ""} onClick={() => setStatusFilter(filter.value)}>{filter.label}<span>{statusCounts[filter.value]}</span></button>)}</div>
+        <div className="desktop-list-meta"><span>Showing {displayedAccounts.length} of {filteredAccounts.length}</span><span>{visibleSelectedIds.size} selected here</span></div>
         <div className="desktop-account-list" aria-label="Accounts in selected group">
-          {loading && !accounts.length ? <div className="desktop-list-state"><span className="spinner" /> Loading accounts…</div> : filteredAccounts.map((account) => {
+          {loading && !accounts.length ? <div className="desktop-list-state"><span className="spinner" /> Loading accounts…</div> : displayedAccounts.map((account) => {
             const session = activeByAccount.get(account.id);
             return <div className={`desktop-account-row ${selectedIds.includes(account.id) ? "selected" : ""}`} key={account.id}>
               <input type="checkbox" checked={selectedIds.includes(account.id)} onChange={() => toggleAccount(account.id)} aria-label={`Select ${account.email}`} />
@@ -1042,18 +1097,21 @@ function BrowserDesktopPage({ groups, refreshKey, onRefresh, onOpenSession }: { 
             </div>;
           })}
           {!loading && !filteredAccounts.length && <div className="desktop-list-state">{accounts.length ? "No accounts match this search." : "This group has no accounts."}</div>}
+          {displayedAccounts.length < filteredAccounts.length && <button type="button" className="desktop-load-more" onClick={() => setVisibleAccountLimit((limit) => Math.min(filteredAccounts.length, limit + 100))}>Load 100 more · {filteredAccounts.length - displayedAccounts.length} remaining</button>}
         </div>
-        <div className="desktop-launch-controls"><label htmlFor="desktop-concurrency">Sessions at a time</label><div className="desktop-launch-line"><select id="desktop-concurrency" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>{Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" className="button primary" onClick={() => void startSelected()} disabled={launching || !selectedIds.length} aria-busy={launching}>{launching ? <span className="button-spinner" /> : <Play size={15} />}{selectedIds.length > 1 ? `Start ${selectedIds.length} sessions` : "Start session"}</button></div><small>Running browsers stay open while you work. Queued accounts start as a slot becomes available.</small></div>
+        <div className="desktop-launch-controls"><div className="desktop-operation-heading"><div><span className="detail-label">SCOPED ACTION</span><strong>Choose an operation for this scope</strong></div><span>{operationTargets.length} accounts</span></div><label htmlFor="desktop-operation">Operation</label><select id="desktop-operation" value={operation} onChange={(event) => setOperation(event.target.value as RegistryAction)}><option value="login">Open browser sessions</option><option value="security">Browser security</option><option value="labels">Labels &amp; markers</option><option value="addons">Add-ons</option><option value="alerts">Google Alerts</option><option value="preferences">Account preferences</option><option value="mail">Mail workflow</option><option value="contacts">Import contacts</option><option value="apps">Google apps</option></select><div className="desktop-operation-row"><label htmlFor="desktop-scope">Apply to</label><select id="desktop-scope" value={scope} onChange={(event) => setScope(event.target.value as "selected" | "filtered")}><option value="selected">Selected accounts ({visibleSelectedIds.size})</option><option value="filtered">All filtered accounts ({filteredAccounts.length})</option></select></div>{operation === "login" && <label className="desktop-concurrency-label" htmlFor="desktop-concurrency">Sessions at a time</label>}{operation === "login" && <select id="desktop-concurrency" className="desktop-concurrency-select" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>{Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}</select>}<button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation()} disabled={launching || !operationTargets.length} aria-busy={launching}>{launching ? <span className="button-spinner" /> : operation === "login" ? <Play size={15} /> : <ArrowRight size={15} />}{launching ? "Starting…" : operation === "login" ? `Start ${operationTargets.length || "selected"} session${operationTargets.length === 1 ? "" : "s"}` : `Configure ${labelStatus(operation)}`}</button><small>{operation === "login" ? "Running browsers share the server desktop. Queue concurrency is capped by workspace policy." : "This opens the existing operation setup with the exact account scope shown above."}</small></div>
+        </>}
       </aside>
       <div className="desktop-main">
         <section className="desktop-panel">
-          <div className="desktop-viewer-toolbar"><div className="desktop-viewer-label"><span className="desktop-live-mark" /><div><span className="detail-label">LIVE SERVER DESKTOP</span><strong>{liveBrowserCount} live {liveBrowserCount === 1 ? "browser" : "browsers"}{currentGroup ? ` · ${currentGroup.name}` : ""}</strong></div></div><div className="desktop-viewer-actions"><button type="button" className="button secondary small" onClick={() => void loadSessions()} aria-label="Refresh browser sessions"><RefreshCw size={14} /> Refresh</button><button type="button" className="button secondary small" onClick={() => void viewerRef.current?.requestFullscreen?.()}><Maximize2 size={14} /> Full screen</button></div></div>
+          <div className="desktop-viewer-toolbar"><div className="desktop-viewer-label"><span className="desktop-live-mark" /><div><span className="detail-label">LIVE SERVER DESKTOP</span><strong>{liveBrowserCount} live {liveBrowserCount === 1 ? "browser" : "browsers"}{currentGroup ? ` · ${currentGroup.name}` : ""}</strong></div></div><div className="desktop-viewer-actions"><button type="button" className="button secondary small desktop-inspector-toggle" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>{inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}{inspectorOpen ? "Hide details" : "Show details"}</button><button type="button" className="button secondary small" onClick={() => void loadSessions()} aria-label="Refresh browser sessions"><RefreshCw size={14} /> Refresh</button><button type="button" className="button secondary small" onClick={() => void viewerRef.current?.requestFullscreen?.()}><Maximize2 size={14} /> Full screen</button></div></div>
           {sessions.length > 0 && <div className="desktop-session-switcher" role="group" aria-label="Open browser windows">{sessions.map((session) => <button type="button" aria-pressed={selectedSession?.id === session.id} className={`desktop-session-tab ${selectedSession?.id === session.id ? "active" : ""}`} key={session.id} onClick={() => void focusSession(session)} disabled={focusing === session.id} title={`${session.account_email} · ${session.browser_alive ? "Chrome running" : "Chrome not detected"}`}><span className={`status-dot ${session.browser_alive ? "teal" : "amber"}`} /><span>{session.account_email}</span>{focusing === session.id && <span className="button-spinner" />}</button>)}</div>}
           <div className="desktop-workarea"><iframe ref={viewerRef} title="Northstar live browser desktop" src="/desktop/vnc.html?autoconnect=1&resize=scale&path=websockify&show_dot=0" allow="clipboard-read; clipboard-write; fullscreen" /></div>
           <div className="desktop-viewer-footer"><span>{selectedSession ? <><strong>{selectedSession.account_email}</strong> · {selectedSession.browser_alive ? "Window selected" : "No live Chrome process detected"}</> : "No account window selected"}</span><span>Use the tabs above to switch windows. VNC keyboard and clipboard controls remain available in the viewer toolbar.</span></div>
         </section>
         {job && <section className="desktop-job-panel" aria-live="polite"><div className="desktop-job-heading"><div><span className="detail-label">SESSION QUEUE</span><h2>{job.status === "COMPLETED" ? "Batch complete" : job.status === "CANCELLED" ? "Batch stopped" : "Opening account browsers"}</h2><p>{job.running_count} open · {job.queued_count} queued · concurrency {job.concurrency_limit}</p></div><div className="desktop-job-actions">{["RUNNING", "QUEUED", "PAUSED"].includes(job.status) && <button type="button" className="button danger small" disabled={launching} onClick={() => void cancelJob()}><X size={14} /> Stop queue</button>}<button type="button" className="icon-button" aria-label="Dismiss batch status" onClick={() => setJob(null)}><X size={15} /></button></div></div><div className="desktop-job-progress"><span style={{ width: `${job.total_count ? Math.min(100, (jobCompleted / job.total_count) * 100) : 0}%` }} /></div><div className="desktop-job-summary"><span>{jobCompleted} of {job.total_count} resolved</span><strong>{job.running_count} running now</strong></div>{job.items.some((item) => item.state === "FAILED" || item.state === "ATTENTION") && <div className="desktop-job-issues">{job.items.filter((item) => item.state === "FAILED" || item.state === "ATTENTION").slice(0, 5).map((item) => <button type="button" key={item.id} onClick={() => { const session = sessions.find((row) => row.id === item.session_id); if (session) onOpenSession(session); }}><span className="status-dot amber" /><span><strong>{item.account_email}</strong><small>{item.paused_reason || item.last_error || labelStatus(item.state)}</small></span></button>)}</div>}</section>}
       </div>
+      {inspectorOpen && <aside className="desktop-inspector" aria-label="Selected account and session details"><div className="desktop-inspector-heading"><div><span className="detail-label">INSPECTOR</span><h2>Session details</h2></div><button type="button" className="icon-button" aria-label="Hide session details" onClick={() => setInspectorOpen(false)}><X size={15} /></button></div><label className="desktop-inspector-resize">Inspector width <input type="range" min="230" max="380" step="10" value={inspectorWidth} onChange={(event) => setInspectorWidth(Number(event.target.value))} aria-label="Inspector panel width" /><span>{inspectorWidth}px</span></label>{inspectedAccount ? <><div className="desktop-inspector-identity"><span className="desktop-inspector-avatar">{inspectedAccount.email.slice(0, 1).toUpperCase()}</span><div><strong title={inspectedAccount.email}>{inspectedAccount.email}</strong><small>{inspectedAccount.group_name}</small></div></div><div className="desktop-inspector-section"><span className="detail-label">ACCOUNT STATUS</span><div className="desktop-inspector-status"><span className={`status-dot ${inspectedAccount.login_status === "AUTHENTICATED" ? "teal" : inspectedAccount.login_status === "VERIFICATION_REQUIRED" ? "amber" : "neutral"}`} /><strong>{labelStatus(inspectedAccount.login_status)}</strong></div><div className="desktop-inspector-data"><span>Profile</span><strong>{labelStatus(inspectedAccount.profile.status)}</strong><span>Readiness</span><strong>{labelStatus(inspectedAccount.readiness_status)}</strong><span>Proxy</span><strong>{inspectedAccount.proxy.label || inspectedAccount.proxy.region || "Not assigned"}</strong></div></div><div className="desktop-inspector-section"><span className="detail-label">BROWSER SESSION</span>{inspectedSession ? <><div className="desktop-inspector-status"><span className={`status-dot ${inspectedSession.browser_alive ? "teal" : "amber"}`} /><strong>{inspectedSession.browser_alive ? "Chrome is running" : "No Chrome process detected"}</strong></div><p>{labelStatus(inspectedSession.state)} · opened {new Date(inspectedSession.opened_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p><div className="desktop-inspector-actions"><button type="button" className="button secondary small" onClick={() => onOpenSession(inspectedSession)}><Monitor size={14} /> Review session</button>{inspectedSession.browser_alive && closeConfirmationSessionId !== inspectedSession.id && <button type="button" className="button danger small" onClick={() => setCloseConfirmationSessionId(inspectedSession.id)}><Power size={14} /> Close browser</button>}</div>{closeConfirmationSessionId === inspectedSession.id && <div className="desktop-close-confirm" role="group" aria-label="Confirm close browser session"><span>{`Close Chrome for ${inspectedSession.account_email}? Other account windows stay open.`}</span><div><button type="button" className="button secondary small" onClick={() => setCloseConfirmationSessionId("")} disabled={Boolean(closingSessionId)}>Keep open</button><button type="button" className="button danger small" onClick={() => void closeSelectedSession()} disabled={Boolean(closingSessionId)} aria-busy={Boolean(closingSessionId)}>{closingSessionId ? <span className="button-spinner" /> : <Power size={13} />}Confirm close</button></div></div>}</> : <div className="desktop-inspector-empty">No active session for this account. Choose an operation to open its browser.</div>}</div>{inspectedAccount.tags?.length ? <div className="desktop-inspector-tags"><span className="detail-label">TAGS</span><div>{inspectedAccount.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></div> : null}</> : <div className="desktop-inspector-empty">Select an account or choose a browser tab to inspect its status and controls.</div>}</aside>}
     </section>}
     {enabled === false && <section className="desktop-setup-note"><Monitor size={21} /><div><strong>The server desktop is not enabled yet</strong><span>The Ubuntu installer configures the virtual display, window manager, and protected browser viewer.</span></div></section>}
     <div className="desktop-security-note"><ShieldCheck size={15} /><span>Account sessions use separate saved Chrome profiles on the server. Closing this page does not close those sessions.</span></div>
