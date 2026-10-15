@@ -143,7 +143,7 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
-certbot certonly --webroot -w /var/www/northstar-certbot -d "$DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL"
+certbot certonly --webroot -w /var/www/northstar-certbot -d "$DOMAIN" --non-interactive --agree-tos --keep-until-expiring -m "$ADMIN_EMAIL"
 sed "s/app.example.com/${DOMAIN}/g" "$INSTALL_ROOT/deployment/nginx.conf.template" > /etc/nginx/sites-available/northstar
 ln -sfn /etc/nginx/sites-available/northstar /etc/nginx/sites-enabled/northstar
 nginx -t
@@ -155,7 +155,7 @@ systemctl daemon-reload
 systemctl enable --now northstar-xvfb northstar-openbox northstar-x11vnc northstar-websockify
 
 # Provision the database before creating the first administrator.
-runuser -u northstar -- sh -c 'set -a; . /etc/northstar/northstar.env; set +a; cd /opt/northstar/backend && .venv/bin/alembic -c alembic.ini upgrade head'
+runuser -u northstar -- sh -c 'set -a; . /etc/northstar/northstar.env; set +a; cd /opt/northstar/backend && .venv/bin/python -m alembic -c alembic.ini upgrade head'
 HAS_ADMIN="$(runuser -u northstar -- sh -c 'set -a; . /etc/northstar/northstar.env; set +a; cd /opt/northstar/backend && .venv/bin/python -c "from sqlalchemy import select; from app.db import SessionLocal; from app.models import EmployeeAuth; db=SessionLocal(); print(\"yes\" if db.scalar(select(EmployeeAuth.id).limit(1)) else \"no\"); db.close()"')"
 if [[ "$BOOTSTRAP_NEEDED" == true || "$HAS_ADMIN" != yes ]]; then
   printf '\nCreate the first SaaS administrator now. Password input is hidden.\n'
