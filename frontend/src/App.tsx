@@ -799,6 +799,7 @@ function SettingsPage({ onNotify }: { onNotify: (tone: "success" | "error" | "in
   const uploadBackup = (data: FormData, operationId: string): Promise<{ status: number; payload: Record<string, unknown> }> => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest(); xhr.open("POST", "/api/v1/backups/restore"); xhr.withCredentials = true;
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) setBackupProgress({ stage: "Uploading encrypted archive", percent: Math.round(event.loaded * 100 / event.total) }); };
+    xhr.upload.onload = () => setBackupProgress({ stage: "Waiting for server verification", percent: null });
     xhr.onload = () => { let payload: Record<string, unknown> = {}; try { payload = JSON.parse(xhr.responseText); } catch { /* handled by status below */ } resolve({ status: xhr.status, payload }); };
     xhr.onerror = () => reject(new Error("Backup upload failed. Check the network connection."));
     data.append("operation_id", operationId); xhr.send(data);
