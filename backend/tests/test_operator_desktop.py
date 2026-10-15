@@ -1,7 +1,9 @@
+import socket
+import threading
 from pathlib import Path
 
 from app.config import get_settings
-from app.operator_desktop import _slot_for
+from app.operator_desktop import _slot_for, _websocket_ready
 
 
 def test_operator_desktop_slots_are_persisted_and_never_shared(tmp_path, monkeypatch) -> None:
@@ -13,3 +15,49 @@ def test_operator_desktop_slots_are_persisted_and_never_shared(tmp_path, monkeyp
     assert one != two
     assert _slot_for("employee_one") == one
     assert Path(tmp_path / ".operator-desktops.json").exists()
+
+
+def test_websocket_readiness_requires_a_successful_upgrade() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve_upgrade() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(8192)
+                connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n")
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve_upgrade)
+    thread.start()
+    try:
+        assert _websocket_ready(port) is True
+    finally:
+        thread.join(timeout=2)
+
+
+def test_websocket_readiness_rejects_a_tcp_only_listener() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve_non_upgrade() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(8192)
+                connection.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve_non_upgrade)
+    thread.start()
+    try:
+        assert _websocket_ready(port) is False
+    finally:
+        thread.join(timeout=2)

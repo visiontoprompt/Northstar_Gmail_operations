@@ -6,9 +6,11 @@ bound to a public interface.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import secrets
 import socket
 import subprocess
 import threading
@@ -61,6 +63,32 @@ def _port_open(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.2):
             return True
+    except OSError:
+        return False
+
+
+def _websocket_ready(port: int) -> bool:
+    """Confirm websockify completes an RFC 6455 upgrade, not just TCP listen."""
+    key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+    request = (
+        "GET /websockify HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n"
+    ).encode("ascii")
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1) as connection:
+            connection.settimeout(1)
+            connection.sendall(request)
+            response = bytearray()
+            while b"\r\n\r\n" not in response and len(response) < 8192:
+                chunk = connection.recv(1024)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        return bytes(response).startswith(b"HTTP/1.1 101 ") or bytes(response).startswith(b"HTTP/1.0 101 ")
     except OSError:
         return False
 
@@ -121,8 +149,8 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
         if not _port_open(websocket_port):
             _spawn((employee_id, "websockify"), ["websockify", f"127.0.0.1:{websocket_port}", f"127.0.0.1:{vnc_port}"], env)
         deadline = time.monotonic() + 8
-        while not _port_open(websocket_port) and time.monotonic() < deadline:
+        while (not _port_open(websocket_port) or not _websocket_ready(websocket_port)) and time.monotonic() < deadline:
             time.sleep(0.1)
-        if not _port_open(websocket_port) or not _process_matches(f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
-            raise RuntimeError("Private browser viewer could not be started")
+        if not _port_open(websocket_port) or not _websocket_ready(websocket_port) or not _process_matches(f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
+            raise RuntimeError("Private browser viewer did not complete its WebSocket handshake")
         return {"display": display, "websocket_port": websocket_port, "slot": slot}

@@ -431,7 +431,10 @@ def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -
     try:
         desktop = ensure_operator_desktop(user.employee_id)
     except Exception as exc:  # noqa: BLE001 - no fallback to the shared desktop
-        logger.error("private desktop could not be initialized for authenticated operator: %s", type(exc).__name__)
+        # The manager raises only fixed, non-sensitive diagnostics here. Keep
+        # the reason in the service journal so a failed noVNC handshake is
+        # distinguishable from a missing X/VNC process without exposing IDs.
+        logger.error("private desktop could not be initialized (%s): %s", type(exc).__name__, str(exc))
         raise HTTPException(status_code=503, detail="Your private browser desktop could not be started") from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT, headers={"X-Desktop-Websocket-Port": str(desktop["websocket_port"])})
 
