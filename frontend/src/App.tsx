@@ -321,6 +321,25 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     return [ ...first.items, ...pages.flatMap((page) => page.items) ];
   };
   const resolveActionAccounts = async (): Promise<Account[]> => actionScope === "selected" ? selectedAccounts : getGroupAccounts();
+  // Configuration surfaces are mutually exclusive. Switching an operation
+  // dismisses the previous form without touching any already-running session.
+  const closeOperationConfigurations = () => {
+    setActiveOperation(null);
+    setLabelsMarkersTargets(null);
+    setSecurityTargets(null);
+    setAddonsTargets(null);
+    setAlertsTargets(null);
+    setMailTargets(null);
+    setPreferencesTargets(null);
+    setContactTargets(null);
+    setActiveAdminAction(null);
+    setTagTargets(null);
+    setCredentialAccount(null);
+    setCredentialChoiceAccount(null);
+    setCredentialField(null);
+    setBatchOpen(false);
+    setBatchAccountIds([]);
+  };
   const stopGroupProcesses = () => {
     if (!currentGroup?.account_count) { notify("info", "Choose a group with accounts first."); return; }
     setStopGroupConfirmOpen(true);
@@ -343,16 +362,12 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
       reload();
     } catch (requestError) { notify("error", (requestError as Error).message); }
   };
-  const openLogin = async (account: Account) => {
-    try { setActiveSession(await api<Session>(`/api/v1/accounts/${account.id}/sessions`, { method: "POST", body: JSON.stringify({ purpose: account.profile.status === "SAVED" ? "reuse" : "login" }) })); reload(); }
-    catch (requestError) { notify("error", (requestError as Error).message); }
-  };
   const runRegistryAction = async (kind: RegistryAction, explicitTargets?: Account[]) => {
+    closeOperationConfigurations();
     try {
       const targets = explicitTargets ?? await resolveActionAccounts();
       if (!targets.length) { notify("info", actionScope === "group" ? "Choose a group with accounts first." : "Select at least one account first."); return; }
       if (kind === "login") {
-        if (targets.length === 1) { await openLogin(targets[0]); return; }
         setBatchAccountIds(targets.map((account) => account.id));
         setBatchOpen(true);
         return;
@@ -368,33 +383,15 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
         return;
       }
       if (kind === "labels") {
-        if (targets.length === 1) {
-          const session = await api<Session>(`/api/v1/accounts/${targets[0].id}/labels-markers`, { method: "POST" });
-          setActiveSession(session);
-          reload();
-        } else {
-          setLabelsMarkersTargets(targets);
-        }
+        setLabelsMarkersTargets(targets);
         return;
       }
       if (kind === "security") {
-        if (targets.length === 1) {
-          const session = await api<Session>(`/api/v1/accounts/${targets[0].id}/security`, { method: "POST" });
-          setActiveSession(session);
-          reload();
-        } else {
-          setSecurityTargets(targets);
-        }
+        setSecurityTargets(targets);
         return;
       }
       if (kind === "addons") {
-        if (targets.length === 1) {
-          const session = await api<Session>(`/api/v1/accounts/${targets[0].id}/addons`, { method: "POST" });
-          setActiveSession(session);
-          reload();
-        } else {
-          setAddonsTargets(targets);
-        }
+        setAddonsTargets(targets);
         return;
       }
       if (kind === "mail") {
@@ -553,7 +550,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
             <RegistryActionBar accounts={accounts} selectedAccountIds={selectedAccountIds} actionScope={actionScope} group={currentGroup} onScopeChange={setActionScope} onAction={runRegistryAction} onStopGroup={stopGroupProcesses} onStopAll={stopAllProcesses} />
             {error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={reload}>Retry</button></div>}
             <div className="result-meta" role="status"><span>{loading ? "Refreshing account registry…" : `${total} ${total === 1 ? "account" : "accounts"} in this view`}</span>{query && <span className="search-context">for “{query}”</span>}</div>
-            <AccountTable accounts={accounts} loading={loading} canOperate={auth.permissions.can_operate_accounts} selectedAccountIds={selectedAccountIds} onSelectionChange={setSelectedAccountIds} onOpen={setActiveAccount} onAdd={() => setOnboardingOpen(true)} onContextAction={(account, kind, contextSelection) => { const targets = contextSelection?.length ? contextSelection : [account.id]; if (kind === "subscribe") { setNewsletterLaunchAccountIds(targets); setActiveView("newsletters"); return; } if (kind === "login") { if (targets.length === 1) { setSelectedAccountIds(targets); setActionScope("selected"); void openLogin(account); } else { setBatchAccountIds(targets); setBatchOpen(true); } return; } setSelectedAccountIds([account.id]); setActionScope("selected"); setActiveAdminAction({ kind, accounts: [account] }); }} />
+            <AccountTable accounts={accounts} loading={loading} canOperate={auth.permissions.can_operate_accounts} selectedAccountIds={selectedAccountIds} onSelectionChange={setSelectedAccountIds} onOpen={setActiveAccount} onAdd={() => setOnboardingOpen(true)} onContextAction={(account, kind, contextSelection) => { const targets = contextSelection?.length ? contextSelection : [account.id]; if (kind === "subscribe") { setNewsletterLaunchAccountIds(targets); setActiveView("newsletters"); return; } closeOperationConfigurations(); if (kind === "login") { setBatchAccountIds(targets); setBatchOpen(true); return; } setSelectedAccountIds([account.id]); setActionScope("selected"); setActiveAdminAction({ kind, accounts: [account] }); }} />
             <div className="table-footer registry-pagination"><span>Showing {firstVisible}–{lastVisible} of {total}</span><div className="pagination-controls"><span className="pagination-note">Page {page} of {pageCount}</span><button type="button" className="button secondary small" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><button type="button" className="button secondary small" disabled={page >= pageCount || loading} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next</button></div></div>
           </section>
           <footer className="page-footer"><span>Northstar Operations</span><span>Phase 1 registry · v0.1</span><a href="/docs" onClick={(event) => event.preventDefault()}>API docs <ArrowRight size={13} /></a></footer>
@@ -2025,23 +2022,26 @@ function LabelsMarkersBatchModal({ accounts, onClose, onFinished, onError }: { a
   type RunState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
   const [states, setStates] = useState<Record<string, RunState>>(() => Object.fromEntries(accounts.map((account) => [account.id, "QUEUED"] as const)));
   const [failureEmails, setFailureEmails] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
+  const operationStarted = useRef(false);
   const completionNotified = useRef(false);
   const completionNoticeSent = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!running || operationStarted.current) return;
+    operationStarted.current = true;
     let cursor = 0;
     const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
     const runAccount = async () => {
-      while (!cancelled) {
+      while (true) {
         const account = accounts[cursor++];
         if (!account) return;
         setStates((current) => ({ ...current, [account.id]: "RUNNING" }));
         try {
           const started = await api<Session>(`/api/v1/accounts/${account.id}/labels-markers`, { method: "POST" });
           let current = started;
-          for (let attempt = 0; attempt < 120 && !cancelled && current.state !== "CLOSED"; attempt += 1) {
+          for (let attempt = 0; attempt < 120 && current.state !== "CLOSED"; attempt += 1) {
             await wait(1000);
             current = await api<Session>(`/api/v1/sessions/${started.id}`);
           }
@@ -2059,13 +2059,14 @@ function LabelsMarkersBatchModal({ accounts, onClose, onFinished, onError }: { a
     };
     const run = async () => {
       await Promise.all(Array.from({ length: Math.min(4, accounts.length) }, () => runAccount()));
-      if (cancelled || completionNotified.current) return;
+      if (completionNotified.current) return;
       completionNotified.current = true;
       setFinished(true);
     };
     void run();
-    return () => { cancelled = true; };
-  }, [accounts]);
+    // This is an explicit background operation. Do not cancel or re-dispatch
+    // it when React remounts effects in development Strict Mode.
+  }, [accounts, running]);
 
   const completedCount = Object.values(states).filter((state) => state === "COMPLETED").length;
   const failedCount = Object.values(states).filter((state) => state === "FAILED").length;
@@ -2077,7 +2078,7 @@ function LabelsMarkersBatchModal({ accounts, onClose, onFinished, onError }: { a
     if (failedCount === accounts.length) onError("No Labels & Markers operations completed. Review the account statuses and retry.");
   }, [finished, failedCount, completedCount, accounts.length, onFinished, onError]);
 
-  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="labels-markers-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LABELS & MARKERS</div><h2 id="labels-markers-title">Enable Gmail labels & markers</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Labels & Markers progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Tags size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each authenticated profile opens Gmail settings, enables Importance markers, shows Spam under System labels, verifies both changes, and closes its browser session.</span></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="labels-markers-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> LABELS & MARKERS</div><h2 id="labels-markers-title">Enable Gmail labels & markers</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Labels & Markers" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Tags size={17} /><div><strong>{finished ? "Operation finished" : running ? "Running in saved profiles" : "Ready to start"}</strong><span>Each authenticated profile opens Gmail settings, enables Importance markers, shows Spam under System labels, verifies both changes, and closes its browser session.</span></div></div>{running || finished ? <><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</> : <div className="dispatch-preview"><strong>{accounts.length} accounts in scope</strong><small>No browser work starts until you press the button below.</small></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{running && !finished ? "Run in background" : finished ? "Close" : "Cancel"}</button>{!running && !finished && <button type="button" className="button primary" onClick={() => setRunning(true)}>Start for {accounts.length} {accounts.length === 1 ? "account" : "accounts"}</button>}</div></section></div>;
 }
 
 function SecurityBatchModal({ accounts, onClose, onFinished, onError }: { accounts: Account[]; onClose: () => void; onFinished: (message: string) => void; onError: (message: string) => void }) {
@@ -2085,29 +2086,26 @@ function SecurityBatchModal({ accounts, onClose, onFinished, onError }: { accoun
   type RunState = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
   const [states, setStates] = useState<Record<string, RunState>>(() => Object.fromEntries(accounts.map((account) => [account.id, "QUEUED"] as const)));
   const [failureEmails, setFailureEmails] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
   const operationStarted = useRef(false);
   const completionNotified = useRef(false);
   const completionNoticeSent = useRef(false);
 
   useEffect(() => {
-    // React Strict Mode re-runs effects once during development. This effect
-    // starts real browser sessions, so it must be idempotent or one bulk click
-    // would launch two Chrome profiles per account.
-    if (operationStarted.current) return;
+    if (!running || operationStarted.current) return;
     operationStarted.current = true;
-    let cancelled = false;
     let cursor = 0;
     const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
     const runAccount = async () => {
-      while (!cancelled) {
+      while (true) {
         const account = accounts[cursor++];
         if (!account) return;
         setStates((current) => ({ ...current, [account.id]: "RUNNING" }));
         try {
           const started = await api<Session>(`/api/v1/accounts/${account.id}/security`, { method: "POST" });
           let current = started;
-          for (let attempt = 0; attempt < 120 && !cancelled && current.state !== "CLOSED"; attempt += 1) {
+          for (let attempt = 0; attempt < 120 && current.state !== "CLOSED"; attempt += 1) {
             await wait(1000);
             current = await api<Session>(`/api/v1/sessions/${started.id}`);
           }
@@ -2121,16 +2119,14 @@ function SecurityBatchModal({ accounts, onClose, onFinished, onError }: { accoun
     };
     const run = async () => {
       await Promise.all(Array.from({ length: Math.min(4, accounts.length) }, () => runAccount()));
-      if (cancelled || completionNotified.current) return;
+      if (completionNotified.current) return;
       completionNotified.current = true;
       setFinished(true);
     };
     void run();
-    // This operation is explicitly allowed to run in the background when the
-    // modal closes. Do not cancel the first Strict Mode effect during its
-    // development-only cleanup, otherwise the guarded second effect would
-    // leave the bulk run permanently cancelled.
-  }, [accounts]);
+    // This explicit operation continues in the background if the dialog is
+    // dismissed. The guard also prevents Strict Mode from dispatching twice.
+  }, [accounts, running]);
 
   const completedCount = Object.values(states).filter((state) => state === "COMPLETED").length;
   const failedCount = Object.values(states).filter((state) => state === "FAILED").length;
@@ -2142,7 +2138,7 @@ function SecurityBatchModal({ accounts, onClose, onFinished, onError }: { accoun
     if (failedCount === accounts.length) onError("No browser security operations completed. Review the account statuses and retry.");
   }, [finished, failedCount, completedCount, accounts.length, onFinished, onError]);
 
-  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="security-batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> BROWSER SECURITY</div><h2 id="security-batch-title">Enable Enhanced Safe Browsing</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close browser security progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><ShieldCheck size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each authenticated profile opens Google Account security, enables Enhanced Safe Browsing in the current page language, verifies the setting, and closes its browser session.</span></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="security-batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> BROWSER SECURITY</div><h2 id="security-batch-title">Enable Enhanced Safe Browsing</h2><p>{accounts.length} accounts · up to 4 isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close browser security" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><ShieldCheck size={17} /><div><strong>{finished ? "Operation finished" : running ? "Running in saved profiles" : "Ready to start"}</strong><span>Each authenticated profile opens Google Account security, enables Enhanced Safe Browsing in the current page language, verifies the setting, and closes its browser session.</span></div></div>{running || finished ? <><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{completedCount + failedCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? ((completedCount + failedCount) / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{failureEmails.length > 0 && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length} account{failureEmails.length === 1 ? "" : "s"} could not complete. Their sessions were closed and remain auditable.</span></div>}</> : <div className="dispatch-preview"><strong>{accounts.length} accounts in scope</strong><small>No browser work starts until you press the button below.</small></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{running && !finished ? "Run in background" : finished ? "Close" : "Cancel"}</button>{!running && !finished && <button type="button" className="button primary" onClick={() => setRunning(true)}>Start for {accounts.length} {accounts.length === 1 ? "account" : "accounts"}</button>}</div></section></div>;
 }
 
 function AddonsBatchModal({ accounts, onClose, onFinished, onError }: { accounts: Account[]; onClose: () => void; onFinished: (message: string) => void; onError: (message: string) => void }) {
@@ -2152,24 +2148,27 @@ function AddonsBatchModal({ accounts, onClose, onFinished, onError }: { accounts
   const [failureEmails, setFailureEmails] = useState<string[]>([]);
   const [attentionEmails, setAttentionEmails] = useState<string[]>([]);
   const [concurrency, setConcurrency] = useState("4");
+  const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
+  const operationStarted = useRef(false);
   const completionNotified = useRef(false);
   const completionNoticeSent = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    if (!running || operationStarted.current) return;
+    operationStarted.current = true;
     let cursor = 0;
     const concurrencyLimit = Math.min(Math.max(1, Number(concurrency) || 1), 10, accounts.length);
     const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
     const runAccount = async () => {
-      while (!cancelled) {
+      while (true) {
         const account = accounts[cursor++];
         if (!account) return;
         setStates((current) => ({ ...current, [account.id]: "RUNNING" }));
         try {
           const started = await api<Session>(`/api/v1/accounts/${account.id}/addons`, { method: "POST" });
           let current = started;
-          for (let attempt = 0; attempt < 240 && !cancelled && !["CLOSED", "NEEDS_ATTENTION"].includes(current.state); attempt += 1) {
+          for (let attempt = 0; attempt < 240 && !["CLOSED", "NEEDS_ATTENTION"].includes(current.state); attempt += 1) {
             await wait(1000);
             current = await api<Session>(`/api/v1/sessions/${started.id}`);
           }
@@ -2184,13 +2183,14 @@ function AddonsBatchModal({ accounts, onClose, onFinished, onError }: { accounts
     };
     const run = async () => {
       await Promise.all(Array.from({ length: concurrencyLimit }, () => runAccount()));
-      if (cancelled || completionNotified.current) return;
+      if (completionNotified.current) return;
       completionNotified.current = true;
       setFinished(true);
     };
     void run();
-    return () => { cancelled = true; };
-  }, [accounts]);
+    // Starting is explicit; once started, the selected work continues even if
+    // the operator closes the progress surface.
+  }, [accounts, running]);
 
   const completedCount = Object.values(states).filter((state) => state === "COMPLETED").length;
   const failedCount = Object.values(states).filter((state) => state === "FAILED").length;
@@ -2204,7 +2204,7 @@ function AddonsBatchModal({ accounts, onClose, onFinished, onError }: { accounts
     if (!completedCount) onError("No Gmail add-on installations completed. Review the account sessions and Marketplace approval requirements.");
   }, [finished, completedCount, failedCount, attentionCount, onFinished, onError]);
 
-  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="addons-batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> GMAIL ADD-ONS</div><h2 id="addons-batch-title">Install Gmail add-ons</h2><p>{accounts.length} accounts · {concurrency} isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Gmail add-ons progress" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Boxes size={17} /><div><strong>{finished ? "Operation finished" : "Running in saved profiles"}</strong><span>Each account opens Gmail, opens Get add-ons, and installs up to three randomly selected Marketplace listings. Third-party permission or billing prompts pause that account for review.</span></div></div><div className="operation-fields"><div className="field"><label htmlFor="addons-concurrency">Concurrent profiles</label><select id="addons-concurrency" value={concurrency} onChange={(event) => setConcurrency(event.target.value)} disabled={doneCount > 0}><option value="1">1 · cautious</option><option value="2">2</option><option value="4">4 · recommended</option><option value="6">6</option><option value="10">10 · maximum</option></select></div></div><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{doneCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? (doneCount / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "ATTENTION" ? <ShieldCheck size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{states[account.id] === "ATTENTION" ? "Needs approval" : labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{(failureEmails.length > 0 || attentionEmails.length > 0) && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length + attentionEmails.length} account{failureEmails.length + attentionEmails.length === 1 ? "" : "s"} need review. Permission prompts were not accepted automatically.</span></div>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{finished ? "Close" : "Run in background"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="modal operation-modal bulk-operation-modal" role="dialog" aria-modal={!inspectorEmbedded} aria-labelledby="addons-batch-title"><div className="modal-header"><div><div className="eyebrow"><span className="eyebrow-line" /> GMAIL ADD-ONS</div><h2 id="addons-batch-title">Install Gmail add-ons</h2><p>{accounts.length} accounts · {concurrency} isolated profiles at a time</p></div><button type="button" className="icon-button" aria-label="Close Gmail add-ons" onClick={onClose}><X size={18} /></button></div><div className="modal-body"><div className="security-callout"><Boxes size={17} /><div><strong>{finished ? "Operation finished" : running ? "Running in saved profiles" : "Ready to start"}</strong><span>Each account opens Gmail, opens Get add-ons, and installs up to three randomly selected Marketplace listings. Third-party permission or billing prompts pause that account for review.</span></div></div>{!running && !finished ? <><div className="operation-fields"><div className="field"><label htmlFor="addons-concurrency">Concurrent profiles</label><select id="addons-concurrency" value={concurrency} onChange={(event) => setConcurrency(event.target.value)}><option value="1">1 · cautious</option><option value="2">2</option><option value="4">4 · recommended</option><option value="6">6</option><option value="10">10 · maximum</option></select></div></div><div className="dispatch-preview"><strong>{accounts.length} accounts in scope</strong><small>No browser work starts until you press the button below.</small></div></> : <><div className="operation-progress" role="status"><div><span className="detail-label">Progress</span><strong>{doneCount} of {accounts.length} finished</strong></div><div className="dispatch-meter"><span style={{ width: `${accounts.length ? (doneCount / accounts.length) * 100 : 0}%` }} /></div></div><div className="operation-run-list">{accounts.map((account) => <div className="operation-run-item" key={account.id}><span className={`operation-run-status ${states[account.id]?.toLowerCase()}`}>{states[account.id] === "COMPLETED" ? <Check size={13} /> : states[account.id] === "FAILED" ? <XCircle size={13} /> : states[account.id] === "ATTENTION" ? <ShieldCheck size={13} /> : states[account.id] === "RUNNING" ? <span className="button-spinner" /> : <Clock3 size={13} />}</span><strong>{account.email}</strong><span>{states[account.id] === "ATTENTION" ? "Needs approval" : labelStatus(states[account.id] ?? "QUEUED")}</span></div>)}</div>{(failureEmails.length > 0 || attentionEmails.length > 0) && <div className="form-error" role="alert"><XCircle size={16} /><span>{failureEmails.length + attentionEmails.length} account{failureEmails.length + attentionEmails.length === 1 ? "" : "s"} need review. Permission prompts were not accepted automatically.</span></div>}</>}</div><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>{running && !finished ? "Run in background" : finished ? "Close" : "Cancel"}</button>{!running && !finished && <button type="button" className="button primary" onClick={() => setRunning(true)}>Start for {accounts.length} {accounts.length === 1 ? "account" : "accounts"}</button>}</div></section></div>;
 }
 
 function AlertsBatchModal({ accounts, onClose, onFinished, onError }: { accounts: Account[]; onClose: () => void; onFinished: (message: string) => void; onError: (message: string) => void }) {
