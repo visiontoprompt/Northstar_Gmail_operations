@@ -1029,6 +1029,7 @@ class BrowserSessionResponse(BaseModel):
     duration_seconds: int | None = None
     runtime_type: str
     browser_opened: bool
+    browser_alive: bool = False
     observer_attached: bool = False
     automation_hint: str | None = None
     session_url: str

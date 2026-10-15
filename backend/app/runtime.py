@@ -128,6 +128,34 @@ def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bo
     return bool(_find_chrome_pids_for_profile(profile_path))
 
 
+def local_browser_profiles_alive(profile_ids: set[str]) -> set[str]:
+    """Return live profile IDs while scanning /proc only once for a session list."""
+    root = Path(get_settings().profile_root)
+    path_to_profile = {str((root / profile_id).resolve()): profile_id for profile_id in profile_ids}
+    unresolved = set(path_to_profile)
+    alive: set[str] = set()
+    if not unresolved:
+        return alive
+    try:
+        entries = Path("/proc").iterdir()
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                command_line = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            except (OSError, IsADirectoryError):
+                continue
+            for profile_path in tuple(unresolved):
+                if profile_path in command_line:
+                    alive.add(path_to_profile[profile_path])
+                    unresolved.remove(profile_path)
+            if not unresolved:
+                break
+    except (FileNotFoundError, PermissionError):
+        pass
+    return alive
+
+
 def remove_local_profile(profile_id: str) -> None:
     """Delete the on-disk profile for an account that never fully connected.
 

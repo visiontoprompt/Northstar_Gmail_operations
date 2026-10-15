@@ -25,7 +25,7 @@ from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, Bro
 from .schemas import NEWSLETTER_SIGNABLE_PROFILE_STATUSES, AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .notifications import notification_settings, publish, safe_notification_settings
-from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, remove_local_profile, resolve_browser_executable
+from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, local_browser_profiles_alive, remove_local_profile, resolve_browser_executable
 from .observer import BrowserObserver
 from .newsletter_discovery import NewsletterDiscoveryError, validate_newsletter_runtime_url
 from .newsletter_execution import AGENT_LEARNING, DETERMINISTIC, LIVE_FORM, MANUAL, SKILL_REPLAY, choose_newsletter_execution_mode
@@ -2935,7 +2935,7 @@ def _duration_seconds(start, end) -> int | None:
     return max(0, round((normalize(end) - normalize(start)).total_seconds()))
 
 
-def session_response(session: BrowserSession) -> dict:
+def session_response(session: BrowserSession, browser_alive: bool | None = None) -> dict:
     metadata = session.metadata_json or {}
     purpose = metadata.get("purpose", "login")
     operation_status, status_detail = _session_operation_status(session)
@@ -2960,6 +2960,11 @@ def session_response(session: BrowserSession) -> dict:
         "duration_seconds": duration_seconds,
         "runtime_type": session.runtime_type,
         "browser_opened": bool(session.metadata_json.get("browser_opened", False)),
+        "browser_alive": browser_alive if browser_alive is not None else (
+            session.state in ACTIVE_SESSION_STATES
+            and bool(session.metadata_json.get("browser_opened", False))
+            and local_browser_is_alive(session.profile_id, session.id)
+        ),
         "observer_attached": bool(session.metadata_json.get("observer_attached", False)),
         "automation_hint": _session_automation_hint(session),
         "session_url": f"/session/{session.id}",
@@ -3031,7 +3036,14 @@ def list_sessions(db: Session, organization_id: str, account_id: str | None, lim
         query = query.join(ranked, BrowserSession.id == ranked.c.id).where(ranked.c.session_rank == 1)
     if purpose:
         query = query.where(BrowserSession.metadata_json["purpose"].as_string() == purpose)
-    rows = [session_response(item) for item in db.scalars(query).unique().all()]
+    sessions = db.scalars(query).unique().all()
+    candidate_profiles = {
+        item.profile_id
+        for item in sessions
+        if item.state in ACTIVE_SESSION_STATES and bool((item.metadata_json or {}).get("browser_opened"))
+    }
+    live_profiles = local_browser_profiles_alive(candidate_profiles)
+    rows = [session_response(item, browser_alive=item.profile_id in live_profiles) for item in sessions]
     if outcome:
         rows = [row for row in rows if row["operation_status"] == outcome]
     return rows
