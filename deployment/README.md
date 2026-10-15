@@ -18,7 +18,7 @@ The installer asks for the public hostname, administrator email, and name. It ge
 
 ## Browser desktop and automation
 
-The installer enables Playwright and installs Xvfb, Openbox, x11vnc, and noVNC/Websockify. Each authenticated employee gets a private virtual X display and VNC/WebSocket pair on loopback. The API service uses a private writable `/tmp` namespace because Xvfb creates its display lock files and sockets there; its child browser processes share that namespace. It checks processes launched by the API through their owned process handles so desktop startup does not depend on matching platform-specific process command lines. The browser observer launches that employee's headed Chrome windows only on their display; the app's desktop auth subrequest selects the matching WebSocket port after authenticating the employee. Browser-session history, session detail/control, and bulk login-job history/control are scoped to the employee who created them, while account access continues to follow assigned groups. This prevents another operator with access to the same account group from seeing or controlling the first operator's browser session. Closing the viewer does not close the operator's browser sessions. The VNC and WebSocket listeners bind to loopback only; Nginx protects desktop assets and routes the control socket to the authenticated employee's private viewer. Ports 5900 and 6080 are not opened in the firewall.
+The installer enables Playwright and installs Xvfb, Openbox, x11vnc, and noVNC/Websockify. Each authenticated employee gets a private virtual X display and VNC/WebSocket pair on loopback. The API service uses a private writable `/tmp` namespace because Xvfb creates its display lock files and sockets there; its child browser processes share that namespace. It checks processes launched by the API through their owned process handles so desktop startup does not depend on matching platform-specific process command lines. x11vnc startup diagnostics are written to the Northstar systemd journal; failed startup messages include whether the VNC listener opened and the managed process exit code. The browser observer launches that employee's headed Chrome windows only on their display; the app's desktop auth subrequest selects the matching WebSocket port after authenticating the employee. Browser-session history, session detail/control, and bulk login-job history/control are scoped to the employee who created them, while account access continues to follow assigned groups. This prevents another operator with access to the same account group from seeing or controlling the first operator's browser session. Closing the viewer does not close the operator's browser sessions. The VNC and WebSocket listeners bind to loopback only; Nginx protects desktop assets and routes the control socket to the authenticated employee's private viewer. Ports 5900 and 6080 are not opened in the firewall.
 
 On an existing installation, update the checkout and rerun `sudo bash deployment/install-ubuntu.sh` so the per-operator WebSocket routing is installed in Nginx and the schema migration adds session ownership. The installer restarts the API after copying files so an already-running service cannot keep executing stale Python code. Existing browser sessions created before this release have no reliable operator attribution, so the migration places them under the workspace administrator for cleanup. The administrator should close those legacy sessions; operators can then reopen the accounts from their own Browser desktops. New sessions are isolated automatically.
 
@@ -31,6 +31,13 @@ systemctl status northstar northstar-xvfb northstar-openbox northstar-x11vnc nor
 journalctl -u northstar -f
 sudo nginx -t
 curl -fsS https://YOUR_HOSTNAME/api/v1/health
+```
+
+If the private browser viewer returns a 503, inspect the exact x11vnc startup failure and listener state with:
+
+```bash
+sudo journalctl -u northstar --since "5 minutes ago" -l --no-pager | grep -Ei 'private VNC|x11vnc|desktop'
+sudo ss -ltnp | grep -E ':(2[0-9]{4})\b'
 ```
 
 PostgreSQL and Redis listen locally. Uvicorn listens on `127.0.0.1:8000`; Nginx serves the production frontend and proxies authenticated app/API traffic over HTTPS. The installer keeps Uvicorn at one worker because current observers and dispatch state are process-local. It enables UFW for SSH/HTTP/HTTPS only and enables Certbot renewal.

@@ -117,7 +117,10 @@ def _spawn(key: tuple[str, str], argv: list[str], env: dict[str, str] | None = N
     process = _PROCESSES.get(key)
     if process is not None and process.poll() is None:
         return
-    _PROCESSES[key] = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    # Keep stderr attached to the systemd journal. In particular, x11vnc's
+    # startup errors (bad display, unavailable X extensions, bind failures)
+    # must be visible instead of collapsing into an unexplained 503.
+    _PROCESSES[key] = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, start_new_session=True, close_fds=True)
 
 
 def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
@@ -153,10 +156,31 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
         if not _port_open(vnc_port):
             _spawn((employee_id, "x11vnc"), ["x11vnc", "-display", display, "-localhost", "-nopw", "-forever", "-shared", "-rfbport", str(vnc_port), "-noxdamage", "-repeat", "-xkb"], env)
         deadline = time.monotonic() + 8
-        while not _port_open(vnc_port) and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            vnc_process = _PROCESSES.get((employee_id, "x11vnc"))
+            if vnc_process is not None and vnc_process.poll() is not None:
+                break
+            if _port_open(vnc_port):
+                break
             time.sleep(0.1)
-        if not _port_open(vnc_port) or not _process_is_alive((employee_id, "x11vnc"), f"[x]11vnc .* -rfbport {vnc_port}($| )"):
-            raise RuntimeError("Private VNC server could not be started")
+        vnc_listening = _port_open(vnc_port)
+        vnc_process = _PROCESSES.get((employee_id, "x11vnc"))
+        vnc_exit_code = vnc_process.poll() if vnc_process is not None else None
+        vnc_process_alive = _process_is_alive((employee_id, "x11vnc"), f"[x]11vnc .* -rfbport {vnc_port}($| )")
+        if not vnc_listening or not vnc_process_alive:
+            logger.error(
+                "Private VNC startup failed slot=%s display=%s port=%s listening=%s managed_exit_code=%s managed_process_alive=%s",
+                slot,
+                display,
+                vnc_port,
+                vnc_listening,
+                vnc_exit_code,
+                vnc_process_alive,
+            )
+            raise RuntimeError(
+                "Private VNC server failed startup "
+                f"(port_listening={vnc_listening}, process_exit_code={vnc_exit_code})"
+            )
         if _port_open(websocket_port) and not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
             raise RuntimeError("The allocated private viewer port is occupied by an unknown process")
         if not _port_open(websocket_port):

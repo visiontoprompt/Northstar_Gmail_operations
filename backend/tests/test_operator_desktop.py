@@ -38,6 +38,28 @@ def test_managed_process_uses_popen_identity_instead_of_command_line_match(monke
     assert operator_desktop._process_is_alive(key, "fragile command line pattern") is True
 
 
+def test_spawn_keeps_process_errors_visible_to_service_journal(monkeypatch) -> None:
+    captured = {}
+
+    class RunningProcess:
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return RunningProcess()
+
+    key = ("operator_test", "x11vnc")
+    monkeypatch.delitem(operator_desktop._PROCESSES, key, raising=False)
+    monkeypatch.setattr(operator_desktop.subprocess, "Popen", fake_popen)
+
+    operator_desktop._spawn(key, ["x11vnc", "-display", ":123"])
+
+    assert captured.get("stderr") is None
+    assert captured["stdout"] is operator_desktop.subprocess.DEVNULL
+
+
 def test_websocket_readiness_requires_a_successful_upgrade() -> None:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
