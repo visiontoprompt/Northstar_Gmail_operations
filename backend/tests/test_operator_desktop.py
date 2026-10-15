@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.config import get_settings
 import app.operator_desktop as operator_desktop
-from app.operator_desktop import _slot_for, _websocket_ready
+from app.operator_desktop import _port_open, _slot_for, _websocket_ready
 
 
 def test_service_gives_xvfb_a_private_writable_tmp_namespace() -> None:
@@ -58,6 +58,24 @@ def test_spawn_keeps_process_errors_visible_to_service_journal(monkeypatch) -> N
 
     assert captured.get("stderr") is None
     assert captured["stdout"] is operator_desktop.subprocess.DEVNULL
+
+
+def test_listener_check_does_not_connect_to_vnc() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.setblocking(False)
+    try:
+        assert _port_open(listener.getsockname()[1]) is True
+        try:
+            connection, _ = listener.accept()
+        except BlockingIOError:
+            pass
+        else:
+            connection.close()
+            raise AssertionError("Checking the listener unexpectedly opened a client connection")
+    finally:
+        listener.close()
 
 
 def test_websocket_readiness_requires_a_successful_upgrade() -> None:

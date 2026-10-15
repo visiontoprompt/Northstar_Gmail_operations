@@ -60,6 +60,22 @@ def _slot_for(employee_id: str) -> int:
 
 
 def _port_open(port: int) -> bool:
+    # A TCP connect to x11vnc is not a harmless probe: each probe is treated
+    # as a VNC client and consumes a slot while its handshake times out. The
+    # desktop auth endpoint may be called concurrently, so inspect the local
+    # listener table without creating connections.
+    try:
+        with Path("/proc/net/tcp").open() as listeners:
+            next(listeners, None)
+            for line in listeners:
+                fields = line.split()
+                address, hex_port = fields[1].split(":")
+                if address == "0100007F" and int(hex_port, 16) == port and fields[3] == "0A":
+                    return True
+        return False
+    except (OSError, ValueError, IndexError):
+        # Development environments without Linux procfs can use a TCP probe.
+        pass
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.2):
             return True
@@ -181,13 +197,18 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
                 "Private VNC server failed startup "
                 f"(port_listening={vnc_listening}, process_exit_code={vnc_exit_code})"
             )
-        if _port_open(websocket_port) and not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
+        viewer_listening = _port_open(websocket_port)
+        if viewer_listening and not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
             raise RuntimeError("The allocated private viewer port is occupied by an unknown process")
-        if not _port_open(websocket_port):
+        viewer_ready = viewer_listening
+        if not viewer_listening:
             _spawn((employee_id, "websockify"), ["websockify", f"127.0.0.1:{websocket_port}", f"127.0.0.1:{vnc_port}"], env)
-        deadline = time.monotonic() + 8
-        while (not _port_open(websocket_port) or not _websocket_ready(websocket_port)) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if not _port_open(websocket_port) or not _websocket_ready(websocket_port) or not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if _port_open(websocket_port) and _websocket_ready(websocket_port):
+                    viewer_ready = True
+                    break
+                time.sleep(0.1)
+        if not viewer_ready or not _port_open(websocket_port) or not _process_is_alive((employee_id, "websockify"), f"[w]ebsockify 127.0.0.1:{websocket_port}($| )"):
             raise RuntimeError("Private browser viewer did not complete its WebSocket handshake")
         return {"display": display, "websocket_port": websocket_port, "slot": slot}

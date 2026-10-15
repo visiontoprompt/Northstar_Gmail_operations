@@ -428,6 +428,11 @@ def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -
     user = _account_operator(request, db)
     if not settings.browser_desktop_enabled:
         raise HTTPException(status_code=404, detail="The browser desktop is not enabled")
+    # Nginx also authorizes every noVNC asset through this route. Loading a
+    # script or image must only check access; the WebSocket request starts or
+    # reuses the operator's desktop and receives its private port.
+    if request.headers.get("x-original-uri", "").startswith("/desktop/"):
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     try:
         desktop = ensure_operator_desktop(user.employee_id)
     except Exception as exc:  # noqa: BLE001 - no fallback to the shared desktop

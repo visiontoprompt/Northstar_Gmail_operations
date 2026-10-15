@@ -101,12 +101,17 @@ def test_account_operator_can_access_desktop_and_infrastructure_but_not_admin_pa
         operator = CurrentUser("operator_scoped", settings.demo_org_id, "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {group_id: "OPERATOR"})
         ovh_client = MagicMock()
         ovh_client.__enter__.return_value.list_resources.return_value = {"items": [], "errors": []}
-        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator), patch("app.main.ensure_operator_desktop", return_value={"display": ":123", "websocket_port": 30123}), patch("app.main.configured_client", return_value=ovh_client):
+        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator), patch("app.main.ensure_operator_desktop", return_value={"display": ":123", "websocket_port": 30123}) as ensure_desktop, patch("app.main.configured_client", return_value=ovh_client):
             with TestClient(app) as client:
                 assert client.get("/api/v1/desktop/status").json() == {"enabled": True}
-                desktop_authorized = client.get("/api/v1/desktop/authorize")
+                asset_authorized = client.get("/api/v1/desktop/authorize", headers={"X-Original-URI": "/desktop/app/ui.js"})
+                assert asset_authorized.status_code == 204
+                assert "x-desktop-websocket-port" not in asset_authorized.headers
+                ensure_desktop.assert_not_called()
+                desktop_authorized = client.get("/api/v1/desktop/authorize", headers={"X-Original-URI": "/websockify"})
                 assert desktop_authorized.status_code == 204
                 assert desktop_authorized.headers["x-desktop-websocket-port"] == "30123"
+                ensure_desktop.assert_called_once_with(operator.employee_id)
                 runtime = client.get("/api/v1/desktop/runtime")
                 assert runtime.status_code == 200
                 assert set(runtime.json()) == {"default_login_concurrency", "max_active_profiles"}
