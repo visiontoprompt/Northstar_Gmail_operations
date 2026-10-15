@@ -1482,8 +1482,10 @@ def create_login_job(db: Session, organization_id: str, actor_id: str, group_id:
     if group_id and not db.scalar(select(AccountGroup.id).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id)):
         raise ImportValidationError("Choose a valid destination group")
     query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.lifecycle_status != "ARCHIVED")
-    if operation_type == "login":
-        query = query.where(GmailAccount.readiness_status == "READY_FOR_LOGIN")
+    # A login batch is an explicit operator instruction to open the selected
+    # account profiles. Do not silently omit selected accounts just because
+    # registry readiness is not READY_FOR_LOGIN; the session can still be
+    # useful for a manual sign-in or verification handoff.
     if group_id:
         query = query.where(GmailAccount.group_id == group_id)
     if account_ids:
@@ -2709,7 +2711,9 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
             if job.operation_type == "mail":
                 session = start_mail_workflow(db, organization_id, actor_id, item.account_id, dict(job.operation_config or {}))
             else:
-                session = start_login_session(db, organization_id, actor_id, item.account_id)
+                saved_profile = db.scalar(select(BrowserProfile).where(BrowserProfile.account_id == item.account_id))
+                purpose = "reuse" if saved_profile and saved_profile.authenticated_at else "login"
+                session = start_login_session(db, organization_id, actor_id, item.account_id, purpose=purpose)
         except BrowserLaunchError as exc:
             # Launch failed before anything was persisted: leave the item queued
             # and stop this wave so the worker does not hot-loop the same item.

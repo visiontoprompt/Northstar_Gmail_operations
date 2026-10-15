@@ -56,6 +56,43 @@ def test_resolve_browser_executable_falls_back_across_browsers() -> None:
         settings.browser_executable = original
 
 
+def test_focus_local_browser_profile_activates_matching_window(tmp_path) -> None:
+    from subprocess import CompletedProcess
+
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path)
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        if args[1] == "-lp":
+            return CompletedProcess(args, 0, "0x045 0 4321 localhost Chrome\n", "")
+        return CompletedProcess(args, 0, "", "")
+
+    try:
+        with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
+             patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
+             patch("app.runtime.subprocess.run", side_effect=run):
+            assert runtime.focus_local_browser_profile("profile_1") is True
+        assert calls == [["/usr/bin/wmctrl", "-lp"], ["/usr/bin/wmctrl", "-ia", "0x045"]]
+    finally:
+        settings.profile_root = original_profile_root
+
+
+def test_focus_local_browser_profile_reports_missing_window(tmp_path) -> None:
+    from subprocess import CompletedProcess
+
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path)
+    try:
+        with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
+             patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
+             patch("app.runtime.subprocess.run", return_value=CompletedProcess([], 0, "0x045 0 8765 localhost Chrome\n", "")):
+            assert runtime.focus_local_browser_profile("profile_1") is False
+    finally:
+        settings.profile_root = original_profile_root
+
+
 def test_launch_local_browser_does_not_create_profile_dir_before_connection(tmp_path) -> None:
     original_launch = settings.browser_launch_enabled
     original_profile_root = settings.profile_root

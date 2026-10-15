@@ -74,10 +74,15 @@ def test_browser_desktop_rejects_non_admins() -> None:
     settings.browser_desktop_enabled = True
     scoped_user = CurrentUser("employee_scoped", settings.demo_org_id, "Scoped operator", "operator@example.com", "OPERATOR", {})
     try:
+        with TestClient(app) as client:
+            group_id = client.get("/api/v1/groups").json()[0]["id"]
+            account = client.post("/api/v1/accounts/single", json={"email": "restricted-focus@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+            session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
         with patch("app.main.authenticate_request", return_value=scoped_user), patch("app.auth.authenticate_request", return_value=scoped_user):
             with TestClient(app) as client:
                 assert client.get("/api/v1/desktop/status").status_code == 403
                 assert client.get("/api/v1/desktop/authorize").status_code == 403
+                assert client.post(f"/api/v1/sessions/{session['id']}/focus").status_code in {403, 404}
     finally:
         settings.browser_desktop_enabled = original_enabled
 
@@ -341,6 +346,23 @@ def test_failed_browser_launch_does_not_block_retry(monkeypatch) -> None:
         opened = client.post(f"/api/v1/accounts/{account['id']}/sessions")
         assert opened.status_code == 201
         assert opened.json()["browser_opened"] is True
+
+
+def test_browser_desktop_can_focus_an_existing_account_window(monkeypatch) -> None:
+    from app import main
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "focus@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        focused_profiles = []
+        monkeypatch.setattr(main, "local_browser_is_alive", lambda _profile_id, _session_id: True)
+        monkeypatch.setattr(main, "focus_local_browser_profile", lambda profile_id: focused_profiles.append(profile_id) or True)
+        response = client.post(f"/api/v1/sessions/{session['id']}/focus")
+
+    assert response.status_code == 200
+    assert response.json() == {"focused": True}
+    assert focused_profiles == [session["profile_id"]]
 
 
 def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
@@ -1151,6 +1173,23 @@ def test_login_job_queues_group_accounts_and_honors_concurrency() -> None:
         assert cancelled.json()["queued_count"] == 0
         assert "SUCCEEDED" in {item["state"] for item in cancelled.json()["items"]}
         assert "CANCELLED" in {item["state"] for item in cancelled.json()["items"]}
+
+
+def test_browser_desktop_batch_includes_selected_accounts_needing_setup() -> None:
+    from app.db import SessionLocal
+    from app.models import GmailAccount
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "desktop-setup@example.com", "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id}).json()
+        with SessionLocal() as db:
+            db.get(GmailAccount, account["id"]).readiness_status = "SETUP_REQUIRED"
+            db.commit()
+        created = client.post("/api/v1/login-jobs", json={"account_ids": [account["id"]], "concurrency_limit": 1})
+
+    assert created.status_code == 201
+    assert created.json()["total_count"] == 1
+    assert created.json()["items"][0]["account_email"] == "desktop-setup@example.com"
 
 
 def test_account_metadata_can_move_and_audit_without_exposing_secrets() -> None:

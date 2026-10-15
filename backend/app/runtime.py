@@ -1,6 +1,7 @@
 import os
 import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -126,6 +127,54 @@ def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bo
     """
     profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
     return bool(_find_chrome_pids_for_profile(profile_path))
+
+
+def focus_local_browser_profile(profile_id: str) -> bool:
+    """Raise the visible Chrome window belonging to one saved account profile.
+
+    All browser sessions share the server's X display. Matching the window's
+    owning PID to the profile-specific Chrome command line lets the desktop
+    session switcher focus the requested account without launching a duplicate.
+    """
+    profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
+    browser_pids = set(_find_chrome_pids_for_profile(profile_path))
+    if not browser_pids:
+        return False
+    wmctrl = shutil.which("wmctrl")
+    if not wmctrl:
+        logger.warning("cannot focus browser profile %s: wmctrl is not installed", profile_id)
+        return False
+    try:
+        windows = subprocess.run(
+            [wmctrl, "-lp"], capture_output=True, text=True, check=False, timeout=3
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("cannot list desktop windows while focusing profile %s", profile_id)
+        return False
+    if windows.returncode != 0:
+        logger.warning("wmctrl could not list windows while focusing profile %s", profile_id)
+        return False
+    for line in windows.stdout.splitlines():
+        columns = line.split(maxsplit=4)
+        if len(columns) < 4:
+            continue
+        try:
+            window_pid = int(columns[2])
+        except ValueError:
+            continue
+        if window_pid not in browser_pids:
+            continue
+        try:
+            focused = subprocess.run(
+                [wmctrl, "-ia", columns[0]], capture_output=True, text=True,
+                check=False, timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.exception("cannot focus desktop window for profile %s", profile_id)
+            return False
+        return focused.returncode == 0
+    logger.info("no visible desktop window found for browser profile %s", profile_id)
+    return False
 
 
 def local_browser_profiles_alive(profile_ids: set[str]) -> set[str]:

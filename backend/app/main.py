@@ -69,6 +69,7 @@ from .service import create_proxy_group, list_proxy_groups, update_proxy_group
 from .notifications import NotificationError, consume_password_reset, create_password_reset, send_group_status_report, send_test, update_notification_settings, publish
 from .alerts import list_alert_topics, seed_default_alert_topics
 from .worker.worker import start_login_worker, stop_login_worker
+from .runtime import focus_local_browser_profile
 
 settings = get_settings()
 
@@ -366,6 +367,19 @@ def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -
 def browser_desktop_status(request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
     _admin(request, db)
     return {"enabled": settings.browser_desktop_enabled}
+
+
+@app.post("/api/v1/sessions/{session_id}/focus")
+def focus_browser_session(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
+    _admin(request, db)
+    session = get_session(db, settings.demo_org_id, session_id)
+    if not session or session.state not in {"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}:
+        raise HTTPException(status_code=409, detail="This browser session is no longer open")
+    if not local_browser_is_alive(session.profile_id, session.id):
+        raise HTTPException(status_code=409, detail="Chrome is not running for this account yet")
+    if not focus_local_browser_profile(session.profile_id):
+        raise HTTPException(status_code=503, detail="The account browser is running, but its desktop window could not be focused. Use Alt+Tab in the VNC toolbar to switch windows.")
+    return {"focused": True}
 
 
 @app.get("/api/v1/groups", response_model=list[GroupResponse])
