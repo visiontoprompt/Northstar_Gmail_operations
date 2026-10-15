@@ -28,9 +28,19 @@ ADMIN_EMAIL="$(printf '%s' "$ADMIN_EMAIL" | tr '[:upper:]' '[:lower:]' | xargs)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl gnupg rsync build-essential python3 python3-venv python3-dev \
-  nodejs npm postgresql postgresql-contrib redis-server nginx certbot \
+  postgresql postgresql-contrib redis-server nginx certbot \
   xvfb openbox x11vnc novnc python3-websockify dbus-x11 fonts-liberation fonts-noto-color-emoji \
   libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2t64 libxkbcommon0 ufw
+
+# Ubuntu 24.04's default Node.js package is older than this frontend's test
+# toolchain. Install the supported Node.js 24 LTS line from NodeSource instead.
+curl -fsSLo /tmp/nodesource_setup.sh https://deb.nodesource.com/setup_24.x
+bash /tmp/nodesource_setup.sh
+rm -f /tmp/nodesource_setup.sh
+apt-get install -y nodejs
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+[[ "$NODE_MAJOR" == 24 ]] || fail "Node.js 24 is required; found $(node --version)."
+printf 'Using Node.js %s and npm %s.\n' "$(node --version)" "$(npm --version)"
 
 curl -fsSLo /tmp/northstar-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y /tmp/northstar-chrome.deb

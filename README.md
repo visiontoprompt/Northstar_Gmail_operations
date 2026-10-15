@@ -75,7 +75,7 @@ cd Northstar_Gmail_operations
 sudo bash deployment/install-ubuntu.sh
 ```
 
-The installer checks the Ubuntu version and architecture, then asks for the public hostname, administrator email, and administrator name. It installs PostgreSQL, Redis, Python/uv, Node.js, Chrome, the virtual browser desktop, Nginx, and Certbot; builds the frontend; applies database migrations; and provisions the first administrator with a hidden password prompt. It generates the database password, application encryption key, and break-glass API token and saves them in `/etc/northstar/northstar.env` with restricted permissions. The installer also obtains the TLS certificate and enables the required system services and firewall rules.
+The installer checks the Ubuntu version and architecture, then asks for the public hostname, administrator email, and administrator name. It installs PostgreSQL, Redis, Python/uv, Node.js 24 LTS, Chrome, the virtual browser desktop, Nginx, and Certbot; builds the frontend; applies database migrations; and provisions the first administrator with a hidden password prompt. It generates the database password, application encryption key, and break-glass API token and saves them in `/etc/northstar/northstar.env` with restricted permissions. The installer also obtains the TLS certificate and enables the required system services and firewall rules.
 
 After installation, open `https://YOUR_HOSTNAME` and sign in with the administrator account you created. Check the services and application health with:
 

@@ -1,6 +1,6 @@
 # Single-server Ubuntu deployment
 
-`install-ubuntu.sh` installs Northstar and its runtime on one fresh Ubuntu amd64 server. It installs PostgreSQL, Redis, Python/uv, Node, Chrome, Xvfb, Openbox, x11vnc, noVNC/Websockify, Nginx, and Certbot; builds the UI; applies database migrations; provisions the initial administrator; enables HTTPS; and starts the application services.
+`install-ubuntu.sh` installs Northstar and its runtime on one fresh Ubuntu amd64 server. It installs PostgreSQL, Redis, Python/uv, Node.js 24 LTS, Chrome, Xvfb, Openbox, x11vnc, noVNC/Websockify, Nginx, and Certbot; builds the UI; applies database migrations; provisions the initial administrator; enables HTTPS; and starts the application services. Node.js 24 is required by the frontend's current test toolchain and is checked by the installer before it continues.
 
 ## Before running it
 
