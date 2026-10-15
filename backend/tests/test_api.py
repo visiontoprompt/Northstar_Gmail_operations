@@ -31,7 +31,7 @@ def test_employees_endpoint_lists_workspace_employees() -> None:
 
 
 def test_production_api_requires_bearer_token() -> None:
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     original_environment = settings.environment
     original_token = settings.admin_api_token
@@ -83,6 +83,31 @@ def test_browser_desktop_rejects_non_admins() -> None:
                 assert client.get("/api/v1/desktop/status").status_code == 403
                 assert client.get("/api/v1/desktop/authorize").status_code == 403
                 assert client.post(f"/api/v1/sessions/{session['id']}/focus").status_code in {403, 404}
+    finally:
+        settings.browser_desktop_enabled = original_enabled
+
+
+def test_account_operator_can_access_desktop_and_infrastructure_but_not_admin_pages() -> None:
+    from unittest.mock import MagicMock, patch
+
+    from app.auth import CurrentUser
+
+    original_enabled = settings.browser_desktop_enabled
+    settings.browser_desktop_enabled = True
+    try:
+        with TestClient(app) as client:
+            group_id = client.get("/api/v1/groups").json()[0]["id"]
+        operator = CurrentUser("operator_scoped", settings.demo_org_id, "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {group_id: "OPERATOR"})
+        ovh_client = MagicMock()
+        ovh_client.__enter__.return_value.list_resources.return_value = {"items": [], "errors": []}
+        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator), patch("app.main.configured_client", return_value=ovh_client):
+            with TestClient(app) as client:
+                assert client.get("/api/v1/desktop/status").json() == {"enabled": True}
+                assert client.get("/api/v1/desktop/authorize").status_code == 204
+                assert client.get("/api/v1/infrastructure/ovh").status_code == 200
+                assert client.get("/api/v1/infrastructure/godaddy/accounts").status_code == 200
+                assert client.get("/api/v1/employees").status_code == 403
+                assert client.get("/api/v1/settings").status_code == 403
     finally:
         settings.browser_desktop_enabled = original_enabled
 

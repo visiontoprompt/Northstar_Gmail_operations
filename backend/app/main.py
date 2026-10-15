@@ -203,6 +203,43 @@ def _admin(request: Request, db: Session):
     return require_admin(_current_user(request, db))
 
 
+def _account_operator(request: Request, db: Session):
+    """Require an operator-level employee (or administrator)."""
+    user = _current_user(request, db)
+    if not user.is_admin and not any(user.can_access_group(group_id, "OPERATOR") for group_id in user.group_access):
+        raise HTTPException(status_code=403, detail="Account operator access is required")
+    return user
+
+
+def _authorize_proxy_accounts(request: Request, db: Session, account_ids: list[str]) -> None:
+    """Keep proxy mutations inside the caller's assigned account groups."""
+    user = _account_operator(request, db)
+    accounts = db.scalars(select(GmailAccount).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.id.in_(set(account_ids)),
+        GmailAccount.lifecycle_status != "ARCHIVED",
+    )).all() if account_ids else []
+    if len(accounts) != len(set(account_ids)):
+        raise HTTPException(status_code=404, detail="One or more accounts were not found")
+    if not user.is_admin and any(not user.can_access_group(account.group_id, "OPERATOR") for account in accounts):
+        raise HTTPException(status_code=404, detail="Resource not found")
+
+
+def _authorize_proxy_record(request: Request, db: Session, proxy_id: str):
+    """Authorize mutations to a proxy already used by accounts."""
+    user = _account_operator(request, db)
+    if user.is_admin:
+        return user
+    account_groups = set(db.scalars(select(GmailAccount.group_id).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.proxy_id == proxy_id,
+        GmailAccount.lifecycle_status != "ARCHIVED",
+    )).all())
+    if any(not user.can_access_group(group_id, "OPERATOR") for group_id in account_groups):
+        raise HTTPException(status_code=404, detail="Resource not found")
+    return user
+
+
 def _account_access(request: Request, db: Session, account_id: str, minimum: str = "VIEWER") -> GmailAccount:
     user = _current_user(request, db)
     account = get_account(db, settings.demo_org_id, account_id)
@@ -352,12 +389,9 @@ def health() -> dict[str, str]:
 def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -> Response:
     """Nginx auth_request target for the embedded browser desktop.
 
-    The display can expose signed-in Gmail sessions, so viewing and control
-    access is restricted to administrators.
+    Viewing and control access follows the signed-in operator's group scope.
     """
-    user = _current_user(request, db)
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail="Administrator access is required to control browser sessions")
+    _account_operator(request, db)
     if not settings.browser_desktop_enabled:
         raise HTTPException(status_code=404, detail="The browser desktop is not enabled")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -365,16 +399,18 @@ def authorize_browser_desktop(request: Request, db: Session = Depends(get_db)) -
 
 @app.get("/api/v1/desktop/status")
 def browser_desktop_status(request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
-    _admin(request, db)
+    _account_operator(request, db)
     return {"enabled": settings.browser_desktop_enabled}
 
 
 @app.post("/api/v1/sessions/{session_id}/focus")
 def focus_browser_session(session_id: str, request: Request, db: Session = Depends(get_db)) -> dict[str, bool]:
-    _admin(request, db)
+    user = _account_operator(request, db)
     session = get_session(db, settings.demo_org_id, session_id)
     if not session or session.state not in {"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}:
         raise HTTPException(status_code=409, detail="This browser session is no longer open")
+    if not user.is_admin and not user.can_access_group(session.account.group_id, "OPERATOR"):
+        raise HTTPException(status_code=404, detail="Resource not found")
     if not local_browser_is_alive(session.profile_id, session.id):
         raise HTTPException(status_code=409, detail="Chrome is not running for this account yet")
     if not focus_local_browser_profile(session.profile_id):
@@ -492,7 +528,7 @@ def save_workspace_settings(payload: WorkspaceSettingsUpdate, request: Request, 
 
 @app.get("/api/v1/infrastructure/ovh")
 def ovh_resources(request: Request, db: Session = Depends(get_db)) -> dict:
-    _admin(request, db)
+    _account_operator(request, db)
     try:
         with configured_client(db, settings.demo_org_id) as client:
             return client.list_resources()
@@ -503,7 +539,7 @@ def ovh_resources(request: Request, db: Session = Depends(get_db)) -> dict:
 
 @app.get("/api/v1/infrastructure/ovh/proxy-groups")
 def ovh_proxy_group_links(request: Request, db: Session = Depends(get_db)) -> dict:
-    _admin(request, db)
+    _account_operator(request, db)
     links = db.scalars(select(OvhProxyGroupLink).where(OvhProxyGroupLink.organization_id == settings.demo_org_id).order_by(OvhProxyGroupLink.proxy_group, OvhProxyGroupLink.service_name)).all()
     try:
         with configured_client(db, settings.demo_org_id) as client:
@@ -526,7 +562,7 @@ def ovh_proxy_group_links(request: Request, db: Session = Depends(get_db)) -> di
 
 @app.post("/api/v1/infrastructure/ovh/proxy-groups", status_code=status.HTTP_201_CREATED)
 def create_ovh_proxy_group_link(payload: OvhProxyGroupLinkRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     group_name = " ".join(payload.proxy_group.split())
     group_exists = db.scalar(select(ProxyInventory.id).where(ProxyInventory.organization_id == settings.demo_org_id, ProxyInventory.proxy_group == group_name).limit(1))
     if not group_exists:
@@ -552,7 +588,7 @@ def create_ovh_proxy_group_link(payload: OvhProxyGroupLinkRequest, request: Requ
 
 @app.delete("/api/v1/infrastructure/ovh/proxy-groups/{link_id}")
 def delete_ovh_proxy_group_link(link_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     link = db.scalar(select(OvhProxyGroupLink).where(OvhProxyGroupLink.organization_id == settings.demo_org_id, OvhProxyGroupLink.id == link_id))
     if not link:
         raise HTTPException(status_code=404, detail="Resource not found")
@@ -564,7 +600,7 @@ def delete_ovh_proxy_group_link(link_id: str, request: Request, db: Session = De
 
 @app.post("/api/v1/infrastructure/ovh/power", status_code=status.HTTP_202_ACCEPTED)
 def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         with configured_client(db, settings.demo_org_id) as client:
             client.power(payload.resource_type, payload.service_name, payload.instance_id, payload.action)
@@ -576,13 +612,13 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
 
 @app.get("/api/v1/infrastructure/godaddy/accounts")
 def godaddy_accounts(request: Request, db: Session = Depends(get_db)) -> list[dict]:
-    _admin(request, db)
+    _account_operator(request, db)
     return list_godaddy_accounts(db, settings.demo_org_id)
 
 
 @app.post("/api/v1/infrastructure/godaddy/accounts", status_code=status.HTTP_201_CREATED)
 def godaddy_account_create(payload: GoDaddyAccountCreate, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         return save_godaddy_account(db, settings.demo_org_id, admin.employee_id, **payload.model_dump())
     except GoDaddyError as exc:
@@ -591,7 +627,7 @@ def godaddy_account_create(payload: GoDaddyAccountCreate, request: Request, db: 
 
 @app.put("/api/v1/infrastructure/godaddy/accounts/{account_id}")
 def godaddy_account_update(account_id: str, payload: GoDaddyAccountUpdate, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         return save_godaddy_account(db, settings.demo_org_id, admin.employee_id, account_id=account_id, **payload.model_dump())
     except GoDaddyError as exc:
@@ -600,7 +636,7 @@ def godaddy_account_update(account_id: str, payload: GoDaddyAccountUpdate, reque
 
 @app.delete("/api/v1/infrastructure/godaddy/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 def godaddy_account_delete(account_id: str, request: Request, db: Session = Depends(get_db)) -> None:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         remove_godaddy_account(db, settings.demo_org_id, admin.employee_id, account_id)
     except GoDaddyError as exc:
@@ -609,7 +645,7 @@ def godaddy_account_delete(account_id: str, request: Request, db: Session = Depe
 
 @app.post("/api/v1/infrastructure/godaddy/accounts/{account_id}/test")
 def godaddy_account_test(account_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    _admin(request, db)
+    _account_operator(request, db)
     try:
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
             domains = client.list_domains()
@@ -620,7 +656,7 @@ def godaddy_account_test(account_id: str, request: Request, db: Session = Depend
 
 @app.get("/api/v1/infrastructure/godaddy/accounts/{account_id}/domains")
 def godaddy_domains(account_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    _admin(request, db)
+    _account_operator(request, db)
     try:
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
             domains = client.list_domains()
@@ -632,7 +668,7 @@ def godaddy_domains(account_id: str, request: Request, db: Session = Depends(get
 
 @app.get("/api/v1/infrastructure/godaddy/accounts/{account_id}/domains/{domain}/dns")
 def godaddy_dns_records(account_id: str, domain: str, request: Request, db: Session = Depends(get_db)) -> dict:
-    _admin(request, db)
+    _account_operator(request, db)
     try:
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
             records = client.list_records(domain)
@@ -644,7 +680,7 @@ def godaddy_dns_records(account_id: str, domain: str, request: Request, db: Sess
 
 @app.post("/api/v1/infrastructure/godaddy/accounts/{account_id}/domains/{domain}/dns", status_code=status.HTTP_201_CREATED)
 def godaddy_dns_record_create(account_id: str, domain: str, payload: GoDaddyDnsRecord, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         body = payload.model_dump(exclude_none=True)
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
@@ -657,7 +693,7 @@ def godaddy_dns_record_create(account_id: str, domain: str, payload: GoDaddyDnsR
 
 @app.put("/api/v1/infrastructure/godaddy/accounts/{account_id}/domains/{domain}/dns/{record_type}/{record_name}")
 def godaddy_dns_group_replace(account_id: str, domain: str, record_type: str, record_name: str, payload: GoDaddyDnsGroupReplace, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         records = [record.model_dump(exclude_none=True) for record in payload.records]
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
@@ -670,7 +706,7 @@ def godaddy_dns_group_replace(account_id: str, domain: str, record_type: str, re
 
 @app.delete("/api/v1/infrastructure/godaddy/accounts/{account_id}/domains/{domain}/dns/{record_type}/{record_name}", status_code=status.HTTP_204_NO_CONTENT)
 def godaddy_dns_group_delete(account_id: str, domain: str, record_type: str, record_name: str, request: Request, db: Session = Depends(get_db)) -> None:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         with godaddy_client(db, settings.demo_org_id, account_id) as client:
             client.delete_group(domain, record_type, record_name)
@@ -1885,7 +1921,7 @@ def proxies(q: str | None = Query(default=None, max_length=320), group_id: str |
 
 @app.post("/api/v1/proxies/import", response_model=ProxyBulkImportResponse, status_code=status.HTTP_201_CREATED)
 def import_proxies(payload: ProxyBulkImportRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         return import_proxy_inventory(db, settings.demo_org_id, admin.employee_id, payload.lines, payload.group_name)
     except ImportValidationError as exc:
@@ -1894,7 +1930,8 @@ def import_proxies(payload: ProxyBulkImportRequest, request: Request, db: Sessio
 
 @app.post("/api/v1/proxies/assignments")
 def assign_proxy(payload: ProxyAssignmentRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    _authorize_proxy_accounts(request, db, payload.account_ids)
+    admin = _current_user(request, db)
     try:
         label = payload.label if "label" in payload.model_fields_set else _UNSET
         region = payload.region if "region" in payload.model_fields_set else _UNSET
@@ -1905,7 +1942,9 @@ def assign_proxy(payload: ProxyAssignmentRequest, request: Request, db: Session 
 
 @app.post("/api/v1/proxies/group")
 def update_proxy_group_membership(payload: ProxyGroupUpdateRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
+    for proxy_id in payload.proxy_ids:
+        _authorize_proxy_record(request, db, proxy_id)
     try:
         return update_proxy_group(db, settings.demo_org_id, admin.employee_id, payload.proxy_ids, payload.group_name)
     except ImportValidationError as exc:
@@ -1914,13 +1953,13 @@ def update_proxy_group_membership(payload: ProxyGroupUpdateRequest, request: Req
 
 @app.get("/api/v1/proxies/groups")
 def get_proxy_groups(request: Request, db: Session = Depends(get_db)) -> list[dict]:
-    _admin(request, db)
+    _account_operator(request, db)
     return list_proxy_groups(db, settings.demo_org_id)
 
 
 @app.post("/api/v1/proxies/groups", status_code=status.HTTP_201_CREATED)
 def create_proxy_group_list(payload: ProxyGroupCreateRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
     try:
         return create_proxy_group(db, settings.demo_org_id, admin.employee_id, payload.name)
     except ImportValidationError as exc:
@@ -1929,7 +1968,10 @@ def create_proxy_group_list(payload: ProxyGroupCreateRequest, request: Request, 
 
 @app.post("/api/v1/proxies/distribute-group")
 def distribute_group_proxies(payload: ProxyGroupDistributionRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    _authorize_group(request, payload.group_id, "OPERATOR")
+    admin = _current_user(request, db)
+    for proxy_id in payload.proxy_ids:
+        _authorize_proxy_record(request, db, proxy_id)
     try:
         return distribute_proxies_to_group(db, settings.demo_org_id, admin.employee_id, payload.group_id, payload.proxy_ids, payload.accounts_per_proxy, payload.mode)
     except ImportValidationError as exc:
@@ -1938,7 +1980,9 @@ def distribute_group_proxies(payload: ProxyGroupDistributionRequest, request: Re
 
 @app.post("/api/v1/proxies/test", response_model=list[ProxyTestResponse])
 def test_proxies(payload: ProxyTestRequest, request: Request, db: Session = Depends(get_db)) -> list[dict]:
-    admin = _admin(request, db)
+    admin = _account_operator(request, db)
+    for proxy_id in payload.proxy_ids:
+        _authorize_proxy_record(request, db, proxy_id)
     results = []
     for proxy_id in payload.proxy_ids:
         try:
@@ -1950,7 +1994,7 @@ def test_proxies(payload: ProxyTestRequest, request: Request, db: Session = Depe
 
 @app.patch("/api/v1/proxies/{proxy_id}")
 def edit_proxy(proxy_id: str, payload: ProxyUpdate, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _authorize_proxy_record(request, db, proxy_id)
     try:
         proxy_value = payload.proxy if "proxy" in payload.model_fields_set else _UNSET
         label = payload.label if "label" in payload.model_fields_set else _UNSET
@@ -1962,7 +2006,16 @@ def edit_proxy(proxy_id: str, payload: ProxyUpdate, request: Request, db: Sessio
 
 @app.delete("/api/v1/proxies/{proxy_id}/assignments")
 def unassign_proxy_accounts(proxy_id: str, payload: ProxyAssignmentRequest | None = None, request: Request = None, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    if payload and payload.account_ids:
+        _authorize_proxy_accounts(request, db, payload.account_ids)
+        user = _current_user(request, db)
+        if not user.is_admin:
+            assigned = set(db.scalars(select(GmailAccount.id).where(GmailAccount.organization_id == settings.demo_org_id, GmailAccount.proxy_id == proxy_id, GmailAccount.id.in_(payload.account_ids))).all())
+            if assigned != set(payload.account_ids):
+                raise HTTPException(status_code=404, detail="Resource not found")
+    else:
+        _authorize_proxy_record(request, db, proxy_id)
+    admin = _current_user(request, db)
     try:
         count = remove_proxy_assignments(db, settings.demo_org_id, admin.employee_id, proxy_id, payload.account_ids if payload else None)
         return {"proxy_id": proxy_id, "updated_count": count}
@@ -1972,7 +2025,7 @@ def unassign_proxy_accounts(proxy_id: str, payload: ProxyAssignmentRequest | Non
 
 @app.delete("/api/v1/proxies/{proxy_id}")
 def remove_proxy(proxy_id: str, payload: ProxyDeleteRequest, request: Request, db: Session = Depends(get_db)) -> dict:
-    admin = _admin(request, db)
+    admin = _authorize_proxy_record(request, db, proxy_id)
     if payload.confirmation.strip().upper() != "REMOVE":
         raise HTTPException(status_code=422, detail="Type REMOVE to confirm removing this proxy assignment")
     try:

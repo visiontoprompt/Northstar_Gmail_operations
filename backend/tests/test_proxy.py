@@ -334,6 +334,29 @@ def test_unassign_keeps_proxy_inventory_available_for_reassignment() -> None:
         assert client.get("/api/v1/proxies").json()[0]["account_count"] == 1
 
 
+def test_group_operator_can_assign_proxy_only_inside_their_groups() -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        allowed_group, blocked_group = groups[0]["id"], groups[1]["id"]
+        allowed = client.post("/api/v1/accounts/single", json={"email": "proxy-scope-allowed@example.com", "password": "secret", "recovery": "recover@example.com", "2fa": "totp", "group_id": allowed_group}).json()
+        blocked = client.post("/api/v1/accounts/single", json={"email": "proxy-scope-blocked@example.com", "password": "secret", "recovery": "recover@example.com", "2fa": "totp", "group_id": blocked_group}).json()
+        imported = client.post("/api/v1/proxies/import", json={"lines": "proxy-user:proxy-pass:203.0.113.88:8080 | scoped"}).json()
+        proxy_id = imported["rows"][0]["proxy_id"]
+
+    operator = CurrentUser("operator_scoped", "org_demo", "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {allowed_group: "OPERATOR"})
+    with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            response = client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [allowed["id"]]})
+            assert response.status_code == 200, response.text
+            assert response.json()["updated_count"] == 1
+            denied = client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [blocked["id"]]})
+            assert denied.status_code == 404
+
+
 def test_observer_does_not_fall_back_to_direct_when_proxy_resolution_fails(tmp_path) -> None:
     playwright = MagicMock()
     observer = BrowserObserver("s1", "account@example.com__org", 0, profile_dir=str(tmp_path), executable="fake-browser", headless=True, resolve_proxy=lambda _session_id: (_ for _ in ()).throw(RuntimeError("proxy unavailable")))

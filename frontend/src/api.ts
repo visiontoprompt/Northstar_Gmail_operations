@@ -7,7 +7,7 @@ export const api = async <T,>(path: string, options?: RequestInit): Promise<T> =
     try {
       payload = JSON.parse(body) as Record<string, unknown>;
     } catch {
-      if (!response.ok) throw new Error("The server returned an invalid response.");
+      if (!response.ok) throw new Error(`The server returned an unreadable error response (HTTP ${response.status}). Check the API service logs for the underlying error.`);
     }
   }
   if (!response.ok) {
