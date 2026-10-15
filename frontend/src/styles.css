@@ -2179,6 +2179,7 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 .desktop-operation-row label, .desktop-concurrency-label { color: var(--color-muted); font-size: 9px; font-weight: 600; }
 .desktop-run-operation { width: 100%; min-height: 39px; justify-content: center; }
 .desktop-launch-controls { gap: 7px; }
+.desktop-launch-controls:empty { display: none; }
 .desktop-main { min-width: 0; align-self: stretch; }
 .browser-desktop-page .desktop-workspace { align-items: stretch; }
 .browser-desktop-page .desktop-workarea { height: min(850px, max(340px, calc(100dvh - 365px))); min-height: 340px; }
@@ -2206,6 +2207,40 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 .desktop-inspector-tags { display: grid; gap: 9px; padding: 13px; }
 .desktop-inspector-tags > div { display: flex; flex-wrap: wrap; gap: 5px; }
 .desktop-inspector-tags > div span { padding: 4px 7px; color: var(--color-ink-soft); background: var(--color-surface-muted); border-radius: 5px; font-size: 9px; }
+.desktop-inspector-operation { display: grid; gap: 9px; padding: 12px; background: var(--color-surface-muted); border-bottom: 1px solid var(--color-line); }
+.desktop-inspector-operation .desktop-operation-heading { margin: 0; }
+.desktop-inspector-operation .desktop-operation-heading strong { font-size: 12px; }
+.desktop-inspector-operation .desktop-operation-row { display: grid; gap: 5px; color: var(--color-muted); font-size: 9px; font-weight: 650; }
+.desktop-inspector-operation .desktop-operation-row select { width: 100%; min-height: 34px; padding: 0 8px; color: var(--color-ink); background: var(--color-surface); border: 1px solid var(--color-line-strong); border-radius: 7px; font-size: 10px; }
+.desktop-inspector-operation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.desktop-inspector-operation-button { display: flex; min-width: 0; min-height: 34px; align-items: center; gap: 6px; padding: 5px 7px; color: var(--color-ink-soft); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 7px; font-size: 9px; font-weight: 600; text-align: left; cursor: pointer; }
+.desktop-inspector-operation-button:hover:not(:disabled) { color: var(--color-primary-dark); border-color: color-mix(in srgb, var(--color-primary) 45%, var(--color-line)); background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface)); }
+.desktop-inspector-operation-button.active { color: var(--color-primary-dark); background: color-mix(in srgb, var(--color-primary) 11%, var(--color-surface)); border-color: color-mix(in srgb, var(--color-primary) 55%, var(--color-line)); box-shadow: inset 2px 0 var(--color-primary); }
+.desktop-inspector-operation-button.danger { color: var(--color-danger); }
+.desktop-inspector-operation-button > span { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; color: var(--color-primary-dark); background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); border-radius: 6px; }
+.desktop-inspector-operation-button:disabled { color: var(--color-muted); opacity: .55; cursor: not-allowed; }
+.desktop-inspector-stop-all { width: 100%; justify-content: center; }
+.desktop-operation-help { color: var(--color-muted); font-size: 9px; line-height: 1.4; }
+.desktop-operation-hint { padding: 9px; color: var(--color-muted); background: var(--color-surface); border: 1px dashed var(--color-line-strong); border-radius: 7px; font-size: 9px; line-height: 1.4; }
+.desktop-inspector-operation-host:empty { display: none; }
+.desktop-inspector-operation-layer .modal-backdrop { position: static; z-index: auto; display: block; min-height: 0; overflow: visible; padding: 0; background: transparent; }
+.desktop-inspector-operation-layer .modal { width: 100%; max-width: none; max-height: none; overflow: visible; color: var(--color-ink); background: var(--color-surface); border: 0; border-radius: 0; box-shadow: none; }
+.desktop-inspector-operation-layer .modal-header { position: sticky; z-index: 1; top: 0; padding: 12px; background: var(--color-surface); border-color: var(--color-line); }
+.desktop-inspector-operation-layer .modal-header h2 { font-size: 15px; }
+.desktop-inspector-operation-layer .modal-header p { color: var(--color-muted); font-size: 10px; }
+.desktop-inspector-operation-layer .modal-body { max-height: none; overflow: visible; padding: 12px; }
+.desktop-inspector-operation-layer .modal-footer { position: sticky; z-index: 1; bottom: 0; flex-wrap: wrap; gap: 6px; padding: 10px 12px; background: var(--color-surface-muted); border-color: var(--color-line); }
+.desktop-inspector-operation-layer .modal-footer .button { flex: 1 1 auto; }
+.desktop-inspector-operation-layer .operation-fields { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.desktop-inspector-operation-layer .operation-run-list { max-height: 230px; }
+.desktop-inspector-operation-layer .session-body { padding: 12px; }
+.desktop-inspector-operation-layer .session-grid { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px 0; }
+.desktop-inspector-operation-layer .session-grid .detail-card { min-height: 0; }
+.desktop-inspector-operation-layer .session-steps { padding: 10px 0; }
+.desktop-inspector-operation-layer .session-warning { margin-top: 10px; }
+.desktop-inspector-operation-layer .field input, .desktop-inspector-operation-layer .field select, .desktop-inspector-operation-layer .field textarea { color: var(--color-ink); background: var(--color-surface-muted); border-color: var(--color-line); }
+.desktop-inspector-operation-layer .security-callout { color: var(--color-muted); background: var(--color-surface-muted); border-color: var(--color-line); }
+.desktop-inspector-operation-layer .security-callout strong { color: var(--color-ink-soft); }
 .desktop-close-confirm { display: grid; gap: 9px; padding: 10px; color: var(--color-ink-soft); background: var(--color-danger-soft); border: 1px solid color-mix(in srgb, var(--color-danger) 25%, var(--color-line)); border-radius: 8px; font-size: 10px; line-height: 1.45; }
 .desktop-close-confirm > div { display: flex; flex-wrap: wrap; gap: 6px; }
 .desktop-close-confirm .button { flex: 1; justify-content: center; }
