@@ -1391,11 +1391,18 @@ def test_employee_group_access_is_scoped_replaceable_and_audited() -> None:
     with TestClient(app) as client:
         groups = client.get("/api/v1/groups").json()
         employee = client.post("/api/v1/employees", json={"full_name": "Group Operator", "email": "operator@example.com", "role": "ACCOUNT_OPERATOR"}).json()
+        second_employee = client.post("/api/v1/employees", json={"full_name": "Second Operator", "email": "operator-two@example.com", "role": "ACCOUNT_OPERATOR"}).json()
         employee_id = employee["id"]
         saved = client.put(f"/api/v1/employees/{employee_id}/group-access", json={"assignments": [{"group_id": groups[0]["id"], "access_level": "OPERATOR"}, {"group_id": groups[1]["id"], "access_level": "VIEWER"}]})
         assert saved.status_code == 200
         assert {(item["group_id"], item["access_level"]) for item in saved.json()["group_access"]} == {(groups[0]["id"], "OPERATOR"), (groups[1]["id"], "VIEWER")}
         assert client.get(f"/api/v1/employees/{employee_id}/group-access").json()[1]["group_name"] == groups[1]["name"]
+        # Group membership is many-to-many: assigning the same group to a
+        # second user must not replace or alter the first user's access.
+        shared = client.put(f"/api/v1/employees/{second_employee['id']}/group-access", json={"assignments": [{"group_id": groups[0]["id"], "access_level": "VIEWER"}]})
+        assert shared.status_code == 200
+        assert shared.json()["group_access"] == [{"group_id": groups[0]["id"], "group_name": groups[0]["name"], "access_level": "VIEWER"}]
+        assert {(item["group_id"], item["access_level"]) for item in client.get(f"/api/v1/employees/{employee_id}/group-access").json()} == {(groups[0]["id"], "OPERATOR"), (groups[1]["id"], "VIEWER")}
         assert client.patch(f"/api/v1/employees/{employee_id}", json={"status": "SUSPENDED"}).json()["group_access"][0]["access_level"] == "OPERATOR"
 
         replaced = client.put(f"/api/v1/employees/{employee_id}/group-access", json={"assignments": [{"group_id": groups[2]["id"], "access_level": "MANAGER"}]})
@@ -1404,7 +1411,7 @@ def test_employee_group_access_is_scoped_replaceable_and_audited() -> None:
         duplicate = client.put(f"/api/v1/employees/{employee_id}/group-access", json={"assignments": [{"group_id": groups[2]["id"]}, {"group_id": groups[2]["id"]}]})
         assert duplicate.status_code == 422
         events = client.get("/api/v1/audit-events?limit=100").json()
-        assert sum(event["action"] == "employee.group_access.updated" for event in events) == 2
+        assert sum(event["action"] == "employee.group_access.updated" for event in events) == 3
 
 
 def test_employee_login_and_group_scope_are_enforced() -> None:
