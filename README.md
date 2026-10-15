@@ -63,6 +63,31 @@ Copy `backend/.env.example` when setting up a local environment. In production, 
 
 For Ubuntu production hosting, use the systemd, Nginx, environment, and migration templates in [deployment/README.md](deployment/README.md). Production startup refuses SQLite, requires authentication, and verifies that the Alembic schema revision is current. Apply schema changes with `cd backend && alembic -c alembic.ini upgrade head`; new schema changes must be added as Alembic revisions. The legacy SQL files under `backend/migrations/` document earlier schema history.
 
+## Install on Ubuntu
+
+The single-server installer supports a **fresh Ubuntu 24.04 LTS amd64** server. Before starting, point a public DNS A record for your app hostname at the server and allow inbound SSH, HTTP, and HTTPS (ports 22, 80, and 443). For about five concurrent visible browser sessions, plan for at least 8 vCPU and 16 GB RAM; for up to ten, plan for 12–16 vCPU and 32 GB RAM.
+
+Because this GitHub repository is private, give the server or the operator account a GitHub deploy key with read access, or copy the checkout to the server using your approved secure transfer method. Then run:
+
+```bash
+git clone git@github.com:visiontoprompt/Northstar_Gmail_operations.git
+cd Northstar_Gmail_operations
+sudo bash deployment/install-ubuntu.sh
+```
+
+The installer checks the Ubuntu version and architecture, then asks for the public hostname, administrator email, and administrator name. It installs PostgreSQL, Redis, Python/uv, Node.js, Chrome, the virtual browser desktop, Nginx, and Certbot; builds the frontend; applies database migrations; and provisions the first administrator with a hidden password prompt. It generates the database password, application encryption key, and break-glass API token and saves them in `/etc/northstar/northstar.env` with restricted permissions. The installer also obtains the TLS certificate and enables the required system services and firewall rules.
+
+After installation, open `https://YOUR_HOSTNAME` and sign in with the administrator account you created. Check the services and application health with:
+
+```bash
+sudo systemctl status northstar northstar-xvfb northstar-openbox northstar-x11vnc northstar-websockify
+sudo journalctl -u northstar -f
+sudo nginx -t
+curl -fsS https://YOUR_HOSTNAME/api/v1/health
+```
+
+To update an existing installation, update the project checkout and rerun `sudo bash deployment/install-ubuntu.sh` from its root. The installer backs up and retains the existing environment and database. Keep `/etc/northstar/northstar.env` and `/var/lib/northstar` access-restricted and backed up. For sizing, browser-desktop behavior, and migration caveats, see [deployment/README.md](deployment/README.md).
+
 For local browser-session testing only, set `BROWSER_LAUNCH_ENABLED=true`. Each account then opens in its own Chrome process and persistent user-data directory, separate from the browser window hosting the SaaS console. The app never passes imported passwords, recovery values, or 2FA secrets to Chrome.
 
 The development default uses SQLite at `./data/gmail_ops.db`. Set `DATABASE_URL` to PostgreSQL for a shared environment. The API creates the demo organization and starter groups on first boot in development.
