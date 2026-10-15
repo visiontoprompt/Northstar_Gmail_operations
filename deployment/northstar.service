@@ -19,7 +19,10 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45
 UMask=0077
-NoNewPrivileges=true
+# Chrome's Linux sandbox may need its setuid helper when launched under
+# systemd. Keep Chrome's own sandbox enabled rather than disabling it with
+# --no-sandbox; the service still runs as the unprivileged northstar user.
+NoNewPrivileges=false
 PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=true
