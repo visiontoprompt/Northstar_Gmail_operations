@@ -24,7 +24,11 @@ UMask=0077
 # systemd. Keep Chrome's own sandbox enabled rather than disabling it with
 # --no-sandbox; the service still runs as the unprivileged northstar user.
 NoNewPrivileges=false
-PrivateTmp=false
+# Per-operator Xvfb servers create their X11 lock files and sockets under
+# /tmp. Keep those paths writable inside this service's filesystem sandbox,
+# while isolating them from the host and other services. All child processes
+# (Xvfb, x11vnc, websockify, and Chrome) share this private /tmp namespace.
+PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/northstar

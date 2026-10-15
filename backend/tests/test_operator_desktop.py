@@ -6,6 +6,14 @@ from app.config import get_settings
 from app.operator_desktop import _slot_for, _websocket_ready
 
 
+def test_service_gives_xvfb_a_private_writable_tmp_namespace() -> None:
+    service_file = Path(__file__).resolve().parents[2] / "deployment" / "northstar.service"
+    unit = service_file.read_text()
+
+    assert "PrivateTmp=true" in unit
+    assert "ProtectSystem=strict" in unit
+
+
 def test_operator_desktop_slots_are_persisted_and_never_shared(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "profile_root", str(tmp_path / "browser-profiles"))
 
