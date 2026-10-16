@@ -91,7 +91,25 @@ def test_global_active_profile_cap_respected() -> None:
         started = start_job(client, job["id"])
         assert started["running_count"] == 1
         assert started["queued_count"] == 1
+        assert "Waiting for a browser slot" in next(item for item in started["items"] if item["state"] == "QUEUED")["paused_reason"]
         assert _queue().active_profile_count() == 1
+
+
+def test_dispatch_repairs_stale_active_profile_mirror_before_enforcing_cap() -> None:
+    settings = get_settings()
+    settings.worker_max_active_profiles = 1
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = _make_accounts(client, group_id, 1, prefix="stale-cap")[0]
+        job = _job_for(client, group_id, [account], concurrency=1)
+        _queue().add_active_profile("orphaned-profile-with-no-live-session")
+
+        started = start_job(client, job["id"])
+
+    assert started["running_count"] == 1
+    assert started["queued_count"] == 0
+    assert _queue().active_profile_count() == 1
 
 
 def test_per_job_concurrency_limit_enforced() -> None:

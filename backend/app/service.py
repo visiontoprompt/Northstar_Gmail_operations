@@ -2776,6 +2776,11 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
     settings = get_settings()
     queue = _queue()
     locks = _locks()
+    # Redis active-profile membership is only a dispatch mirror; a crashed
+    # process or a Redis restart can leave it stale. Reconcile it against the
+    # durable live-session rows before applying the global cap, including for
+    # API-triggered starts where the background worker may be disabled.
+    reconcile_queue_mirrors(db, organization_id)
     worker_id = _worker_token() if actor_id.startswith(WORKER_PREFIX) else API_WORKER_ID
     started = 0
     deferred = 0
@@ -2792,8 +2797,6 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
         running = queue.running_count(job.id)
         if running >= job.concurrency_limit:
             break
-        if queue.active_profile_count() >= settings.worker_max_active_profiles:
-            break
         if job.queued_count <= 0:
             break
         examined += 1
@@ -2803,6 +2806,11 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
         item = db.get(LoginJobItem, candidate["item_id"])
         if not item or item.state != "QUEUED" or item.job_id != job.id:
             continue
+        if queue.active_profile_count() >= settings.worker_max_active_profiles:
+            item.paused_reason = f"Waiting for a browser slot ({queue.active_profile_count()}/{settings.worker_max_active_profiles} active)"
+            queue.requeue(job.id, item.id, item.account_id, when=time.time() + max(1.0, settings.worker_poll_interval))
+            deferred += 1
+            break
         if item.account_id in leased_accounts:
             # Already running in this wave; let another account take the slot.
             deferred += 1
@@ -2813,6 +2821,7 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
             # Defer it briefly and keep filling the remaining slots instead of
             # abandoning every other account in the batch.
             queue.requeue(job.id, item.id, item.account_id, when=time.time() + 15.0)
+            item.paused_reason = "Waiting for this account's profile to become available"
             deferred += 1
             leased_accounts.add(item.account_id)
             continue
