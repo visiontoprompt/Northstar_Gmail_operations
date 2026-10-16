@@ -2632,31 +2632,41 @@ def _prune_unsaved_profile_folder(session: BrowserSession) -> None:
     remove_local_profile(session.profile_id)
 
 
-def reconcile_imported_profiles(db: Session, organization_id: str) -> int:
-    """Repair imports made before the imported/verification state existed.
+def _has_chrome_user_data(path: Path) -> bool:
+    """Return whether a directory contains a recognizable Chrome user-data root."""
+    if not path.is_dir() or path.is_symlink():
+        return False
+    return (path / "Local State").is_file() or any(
+        (path / name).is_dir() for name in ("Default", "Profile 1", "System Profile")
+    )
 
-    Older uploads wrote SAVED while clearing authenticated_at and marking the
-    account NOT_STARTED or REQUIRED. Only that combination is migrated; no browser
-    cookie or file is treated as proof of a valid Google session.
+
+def reconcile_imported_profiles(db: Session, organization_id: str) -> int:
+    """Repair stale database flags for recognizable Chrome profiles on disk.
+
+    A restored or uploaded user-data directory is opened and checked in Gmail;
+    its presence alone does not establish that Google still accepts its cookies.
     """
     rows = db.scalars(select(BrowserProfile).join(GmailAccount).where(
         BrowserProfile.organization_id == organization_id,
-        BrowserProfile.status == "SAVED",
         BrowserProfile.authenticated_at.is_(None),
-        GmailAccount.profile_status == "SAVED",
-        GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]),
+        GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED", "PROFILE_IMPORTED"]),
     )).all()
     root = Path(get_settings().profile_root).resolve()
     changed = 0
     for profile in rows:
         folder = root / profile.id
-        if folder.is_dir() and not folder.is_symlink():
+        if _has_chrome_user_data(folder):
             profile.status = "IMPORTED"
             profile.account.profile_status = "IMPORTED"
             profile.account.login_status = "PROFILE_IMPORTED"
-        else:
+        elif profile.status in {"IMPORTED", "SAVED"} or profile.account.profile_status in {"IMPORTED", "SAVED"}:
             profile.status = "RESERVED"
             profile.account.profile_status = "RESERVED"
+            if profile.account.login_status == "PROFILE_IMPORTED":
+                profile.account.login_status = "REQUIRED"
+        else:
+            continue
         changed += 1
     if changed:
         db.commit()
@@ -4089,14 +4099,22 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
-    # Older profile uploads could be recorded as SAVED even though they have
-    # no Northstar authentication timestamp. Treat that on-disk profile as an
-    # imported profile and visibly check its Gmail cookies before asking the
-    # operator to sign in. This keeps valid local sign-in state usable while
-    # never treating the archive itself as proof of authentication.
-    imported_profile = profile.authenticated_at is None and profile.status in {"IMPORTED", "SAVED"}
-    if imported_profile and not (Path(get_settings().profile_root) / profile.id).is_dir():
+    profile_path = Path(get_settings().profile_root) / profile.id
+    has_profile_data = _has_chrome_user_data(profile_path)
+    # The on-disk profile decides which Chrome data is opened. Restores and
+    # older uploads can have stale RESERVED database flags, so recognize a
+    # valid Chrome user-data directory independently of those flags. Gmail
+    # itself still has to confirm the saved sign-in before we claim auth.
+    imported_profile = profile.authenticated_at is None and (
+        profile.status in {"IMPORTED", "SAVED"} or has_profile_data
+    )
+    if imported_profile and not has_profile_data:
         raise ImportValidationError("The imported browser profile files are missing on the server. Upload the profile again before opening it.")
+    if imported_profile:
+        profile.status = "IMPORTED"
+        account.profile_status = "IMPORTED"
+        account.login_status = "PROFILE_IMPORTED"
+        account.gmail_status = "NOT_CHECKED"
     if purpose not in {"login", "reuse", "contacts", "labels_markers", "security", "addons", "mail", "alerts", "credential_change", "newsletter", "newsletter_confirm", "account_preferences"}:
         raise ImportValidationError("Session purpose is not supported")
     external_newsletter = purpose == "newsletter" and account.account_type == "EXTERNAL_RECIPIENT"

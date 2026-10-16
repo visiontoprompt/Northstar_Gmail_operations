@@ -192,3 +192,32 @@ def test_legacy_saved_profile_with_review_status_uses_imported_profile_check(wor
     assert starts[0]["imported_profile"] is True
     assert session.metadata_json["imported_profile_pending"] is True
     assert account.login_status == "PROFILE_IMPORTED"
+
+
+def test_profile_directory_wins_over_stale_reserved_registry_flags(workspace, monkeypatch):
+    db, root, _tmp_path = workspace
+    profile = db.get(BrowserProfile, "profile-acct-a")
+    account = db.get(GmailAccount, "acct-a")
+    profile.status = "RESERVED"
+    account.profile_status = "RESERVED"
+    account.login_status = "NOT_STARTED"
+    saved_cookies = root / profile.id / "Default" / "Network" / "Cookies"
+    saved_cookies.parent.mkdir(parents=True)
+    saved_cookies.write_bytes(b"portable-profile-cookie-store")
+    db.commit()
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(profile_root=str(root), browser_desktop_enabled=False,
+        browser_launch_enabled=True, browser_observer_enabled=False, browser_observe_interval=1.0, worker_enabled=False))
+    monkeypatch.setattr(service, "launch_local_browser", lambda *_args: (True, None))
+    starts = []
+    monkeypatch.setattr(service, "_start_observer", lambda *_args, **kwargs: starts.append(kwargs) or True)
+
+    session = service.start_login_session(db, "org-import", "admin", "acct-a")
+
+    assert session.login_state == "PROFILE_CHECK"
+    assert starts[0]["imported_profile"] is True
+    assert session.metadata_json["imported_profile_pending"] is True
+    assert account.login_status == "PROFILE_IMPORTED"
+    assert account.profile_status == "OPEN"
+    assert session.profile.authenticated_at is None
+    service.close_session(db, "org-import", "admin", session.id)
+    assert saved_cookies.read_bytes() == b"portable-profile-cookie-store"

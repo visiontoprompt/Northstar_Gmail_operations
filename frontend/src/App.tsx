@@ -106,7 +106,7 @@ type CredentialPlan = { id: string; account_id: string; account_email: string; v
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
 const formatDateTime = (value: string | null | undefined) => value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "—";
 const formatBytes = (value: number) => value < 1024 * 1024 ? `${Math.max(1, Math.round(value / 1024))} KB` : value < 1024 ** 3 ? `${(value / (1024 * 1024)).toFixed(1)} MB` : `${(value / (1024 ** 3)).toFixed(2)} GB`;
-const labelStatus = (value: string) => value.toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+const labelStatus = (value: string) => value === "PROFILE_IMPORTED" ? "Imported · checking sign-in" : value.toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 function useDebouncedValue<T>(value: T, delay = 300) { const [debounced, setDebounced] = useState(value); useEffect(() => { const timer = window.setTimeout(() => setDebounced(value), delay); return () => window.clearTimeout(timer); }, [value, delay]); return debounced; }
 
 function LegacyLoginPage({ setupRequired, onAuthenticated }: { setupRequired: boolean; onAuthenticated: (session: AuthSession) => void }) {
@@ -1767,7 +1767,7 @@ function ProfileSizeIndicator({ sizeBytes }: { sizeBytes: number }) {
   </div>;
 }
 function StatusBadge({ status }: { status: string }) { const tone = status === "READY_FOR_LOGIN" ? "ready" : ["SETUP_ERROR", "INVALID"].includes(status) ? "danger" : "setup"; return <span className={`status-badge ${tone}`}><span className="status-mark">{tone === "ready" ? <Check size={11} /> : tone === "danger" ? <XCircle size={11} /> : <Clock3 size={11} />}</span>{labelStatus(status)}</span>; }
-const loginTone = (status: string) => status === "NONEXISTENT" ? "danger" : status === "AUTHENTICATED" ? "ok" : ["VERIFICATION_REQUIRED", "NEEDS_ATTENTION", "UNKNOWN_PAGE", "ACCOUNT_NOT_FOUND"].includes(status) ? "warning" : "neutral";
+const loginTone = (status: string) => status === "NONEXISTENT" ? "danger" : status === "AUTHENTICATED" ? "ok" : ["PROFILE_IMPORTED", "VERIFICATION_REQUIRED", "NEEDS_ATTENTION", "UNKNOWN_PAGE", "ACCOUNT_NOT_FOUND"].includes(status) ? "warning" : "neutral";
 function LoginBadge({ status }: { status: string }) { return <span className={`status-badge login ${loginTone(status)}`}><span className="status-mark">{status === "AUTHENTICATED" ? <Check size={11} /> : status === "NONEXISTENT" ? <XCircle size={11} /> : <Clock3 size={11} />}</span>{status === "NOT_STARTED" ? "Never logged in" : labelStatus(status)}</span>; }
 
 function OnboardingModal({ groups, initialGroup, onClose, onSuccess, onError }: { groups: Group[]; initialGroup: string; onClose: () => void; onSuccess: (message: string) => void; onError: (message: string) => void }) {
