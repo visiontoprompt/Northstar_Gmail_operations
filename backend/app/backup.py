@@ -64,7 +64,7 @@ def _encrypt_file(source: Path, destination: Path, passphrase: str) -> None:
         dst.write(encryptor.tag)
 
 
-def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> int:
+def _encrypt_archive(content: Path, profile_root: Path | None, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> int:
     """Stream tar contents directly into AES-GCM to avoid a plaintext tar copy."""
     salt, nonce = os.urandom(16), os.urandom(12)
     encryptor = Cipher(algorithms.AES(_passphrase_key(passphrase, salt)), modes.GCM(nonce)).encryptor()
@@ -74,7 +74,7 @@ def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passp
     source_bytes = 0
     profile_files = 0
     for root in (content, profile_root):
-        if not root.exists():
+        if root is None or not root.exists():
             continue
         for path in root.rglob("*"):
             if path.is_file() and not path.is_symlink():
@@ -105,9 +105,9 @@ def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passp
         sink = EncryptedSink()
         with tarfile.open(fileobj=sink, mode="w|", format=tarfile.PAX_FORMAT) as archive:
             archive.add(content, arcname="northstar", recursive=True, filter=lambda entry: None if entry.issym() or entry.islnk() else entry)
-            if profile_root.exists():
+            if profile_root is not None and profile_root.exists():
                 archive.add(profile_root, arcname="northstar/profiles", recursive=True, filter=lambda entry: None if entry.issym() or entry.islnk() else entry)
-            else:
+            elif profile_root is not None:
                 empty = tarfile.TarInfo("northstar/profiles")
                 empty.type = tarfile.DIRTYPE
                 archive.addfile(empty)
@@ -254,20 +254,21 @@ def list_backup_archives() -> list[dict[str, Any]]:
             "record_count": None,
             "profile_files": None,
             "created_by": None,
+            "components": {"database": True, "profiles": True, "deployment_config": True},
         }
         manifest = archive.with_suffix(".json")
         try:
             if manifest.is_file() and not manifest.is_symlink():
                 details = json.loads(manifest.read_text(encoding="utf-8"))
                 if isinstance(details, dict):
-                    item.update({key: details[key] for key in ("created_at", "table_count", "record_count", "profile_files", "created_by") if key in details})
+                    item.update({key: details[key] for key in ("created_at", "table_count", "record_count", "profile_files", "created_by", "components") if key in details})
         except (OSError, ValueError):
             logger.warning("Backup catalog metadata is unavailable for %s", archive.name)
         items.append(item)
     return sorted(items, key=lambda item: item["created_at"], reverse=True)
 
 
-def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "safety", created_by: str | None = None, progress: ProgressCallback | None = None) -> Path:
+def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "safety", created_by: str | None = None, include_profiles: bool = True, include_runtime_config: bool = True, progress: ProgressCallback | None = None) -> Path:
     """Create and return an encrypted backup; persistent archives are cataloged."""
     if kind not in {"workspace", "safety"}:
         raise ValueError("Invalid backup kind")
@@ -283,7 +284,9 @@ def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "saf
             "format": "northstar-backup", "version": VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "database_dialect": engine.dialect.name,
-            "tables": [], "runtime_config": _runtime_files(content),
+            "tables": [],
+            "components": {"database": True, "profiles": include_profiles, "deployment_config": include_runtime_config},
+            "runtime_config": _runtime_files(content) if include_runtime_config else {"included": []},
         }
         tables = list(Base.metadata.sorted_tables)
         with engine.connect() as connection:
@@ -299,7 +302,7 @@ def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "saf
                     progress("Exporting database tables", index + 1, len(tables))
         (content / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         profile_root = Path(settings.profile_root).resolve()
-        profile_files = _encrypt_archive(content, profile_root, encrypted, passphrase, progress)
+        profile_files = _encrypt_archive(content, profile_root if include_profiles else None, encrypted, passphrase, progress)
         if persistent:
             backup_dir = backup_directory()
             backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -315,6 +318,7 @@ def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "saf
                     "table_count": len(metadata["tables"]),
                     "record_count": sum(item["rows"] for item in metadata["tables"]),
                     "profile_files": profile_files,
+                    "components": metadata["components"],
                     "created_by": created_by,
                 }), encoding="utf-8")
                 manifest_tmp.chmod(0o600)
@@ -370,6 +374,9 @@ def _validate_database_payload(archive: tarfile.TarFile) -> tuple[dict[str, Any]
         raise BackupError("The backup metadata is missing or invalid.") from exc
     if not isinstance(metadata, dict) or metadata.get("format") != "northstar-backup" or metadata.get("version") != VERSION:
         raise BackupError("This backup format is not supported by this app version.")
+    components = metadata.get("components", {"database": True, "profiles": True, "deployment_config": True})
+    if not isinstance(components, dict) or components.get("database") is not True or any(not isinstance(components.get(name), bool) for name in ("profiles", "deployment_config")):
+        raise BackupError("The backup component selection is invalid.")
     known = {table.name: table for table in Base.metadata.sorted_tables}
     metadata_tables = {item.get("name") for item in metadata.get("tables", []) if isinstance(item, dict)}
     if metadata_tables != set(known):
@@ -414,21 +421,24 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
         _decrypt_file(upload, plain, passphrase, progress)
         with tarfile.open(plain, "r:") as archive:
             metadata, tables = _validate_database_payload(archive)
-            profile_stage = live_profile.with_name(f".{live_profile.name}.restore-{uuid.uuid4().hex}")
-            profile_stage.mkdir(parents=True, exist_ok=False)
-            _safe_extract_profiles(archive, profile_stage, progress)
+            components = metadata.get("components", {"profiles": True, "deployment_config": True})
+            if components["profiles"]:
+                profile_stage = live_profile.with_name(f".{live_profile.name}.restore-{uuid.uuid4().hex}")
+                profile_stage.mkdir(parents=True, exist_ok=False)
+                _safe_extract_profiles(archive, profile_stage, progress)
             # Save a secure copy of deployment-managed credentials for recovery.
             # The process does not overwrite /etc files or change its live keys.
-            config_target = Path(get_settings().profile_root).resolve().parent / f"restored-deployment-config-{uuid.uuid4().hex[:8]}"
-            config_target.mkdir(parents=True, exist_ok=True, mode=0o700)
-            for member in archive.getmembers():
-                if member.name.startswith("northstar/deployment-config/") and member.isfile():
-                    name = PurePosixPath(member.name).name
-                    source = archive.extractfile(member)
-                    if source:
-                        with source, (config_target / name).open("wb") as out:
-                            shutil.copyfileobj(source, out)
-                        (config_target / name).chmod(0o600)
+            if components["deployment_config"]:
+                config_target = Path(get_settings().profile_root).resolve().parent / f"restored-deployment-config-{uuid.uuid4().hex[:8]}"
+                config_target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                for member in archive.getmembers():
+                    if member.name.startswith("northstar/deployment-config/") and member.isfile():
+                        name = PurePosixPath(member.name).name
+                        source = archive.extractfile(member)
+                        if source:
+                            with source, (config_target / name).open("wb") as out:
+                                shutil.copyfileobj(source, out)
+                            (config_target / name).chmod(0o600)
 
             # The current transaction rolls back all DB changes if any table fails.
             for table in reversed(list(tables.values())):
@@ -459,16 +469,17 @@ def restore_backup(upload: Path, passphrase: str, db: Session, *, actor_id: str,
                 metadata_json={"table_count": len(tables), "safety_backup": safety_backup_name},
             ))
             db.flush()
-            live_profile.parent.mkdir(parents=True, exist_ok=True)
-            if live_profile.exists():
-                live_profile.rename(displaced_profile)
-            profile_stage.rename(live_profile)
-            profile_swapped = True
+            if profile_stage is not None:
+                live_profile.parent.mkdir(parents=True, exist_ok=True)
+                if live_profile.exists():
+                    live_profile.rename(displaced_profile)
+                profile_stage.rename(live_profile)
+                profile_swapped = True
             db.commit()
             if progress:
                 progress("Committing restored workspace", 1, 1)
             shutil.rmtree(displaced_profile, ignore_errors=True)
-            return {"restored_at": datetime.now(timezone.utc).isoformat(), "table_count": len(tables), "tables": metadata["tables"], "profile_root_restored": True, "deployment_config_staged": str(config_target)}
+            return {"restored_at": datetime.now(timezone.utc).isoformat(), "table_count": len(tables), "tables": metadata["tables"], "profile_root_restored": profile_swapped, "deployment_config_staged": str(config_target) if config_target else None}
     except Exception:
         db.rollback()
         if profile_swapped:

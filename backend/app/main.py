@@ -609,7 +609,7 @@ def download_saved_workspace_backup(backup_name: str, request: Request, db: Sess
 
 
 @app.post("/api/v1/backups")
-def download_workspace_backup(request: Request, passphrase: str = Form(...), operation_id: str | None = Form(None), db: Session = Depends(get_db)) -> FileResponse:
+def download_workspace_backup(request: Request, passphrase: str = Form(...), operation_id: str | None = Form(None), include_profiles: bool = Form(True), include_runtime_config: bool = Form(True), db: Session = Depends(get_db)) -> FileResponse:
     admin = _admin(request, db)
     _require_backup_quiescence(db)
     if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
@@ -617,7 +617,7 @@ def download_workspace_backup(request: Request, passphrase: str = Form(...), ope
     if operation_id:
         backup_progress.begin(operation_id, admin.employee_id, "download")
     try:
-        archive = create_backup(passphrase, persistent=True, kind="workspace", created_by=admin.employee_id, progress=lambda stage, done, total: backup_progress.update(operation_id, stage, done, total))
+        archive = create_backup(passphrase, persistent=True, kind="workspace", created_by=admin.employee_id, include_profiles=include_profiles, include_runtime_config=include_runtime_config, progress=lambda stage, done, total: backup_progress.update(operation_id, stage, done, total))
     except BackupError as exc:
         backup_progress.finish(operation_id, False)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -628,7 +628,7 @@ def download_workspace_backup(request: Request, passphrase: str = Form(...), ope
     finally:
         _BACKUP_OPERATION_LOCK.release()
     try:
-        db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=settings.demo_org_id, actor_id=admin.employee_id, action="workspace.backup.created", target_type="workspace_backup", target_id="download", result="success", metadata_json={"format_version": 1}))
+        db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=settings.demo_org_id, actor_id=admin.employee_id, action="workspace.backup.created", target_type="workspace_backup", target_id=archive.name, result="success", metadata_json={"format_version": 1, "include_profiles": include_profiles, "include_runtime_config": include_runtime_config}))
         db.commit()
     except Exception:
         backup_progress.finish(operation_id, False)

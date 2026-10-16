@@ -68,6 +68,8 @@ With an enabled workspace 2Captcha key, a visible reCAPTCHA v2 or standalone Tur
 
 ## Validation and sensitive values
 
+- Backup creation opens a selection dialog before any work starts. The database and encrypted credentials are required; browser profiles and deployment configuration are optional and selected by default. The archive records the selected components. Restoring an archive without profiles preserves the server's live profile directory; restoring one without deployment configuration does not create an empty staged configuration directory. A full safety snapshot is made before either restore.
+
 - Email is normalized case-insensitively for deduplication.
 - Bulk rows require two to four non-empty colon-separated fields. The password is required; recovery and 2FA are optional and only appear in the preview when supplied.
 - Password, recovery, and 2FA values are masked by default and never appear in URLs, logs, browser storage, audit metadata, toast text, or response payloads.

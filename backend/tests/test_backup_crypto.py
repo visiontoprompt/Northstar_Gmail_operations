@@ -62,7 +62,8 @@ def test_backup_progress_is_scoped_to_its_administrator():
     assert backup_progress.get("test-progress-id", "admin-one")["state"] == "complete"
 
 
-def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("include_profiles,include_runtime_config", [(True, True), (False, False), (True, False), (False, True)])
+def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Path, monkeypatch, include_profiles: bool, include_runtime_config: bool):
     source_engine = create_engine(f"sqlite:///{tmp_path / 'source.db'}")
     target_engine = create_engine(f"sqlite:///{tmp_path / 'target.db'}")
     backup.Base.metadata.create_all(source_engine)
@@ -79,13 +80,14 @@ def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Pa
     with source_engine.begin() as connection:
         connection.execute(Organization.__table__.insert().values(id="org-source", name="Source", created_at=datetime(2026, 10, 15, tzinfo=timezone.utc)))
     measured: list[tuple[str, int | None, int | None]] = []
-    archive = backup.create_backup("a-long-and-safe-passphrase", persistent=True, kind="workspace", created_by="admin-test", progress=lambda stage, done, total: measured.append((stage, done, total)))
+    archive = backup.create_backup("a-long-and-safe-passphrase", persistent=True, kind="workspace", created_by="admin-test", include_profiles=include_profiles, include_runtime_config=include_runtime_config, progress=lambda stage, done, total: measured.append((stage, done, total)))
     listed = backup.list_backup_archives()
     assert len(listed) == 1
     assert listed[0]["name"] == archive.name
     assert listed[0]["kind"] == "workspace"
     assert listed[0]["table_count"] == len(backup.Base.metadata.tables)
-    assert listed[0]["profile_files"] == 1
+    assert listed[0]["profile_files"] == (1 if include_profiles else 0)
+    assert listed[0]["components"] == {"database": True, "profiles": include_profiles, "deployment_config": include_runtime_config}
     assert listed[0]["created_by"] == "admin-test"
     assert listed[0]["size_bytes"] == archive.stat().st_size
     assert backup.backup_archive_path(archive.name) == archive
@@ -99,10 +101,16 @@ def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Pa
         with Session(target_engine, expire_on_commit=False) as session:
             restored = backup.restore_backup(archive, "a-long-and-safe-passphrase", session, actor_id="admin-test", safety_backup_name="safety-test.nstar", progress=lambda stage, done, total: measured.append((stage, done, total)))
             assert restored["table_count"] == len(backup.Base.metadata.tables)
+            assert restored["profile_root_restored"] is include_profiles
+            assert bool(restored["deployment_config_staged"]) is include_runtime_config
             assert any(stage == "Restoring database tables" and done == total for stage, done, total in measured)
         with Session(target_engine) as session:
             assert [item.id for item in session.scalars(select(Organization)).all()] == ["org-source"]
-        assert (target_profile / "profile-a" / "Preferences").read_text(encoding="utf-8") == "saved-profile"
-        assert not (target_profile / "old-profile").exists()
+        if include_profiles:
+            assert (target_profile / "profile-a" / "Preferences").read_text(encoding="utf-8") == "saved-profile"
+            assert not (target_profile / "old-profile").exists()
+        else:
+            assert (target_profile / "old-profile" / "old.txt").read_text(encoding="utf-8") == "old"
+            assert not (target_profile / "profile-a").exists()
     finally:
         archive.parent and __import__("shutil").rmtree(archive.parent, ignore_errors=True)
