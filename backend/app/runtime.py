@@ -118,6 +118,47 @@ def _find_chrome_pids_for_profile(profile_path: Path) -> list[int]:
     return pids
 
 
+def _descendant_process_pids(root_pids: set[int], proc_root: Path = Path("/proc")) -> set[int]:
+    """Include Chrome's child processes when resolving its X11 window owner.
+
+    On some Chromium builds the X11 window's _NET_WM_PID belongs to a Chrome
+    child instead of the browser process that owns --user-data-dir. Match only
+    descendants of the profile-specific browser process so one account cannot
+    focus another account's window.
+    """
+    if not root_pids:
+        return set()
+    children: dict[int, list[int]] = {}
+    try:
+        entries = proc_root.iterdir()
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                # The comm field is parenthesized and may itself contain
+                # spaces or ')' characters; fields after its final ')' start
+                # with state, then ppid.
+                fields = stat[stat.rfind(")") + 1 :].split()
+                if len(fields) < 2:
+                    continue
+                parent_pid = int(fields[1])
+                pid = int(entry.name)
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(parent_pid, []).append(pid)
+    except (OSError, PermissionError):
+        return set()
+    descendants = set(root_pids)
+    pending = list(root_pids)
+    while pending:
+        for child_pid in children.get(pending.pop(), []):
+            if child_pid not in descendants:
+                descendants.add(child_pid)
+                pending.append(child_pid)
+    return descendants
+
+
 def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bool:
     """Return whether the account's dedicated browser is still alive.
 
@@ -137,9 +178,12 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
     launching a duplicate. Authenticated operators pass their private X display.
     """
     profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
-    browser_pids = set(_find_chrome_pids_for_profile(profile_path))
-    if not browser_pids:
+    browser_roots = set(_find_chrome_pids_for_profile(profile_path))
+    if not browser_roots:
         return False
+    browser_pids = _descendant_process_pids(browser_roots)
+    if not browser_pids:
+        browser_pids = browser_roots
     wmctrl = shutil.which("wmctrl")
     if not wmctrl:
         logger.warning("cannot focus browser profile %s: wmctrl is not installed", profile_id)
@@ -157,6 +201,7 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
     if windows.returncode != 0:
         logger.warning("wmctrl could not list windows while focusing profile %s", profile_id)
         return False
+    candidates: list[tuple[int, str]] = []
     for line in windows.stdout.splitlines():
         columns = line.split(maxsplit=4)
         if len(columns) < 4:
@@ -167,15 +212,21 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
             continue
         if window_pid not in browser_pids:
             continue
+        # Prefer a window owned by Chrome's profile-bearing root process, then
+        # try windows owned by its renderer/utility children. This avoids
+        # activating an arbitrary transient child window first.
+        candidates.append((0 if window_pid in browser_roots else 1, columns[0]))
+    for _rank, window_id in sorted(candidates):
         try:
             focused = subprocess.run(
-                [wmctrl, "-ia", columns[0]], capture_output=True, text=True,
+                [wmctrl, "-ia", window_id], capture_output=True, text=True,
                 check=False, timeout=3, env=env,
             )
         except (OSError, subprocess.TimeoutExpired):
             logger.exception("cannot focus desktop window for profile %s", profile_id)
             return False
-        return focused.returncode == 0
+        if focused.returncode == 0:
+            return True
     logger.info("no visible desktop window found for browser profile %s", profile_id)
     return False
 

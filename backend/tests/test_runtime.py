@@ -94,6 +94,46 @@ def test_focus_local_browser_profile_reports_missing_window(tmp_path) -> None:
         settings.profile_root = original_profile_root
 
 
+def test_focus_local_browser_profile_matches_chrome_child_window(tmp_path) -> None:
+    from subprocess import CompletedProcess
+
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path)
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1] == "-lp":
+            return CompletedProcess(args, 0, "0x071 0 8765 localhost Chrome\n", "")
+        return CompletedProcess(args, 0, "", "")
+
+    try:
+        with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
+             patch("app.runtime._descendant_process_pids", return_value={4321, 8765}), \
+             patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
+             patch("app.runtime.subprocess.run", side_effect=run):
+            assert runtime.focus_local_browser_profile("profile_1", display=":107") is True
+        assert calls == [["/usr/bin/wmctrl", "-lp"], ["/usr/bin/wmctrl", "-ia", "0x071"]]
+    finally:
+        settings.profile_root = original_profile_root
+
+
+def test_descendant_process_pids_handles_comm_with_spaces_and_parentheses(tmp_path) -> None:
+    parent = tmp_path / "100"
+    child = tmp_path / "101"
+    grandchild = tmp_path / "102"
+    unrelated = tmp_path / "200"
+    for path in (parent, child, grandchild, unrelated):
+        path.mkdir()
+    # /proc stat fields after the last ')' are state then ppid.
+    (parent / "stat").write_text("100 (chrome (browser)) S 1 0 0")
+    (child / "stat").write_text("101 (chrome child) S 100 0 0")
+    (grandchild / "stat").write_text("102 (renderer child) S 101 0 0")
+    (unrelated / "stat").write_text("200 (other chrome) S 1 0 0")
+
+    assert runtime._descendant_process_pids({100}, proc_root=tmp_path) == {100, 101, 102}
+
+
 def test_launch_local_browser_does_not_create_profile_dir_before_connection(tmp_path) -> None:
     original_launch = settings.browser_launch_enabled
     original_profile_root = settings.profile_root

@@ -1145,6 +1145,7 @@ function BrowserDesktopPage({ isActive, groups, refreshKey, onRefresh, onOpenSes
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
   const [focusing, setFocusing] = useState("");
+  const [profileZipBusy, setProfileZipBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const viewerRef = useRef<HTMLIFrameElement>(null);
@@ -1234,15 +1235,39 @@ function BrowserDesktopPage({ isActive, groups, refreshKey, onRefresh, onOpenSes
   }, [job?.id, job?.status]);
 
   const focusSession = async (session: Session) => {
-    setSelectedSessionId(session.id);
     if (!session.browser_alive) {
+      setSelectedSessionId(session.id);
       setNotice(`Chrome is not detected for ${session.account_email}. Open session details to review the launch state.`);
       return;
     }
     setFocusing(session.id); setError(""); setNotice("");
-    try { await api<{ focused: boolean }>(`/api/v1/sessions/${session.id}/focus`, { method: "POST" }); }
+    try {
+      await api<{ focused: boolean }>(`/api/v1/sessions/${session.id}/focus`, { method: "POST" });
+      setSelectedSessionId(session.id);
+    }
     catch (requestError) { setError((requestError as Error).message || "The Chrome window could not be focused. Use Alt+Tab in the VNC toolbar to switch windows."); }
     finally { setFocusing(""); }
+  };
+
+  const downloadInspectedProfile = async () => {
+    if (!inspectedAccount || profileZipBusy || inspectedSession) return;
+    setProfileZipBusy(true); setError(""); setNotice("");
+    try {
+      const response = await fetch("/api/v1/profiles/export", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_ids: [inspectedAccount.id] }) });
+      if (!response.ok) {
+        let detail = "The account profile ZIP could not be created.";
+        try { const payload = await response.json() as { detail?: string }; if (payload.detail) detail = payload.detail; } catch { /* keep the actionable fallback */ }
+        throw new Error(detail);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") ?? "";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? "northstar-profile.zip";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a"); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`Downloaded the complete browser profile ZIP for ${inspectedAccount.email}.`);
+    } catch (requestError) { setError((requestError as Error).message || "The account profile ZIP could not be created."); }
+    finally { setProfileZipBusy(false); }
   };
 
   const startAccounts = async (chosen: Account[]) => {
@@ -1417,7 +1442,7 @@ function BrowserDesktopPage({ isActive, groups, refreshKey, onRefresh, onOpenSes
           <small className="desktop-operation-help">Actions use only the accounts shown in this scope. Configure forms and confirmations stay in this panel.</small>
         </section>
         <div className="desktop-inspector-operation-host" ref={operationHostRef} />
-        {inspectedAccount ? <><div className="desktop-inspector-identity"><span className="desktop-inspector-avatar">{inspectedAccount.email.slice(0, 1).toUpperCase()}</span><div><strong title={inspectedAccount.email}>{inspectedAccount.email}</strong><small>{inspectedAccount.group_name}</small></div></div><div className="desktop-inspector-section"><span className="detail-label">ACCOUNT STATUS</span><div className="desktop-inspector-status"><span className={`status-dot ${inspectedAccount.login_status === "AUTHENTICATED" ? "teal" : inspectedAccount.login_status === "VERIFICATION_REQUIRED" ? "amber" : "neutral"}`} /><strong>{labelStatus(inspectedAccount.login_status)}</strong></div><div className="desktop-inspector-data"><span>Profile</span><strong>{labelStatus(inspectedAccount.profile.status)}</strong><span>Readiness</span><strong>{labelStatus(inspectedAccount.readiness_status)}</strong><span>Proxy</span><strong>{inspectedAccount.proxy.label || inspectedAccount.proxy.region || "Not assigned"}</strong></div></div><div className="desktop-inspector-section"><span className="detail-label">BROWSER SESSION</span>{inspectedSession ? <><div className="desktop-inspector-status"><span className={`status-dot ${inspectedSession.browser_alive ? "teal" : "amber"}`} /><strong>{inspectedSession.browser_alive ? "Chrome is running" : "No Chrome process detected"}</strong></div><p>{labelStatus(inspectedSession.state)} · opened {new Date(inspectedSession.opened_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p><div className="desktop-inspector-actions"><button type="button" className="button secondary small" onClick={() => onOpenSession(inspectedSession)}><Monitor size={14} />Review session</button>{inspectedSession.browser_alive && closeConfirmationSessionId !== inspectedSession.id && <button type="button" className="button danger small" onClick={() => setCloseConfirmationSessionId(inspectedSession.id)}><Power size={14} />Close browser</button>}</div>{closeConfirmationSessionId === inspectedSession.id && <div className="desktop-close-confirm" role="group" aria-label="Confirm close browser session"><span>{`Close Chrome for ${inspectedSession.account_email}? Other account windows stay open.`}</span><div><button type="button" className="button secondary small" onClick={() => setCloseConfirmationSessionId("")} disabled={Boolean(closingSessionId)}>Keep open</button><button type="button" className="button danger small" onClick={() => void closeSelectedSession()} disabled={Boolean(closingSessionId)} aria-busy={Boolean(closingSessionId)}>{closingSessionId ? <span className="button-spinner" /> : <Power size={13} />}Confirm close</button></div></div>}</> : <div className="desktop-inspector-empty">No active session for this account. Choose an operation to open its browser.</div>}</div>{inspectedAccount.tags?.length ? <div className="desktop-inspector-tags"><span className="detail-label">TAGS</span><div>{inspectedAccount.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></div> : null}</> : <div className="desktop-inspector-empty">Select an account or choose a browser tab to inspect its status and controls.</div>}
+        {inspectedAccount ? <><div className="desktop-inspector-identity"><span className="desktop-inspector-avatar">{inspectedAccount.email.slice(0, 1).toUpperCase()}</span><div><strong title={inspectedAccount.email}>{inspectedAccount.email}</strong><small>{inspectedAccount.group_name}</small></div></div><div className="desktop-inspector-section"><span className="detail-label">ACCOUNT STATUS</span><div className="desktop-inspector-status"><span className={`status-dot ${inspectedAccount.login_status === "AUTHENTICATED" ? "teal" : inspectedAccount.login_status === "VERIFICATION_REQUIRED" ? "amber" : "neutral"}`} /><strong>{labelStatus(inspectedAccount.login_status)}</strong></div><div className="desktop-inspector-data"><span>Profile</span><strong>{labelStatus(inspectedAccount.profile.status)}</strong><span>Readiness</span><strong>{labelStatus(inspectedAccount.readiness_status)}</strong><span>Proxy</span><strong>{inspectedAccount.proxy.label || inspectedAccount.proxy.region || "Not assigned"}</strong></div>{["SAVED", "IMPORTED"].includes(inspectedAccount.profile.status) && <><button type="button" className="button secondary small desktop-inspector-export" onClick={() => void downloadInspectedProfile()} disabled={profileZipBusy || Boolean(inspectedSession)} title={inspectedSession ? "Close this account's browser before creating a consistent profile ZIP." : "Download this account's complete browser profile, including cookies and site data."} aria-busy={profileZipBusy}>{profileZipBusy ? <span className="button-spinner" /> : <Download size={14} />}{profileZipBusy ? "Creating profile ZIP…" : "Download profile ZIP"}</button>{inspectedSession && <small className="desktop-profile-export-note">Close this account’s browser to make a consistent ZIP.</small>}</>}</div><div className="desktop-inspector-section"><span className="detail-label">BROWSER SESSION</span>{inspectedSession ? <><div className="desktop-inspector-status"><span className={`status-dot ${inspectedSession.browser_alive ? "teal" : "amber"}`} /><strong>{inspectedSession.browser_alive ? "Chrome is running" : "No Chrome process detected"}</strong></div><p>{labelStatus(inspectedSession.state)} · opened {new Date(inspectedSession.opened_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p><div className="desktop-inspector-actions"><button type="button" className="button secondary small" onClick={() => onOpenSession(inspectedSession)}><Monitor size={14} />Review session</button>{inspectedSession.browser_alive && closeConfirmationSessionId !== inspectedSession.id && <button type="button" className="button danger small" onClick={() => setCloseConfirmationSessionId(inspectedSession.id)}><Power size={14} />Close browser</button>}</div>{closeConfirmationSessionId === inspectedSession.id && <div className="desktop-close-confirm" role="group" aria-label="Confirm close browser session"><span>{`Close Chrome for ${inspectedSession.account_email}? Other account windows stay open.`}</span><div><button type="button" className="button secondary small" onClick={() => setCloseConfirmationSessionId("")} disabled={Boolean(closingSessionId)}>Keep open</button><button type="button" className="button danger small" onClick={() => void closeSelectedSession()} disabled={Boolean(closingSessionId)} aria-busy={Boolean(closingSessionId)}>{closingSessionId ? <span className="button-spinner" /> : <Power size={13} />}Confirm close</button></div></div>}</> : <div className="desktop-inspector-empty">No active session for this account. Choose an operation to open its browser.</div>}</div>{inspectedAccount.tags?.length ? <div className="desktop-inspector-tags"><span className="detail-label">TAGS</span><div>{inspectedAccount.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></div> : null}</> : <div className="desktop-inspector-empty">Select an account or choose a browser tab to inspect its status and controls.</div>}
       </aside>}
     </section>}
     {enabled === false && <section className="desktop-setup-note"><Monitor size={21} /><div><strong>The server desktop is not enabled yet</strong><span>The Ubuntu installer configures the virtual display, window manager, and protected browser viewer.</span></div></section>}
