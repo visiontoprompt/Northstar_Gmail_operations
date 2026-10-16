@@ -21,6 +21,7 @@ dependencies = [
   "alembic>=1.14,<2",
   "psycopg[binary]>=3.2,<4",
   "openstacksdk>=4.4,<5",
+  "rarfile>=4.1,<5",
 ]
 
 [project.optional-dependencies]

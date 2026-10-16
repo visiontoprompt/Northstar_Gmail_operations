@@ -22,6 +22,12 @@ The installer enables Playwright and installs Xvfb, Openbox, x11vnc, and noVNC/W
 
 On an existing installation, update the checkout and rerun `sudo bash deployment/install-ubuntu.sh` so the per-operator WebSocket routing is installed in Nginx and the schema migration adds session ownership. The installer restarts the API after copying files so an already-running service cannot keep executing stale Python code. Existing browser sessions created before this release have no reliable operator attribution, so the migration places them under the workspace administrator for cleanup. The administrator should close those legacy sessions; operators can then reopen the accounts from their own Browser desktops. New sessions are isolated automatically.
 
+## Import saved browser profiles
+
+The Accounts action bar can upload a ZIP or RAR profile archive for one selected account. Settings → Backups lets an administrator upload one archive containing multiple account profile folders, choosing **Skip existing** or **Replace existing**. For a bulk import, name each folder by its account email, account ID, or profile ID; an optional common parent folder is accepted. The app extracts only folders matching existing, non-archived accounts into the configured `PROFILE_ROOT` and lists unmatched names in the result. A single-account upload replaces that account's profile. Imported profiles are marked saved, but authentication is not claimed until a new browser session verifies it.
+
+Close affected browser sessions before importing. Locked or running profiles are reported and left unchanged. Replacement moves the previous directory to a timestamped safety copy under `PROFILE_ROOT/../profile-import-safety/` before installing the new one. Keep that directory in your backup plan until imports have been verified. The installer includes `unar` for RAR extraction and rerunning it installs the dependency on an existing server. Uploaded archives are limited to 20 GB and the extracted contents to 40 GB; allow additional temporary disk space during import. Profile archives can contain live cookies and other account data, so store and transfer them securely.
+
 All browser windows share one desktop, so multiple concurrent sessions may overlap. Use Alt+Tab in the viewer to switch between windows. The application worker cap is set to 10; the account UI's configured concurrency remains the operational limit. Session state and profile locks continue to be managed by the existing app.
 
 ## Services and checks

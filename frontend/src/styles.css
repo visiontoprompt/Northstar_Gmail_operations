@@ -2368,6 +2368,41 @@ html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"]
 
 /* Admin backup and restore surface */
 .backup-workspace { display: grid; gap: 14px; }
+.profile-import-section { gap: 17px; }
+.profile-import-section > .button { align-self: flex-start; }
+.profile-import-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(250px, 1fr); gap: 18px; width: 100%; }
+.profile-import-picker { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.profile-import-picker > small, .profile-import-help { color: var(--color-muted); font-size: 11px; line-height: 1.5; }
+.profile-import-policy { display: grid; gap: 7px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.profile-import-policy legend { margin-bottom: 7px; color: var(--color-ink); font-size: 11px; font-weight: 700; }
+.profile-import-policy label { display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--color-line); border-radius: 9px; background: var(--color-surface); color: var(--color-ink); cursor: pointer; }
+.profile-import-policy label:has(input:checked) { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface)); }
+.profile-import-policy input { margin-top: 2px; accent-color: var(--color-primary); }
+.profile-import-policy label span { display: grid; gap: 2px; }
+.profile-import-policy strong { font-size: 11px; }
+.profile-import-policy small { color: var(--color-muted); font-size: 10px; }
+.profile-import-body { display: grid; gap: 15px; }
+.profile-import-body .field { margin: 0; }
+.profile-import-callout { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--color-line); border-radius: 10px; background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface)); color: var(--color-ink-soft); font-size: 12px; line-height: 1.5; }
+.profile-import-callout svg { flex: 0 0 auto; color: var(--color-primary); }
+.profile-import-progress { display: grid; gap: 9px; width: 100%; padding: 12px; border: 1px solid var(--color-line); border-radius: 10px; background: var(--color-surface); }
+.profile-import-progress > div:first-child { display: flex; justify-content: space-between; gap: 10px; color: var(--color-ink); font-size: 12px; }
+.profile-import-progress > div:first-child span { color: var(--color-primary); font-variant-numeric: tabular-nums; }
+.profile-import-track { overflow: hidden; height: 7px; border-radius: 99px; background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); }
+.profile-import-track > span { display: block; height: 100%; border-radius: inherit; background: var(--color-primary); transition: width .2s ease; }
+.profile-import-track.indeterminate > span { width: 32%; animation: backup-progress-move 1.3s ease-in-out infinite alternate; }
+.profile-import-results { display: grid; gap: 10px; width: 100%; }
+.profile-import-totals { display: flex; justify-content: space-between; gap: 12px; color: var(--color-ink); font-size: 12px; }
+.profile-import-totals span { color: var(--color-muted); }
+.profile-import-result-list { display: grid; max-height: 205px; overflow-y: auto; border: 1px solid var(--color-line); border-radius: 10px; }
+.profile-import-result { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px 10px; color: var(--color-ink-soft); font-size: 11px; }
+.profile-import-result + .profile-import-result { border-top: 1px solid var(--color-line); }
+.profile-import-result strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-import-result small { color: var(--color-muted); }
+.profile-import-result.imported > span, .profile-import-result.replaced > span { color: var(--color-success); }
+.profile-import-result.failed > span, .profile-import-result.locked > span { color: var(--color-danger); }
+.profile-import-unmatched { margin: 0; color: var(--color-muted); font-size: 11px; line-height: 1.5; }
+@media (max-width: 760px) { .profile-import-layout { grid-template-columns: 1fr; } .profile-import-result { grid-template-columns: 18px minmax(0, 1fr); } .profile-import-result small { grid-column: 2; } }
 .backup-intro { display: flex; align-items: center; gap: 12px; padding: 15px 18px; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); }
 .backup-intro > div { flex: 1; min-width: 0; }
 .backup-intro h2, .backup-card h3 { margin: 0; color: var(--color-ink); font-size: 15px; }

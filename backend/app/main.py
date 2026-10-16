@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from .config import get_settings
 from .backup import BackupError, MAX_UPLOAD_BYTES, backup_archive_path, create_backup, list_backup_archives, restore_backup, validate_backup_file
+from .profile_import import ProfileImportError, import_profiles, MAX_ARCHIVE_BYTES as MAX_PROFILE_ARCHIVE_BYTES
 from . import backup_progress
 from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
@@ -715,6 +716,52 @@ def download_restore_safety_backup(backup_name: str, request: Request, db: Sessi
     if archive is None:
         raise HTTPException(status_code=404, detail="Safety backup not found.")
     return FileResponse(archive, media_type="application/octet-stream", filename=backup_name, headers={"Cache-Control": "no-store"})
+
+
+def _receive_profile_archive(file: UploadFile, policy: str, db: Session, actor_id: str, account_id: str | None = None) -> dict:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".zip", ".rar"}:
+        raise HTTPException(status_code=422, detail="Choose a .zip or .rar profile archive.")
+    if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another backup or profile import is running. Retry when it finishes.")
+    temporary: Path | None = None
+    try:
+        profile_parent = Path(settings.profile_root).resolve().parent
+        profile_parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix="northstar-profile-upload-", dir=profile_parent))
+        uploaded = temporary / f"upload{suffix}"
+        total = 0
+        with uploaded.open("wb") as target:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_PROFILE_ARCHIVE_BYTES:
+                    raise HTTPException(status_code=413, detail="Profile archive exceeds the 20 GB upload limit.")
+                target.write(chunk)
+        if not total:
+            raise HTTPException(status_code=422, detail="Choose a nonempty profile archive.")
+        return import_profiles(db, settings.demo_org_id, actor_id, uploaded, policy, account_id)
+    except ProfileImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        file.file.close()
+        if temporary:
+            shutil.rmtree(temporary, ignore_errors=True)
+        _BACKUP_OPERATION_LOCK.release()
+
+
+@app.post("/api/v1/backups/profiles/import")
+def import_workspace_profiles(request: Request, file: UploadFile = File(...), policy: str = Form(...), db: Session = Depends(get_db)) -> dict:
+    admin = _admin(request, db)
+    return _receive_profile_archive(file, policy, db, admin.employee_id)
+
+
+@app.post("/api/v1/backups/profiles/account/{account_id}")
+def import_account_profile(account_id: str, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+    actor = _account_operator(request, db)
+    account = db.scalar(select(GmailAccount).where(GmailAccount.organization_id == settings.demo_org_id, GmailAccount.id == account_id, GmailAccount.lifecycle_status != "ARCHIVED"))
+    if not account or not actor.can_access_group(account.group_id, "OPERATOR"):
+        raise HTTPException(status_code=404, detail="Account not found.")
+    return _receive_profile_archive(file, "replace", db, actor.employee_id, account_id)
 
 
 @app.get("/api/v1/infrastructure/ovh")
