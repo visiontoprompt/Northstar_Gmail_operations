@@ -1455,6 +1455,51 @@ def test_workspace_structure_controls_are_audited() -> None:
         assert {"group.updated", "employee.created", "employee.updated", "workspace_settings.updated"}.issubset(actions)
 
 
+def test_admin_can_delete_only_unused_account_groups() -> None:
+    from app.db import SessionLocal
+    from app.models import GmailAccount, LoginJob, NewsletterJob
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/groups", json={"name": "Unused boundary", "capacity": 300}).json()
+        group_id = created["id"]
+        employee = client.post("/api/v1/employees", json={"full_name": "Boundary operator", "email": "boundary-operator@example.com", "role": "ACCOUNT_OPERATOR"}).json()
+        assert client.put(f"/api/v1/employees/{employee['id']}/group-access", json={"assignments": [{"group_id": group_id, "access_level": "OPERATOR"}]}).status_code == 200
+        assert client.delete(f"/api/v1/groups/{group_id}").status_code == 204
+        assert all(group["id"] != group_id for group in client.get("/api/v1/groups").json())
+        assert client.get(f"/api/v1/employees/{employee['id']}/group-access").json() == []
+        assert client.delete(f"/api/v1/groups/{group_id}").status_code == 404
+        assert any(event["action"] == "group.deleted" and event["target_id"] == group_id for event in client.get("/api/v1/audit-events?limit=100").json())
+
+        occupied = client.post("/api/v1/groups", json={"name": "Occupied boundary", "capacity": 300}).json()["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "in-group@example.com", "password": "secret", "group_id": occupied}).json()
+        assert client.delete(f"/api/v1/groups/{occupied}").status_code == 409
+        with SessionLocal() as db:
+            db.get(GmailAccount, account["id"]).lifecycle_status = "ARCHIVED"
+            db.commit()
+        assert client.delete(f"/api/v1/groups/{occupied}").status_code == 409
+
+        for model, name in ((LoginJob, "login"), (NewsletterJob, "newsletter")):
+            job_group = client.post("/api/v1/groups", json={"name": f"{name} job boundary", "capacity": 300}).json()["id"]
+            with SessionLocal() as db:
+                values = {"id": f"test-{name}-job", "organization_id": settings.demo_org_id}
+                values["group_id" if model is LoginJob else "account_group_id"] = job_group
+                db.add(model(**values))
+                db.commit()
+            assert client.delete(f"/api/v1/groups/{job_group}").status_code == 409
+
+
+def test_account_operator_cannot_delete_groups() -> None:
+    from unittest.mock import patch
+    from app.auth import CurrentUser
+
+    scoped_user = CurrentUser("employee_scoped", settings.demo_org_id, "Scoped operator", "operator@example.com", "OPERATOR", {})
+    with TestClient(app) as client:
+        group_id = client.post("/api/v1/groups", json={"name": "Admin boundary", "capacity": 300}).json()["id"]
+    with patch("app.main.authenticate_request", return_value=scoped_user), patch("app.auth.authenticate_request", return_value=scoped_user):
+        with TestClient(app) as client:
+            assert client.delete(f"/api/v1/groups/{group_id}").status_code == 403
+
+
 def test_employee_group_access_is_scoped_replaceable_and_audited() -> None:
     with TestClient(app) as client:
         groups = client.get("/api/v1/groups").json()

@@ -783,9 +783,16 @@ table { min-width: 1050px; }
 .capacity-line strong { color: #48615a; font-weight: 500; }
 .capacity-meter { height: 6px; margin-top: 8px; overflow: hidden; background: #e9f0ed; border-radius: 5px; }
 .capacity-meter span { display: block; height: 100%; background: var(--color-primary); border-radius: inherit; }
-.group-card-meta { margin-top: 15px; color: #899994; font-family: var(--font-data); font-size: 9px; }
-.group-card-meta .text-button { margin-left: auto; }
+.group-card-meta { flex-wrap: wrap; margin-top: 15px; color: #899994; font-family: var(--font-data); font-size: 9px; }
+.group-card-meta .text-button:first-of-type { margin-left: auto; }
+.group-card-meta .danger-text:hover { color: color-mix(in srgb, var(--color-danger) 78%, var(--color-ink)); }
 .group-modal { width: min(100%, 540px); }
+.group-delete-target { display: flex; align-items: center; gap: 12px; padding: 14px; color: var(--color-ink); background: var(--color-surface-muted); border: 1px solid var(--color-line); border-radius: var(--radius-md); }
+.group-delete-target > svg { color: var(--color-primary); flex: 0 0 auto; }
+.group-delete-target > span { display: grid; gap: 3px; }
+.group-delete-target strong { font-size: 13px; }
+.group-delete-target small,.group-delete-guidance { color: var(--color-muted); font-size: 11px; line-height: 1.5; }
+.group-delete-guidance { margin-top: 14px; }
 .workspace-textarea { min-height: 86px; resize: none; }
 .role-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 17px; }
 .role-card { padding: 15px; background: #fbfdfc; border: 1px solid #e1ebe7; border-radius: 10px; }

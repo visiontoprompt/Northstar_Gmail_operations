@@ -139,6 +139,25 @@ def update_group(db: Session, organization_id: str, actor_id: str, group_id: str
     return _group_payload(db, group)
 
 
+def delete_account_group(db: Session, organization_id: str, actor_id: str, group_id: str) -> None:
+    """Remove an unused account boundary without discarding its account or job history."""
+    group = db.scalar(select(AccountGroup).where(AccountGroup.organization_id == organization_id, AccountGroup.id == group_id).with_for_update())
+    if group is None:
+        raise ImportValidationError("Group not found")
+    newsletter_job, _ = _newsletter_models()
+    blockers = (
+        (GmailAccount, GmailAccount.group_id, "accounts (including archived accounts)"),
+        (LoginJob, LoginJob.group_id, "login jobs"),
+        (newsletter_job, newsletter_job.account_group_id, "newsletter jobs"),
+    )
+    for model, column, label in blockers:
+        if db.scalar(select(model.id).where(model.organization_id == organization_id, column == group_id).limit(1)) is not None:
+            raise ImportValidationError(f"Move or remove this group's {label} before deleting it.")
+    db.delete(group)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="group.deleted", target_type="account_group", target_id=group_id, result="success", metadata_json={"name": group.name}))
+    db.commit()
+
+
 def employee_response(employee: Employee) -> dict:
     return {"id": employee.id, "full_name": employee.full_name, "email": employee.email, "role": employee.role, "status": employee.status, "notes": employee.notes, "created_at": employee.created_at, "updated_at": employee.updated_at, "group_access": [{"group_id": access.group_id, "group_name": access.group.name, "access_level": access.access_level} for access in getattr(employee, "group_access", [])]}
 
