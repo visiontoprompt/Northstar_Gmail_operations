@@ -1410,7 +1410,18 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
           {displayedAccounts.length < filteredAccounts.length && <button type="button" className="desktop-load-more" onClick={() => setVisibleAccountLimit((limit) => Math.min(filteredAccounts.length, limit + 100))}>Load 100 more · {filteredAccounts.length - displayedAccounts.length} remaining</button>}
         </div>
         <div className="desktop-launch-controls">{(selectedOpenSessions.length > 0 || bulkClosing) && <section className="desktop-bulk-close" aria-label="Close selected browser sessions"><div><strong>{bulkClosing ? `Closing selected browsers · ${bulkCloseProgress.completed} of ${bulkCloseProgress.total}` : "Open browsers in selection"}</strong><span>{bulkClosing ? "Closing each selected window safely in sequence." : `${selectedOpenSessions.length} selected account${selectedOpenSessions.length === 1 ? "" : "s"} have a live browser.`}</span></div>{bulkCloseConfirmation ? <><p>Close Chrome for these selected accounts? Other browser windows stay open.</p><div><button type="button" className="button secondary small" onClick={() => setBulkCloseConfirmation(false)} disabled={bulkClosing}>Cancel</button><button type="button" className="button danger small" onClick={() => void closeSelectedBrowsers()} disabled={bulkClosing} aria-busy={bulkClosing}>{bulkClosing ? <span className="button-spinner" /> : <Power size={13} />}{bulkClosing ? `Closing ${bulkCloseProgress.completed}/${bulkCloseProgress.total}…` : `Confirm close (${selectedOpenSessions.length})`}</button></div></> : <button type="button" className="button danger small" onClick={() => setBulkCloseConfirmation(true)}><Power size={14} />Close selected browsers ({selectedOpenSessions.length})</button>}</section>}</div>
-        <div className="desktop-launch-controls desktop-start-controls">{operation === "login" && <><label className="desktop-start-concurrency"><span>Sessions at a time</span><select aria-label="Sessions at a time" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>{Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}</select></label><button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation("login")} disabled={launching || !operationTargets.length} aria-busy={launching}>{launching ? <span className="button-spinner" /> : <Play size={15} />}{launching ? "Starting…" : "Start " + operationTargets.length + " session" + (operationTargets.length === 1 ? "" : "s")}</button></>}</div>
+        <div className="desktop-launch-controls desktop-start-controls">
+          <label className="desktop-start-concurrency">
+            <span>Sessions at a time</span>
+            <select aria-label="Sessions at a time" value={concurrency} onChange={(event) => setConcurrency(Math.max(1, Math.min(maxConcurrency, Number(event.target.value))))}>
+              {Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}
+            </select>
+          </label>
+          <button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation("login")} disabled={launching || !operationTargets.length} aria-busy={launching}>
+            {launching ? <span className="button-spinner" /> : <Play size={15} />}
+            {launching ? "Starting…" : "Start " + operationTargets.length + " session" + (operationTargets.length === 1 ? "" : "s")}
+          </button>
+        </div>
         </>}
       </aside>
       <div className="desktop-main">
