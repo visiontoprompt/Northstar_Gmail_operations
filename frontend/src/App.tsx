@@ -334,19 +334,10 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     if (selectedAccountIds.length > 100) { notify("error", "Export up to 100 selected account profiles at a time."); return; }
     setProfileExporting(true);
     try {
-      const response = await fetch("/api/v1/profiles/export", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_ids: selectedAccountIds }) });
-      if (!response.ok) {
-        let detail = "Selected profiles could not be exported.";
-        try { const payload = await response.json() as { detail?: string }; if (payload.detail) detail = payload.detail; } catch { /* keep the actionable fallback */ }
-        throw new Error(detail);
-      }
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") ?? "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? "northstar-profiles.zip";
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a"); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      notify("success", `Downloaded ${selectedAccountIds.length} account profile${selectedAccountIds.length === 1 ? "" : "s"}. The ZIP includes browser session data.`);
+      const query = new URLSearchParams();
+      selectedAccountIds.forEach((id) => query.append("account_ids", id));
+      const link = document.createElement("a"); link.href = `/api/v1/profiles/export?${query.toString()}`; link.style.display = "none"; document.body.appendChild(link); link.click(); link.remove();
+      notify("success", `Profile ZIP download started for ${selectedAccountIds.length} account${selectedAccountIds.length === 1 ? "" : "s"}.`);
     } catch (requestError) { notify("error", (requestError as Error).message || "Selected profiles could not be exported."); }
     finally { setProfileExporting(false); }
   };
@@ -1253,19 +1244,9 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
     if (!inspectedAccount || profileZipBusy || inspectedSession) return;
     setProfileZipBusy(true); setError(""); setNotice("");
     try {
-      const response = await fetch("/api/v1/profiles/export", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ account_ids: [inspectedAccount.id] }) });
-      if (!response.ok) {
-        let detail = "The account profile ZIP could not be created.";
-        try { const payload = await response.json() as { detail?: string }; if (payload.detail) detail = payload.detail; } catch { /* keep the actionable fallback */ }
-        throw new Error(detail);
-      }
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") ?? "";
-      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] ?? "northstar-profile.zip";
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a"); link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(`Downloaded the complete browser profile ZIP for ${inspectedAccount.email}.`);
+      const query = new URLSearchParams({ account_ids: inspectedAccount.id });
+      const link = document.createElement("a"); link.href = `/api/v1/profiles/export?${query.toString()}`; link.style.display = "none"; document.body.appendChild(link); link.click(); link.remove();
+      setNotice(`Profile ZIP download started for ${inspectedAccount.email}.`);
     } catch (requestError) { setError((requestError as Error).message || "The account profile ZIP could not be created."); }
     finally { setProfileZipBusy(false); }
   };

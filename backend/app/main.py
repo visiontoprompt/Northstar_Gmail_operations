@@ -1180,6 +1180,15 @@ def export_account_profiles(payload: ProfileExportRequest, request: Request, db:
         _BACKUP_OPERATION_LOCK.release()
 
 
+@app.get("/api/v1/profiles/export")
+def download_account_profiles(request: Request, account_ids: list[str] = Query(..., min_length=1, max_length=100), db: Session = Depends(get_db)) -> FileResponse:
+    """Stream a profile archive as a native browser download without JS buffering."""
+    if len(set(account_ids)) != len(account_ids):
+        raise HTTPException(status_code=422, detail="Account IDs must be unique")
+    payload = ProfileExportRequest(account_ids=account_ids)
+    return export_account_profiles(payload, request, db)
+
+
 @app.get("/api/v1/profiles/compact-targets")
 def compact_profile_targets(request: Request, db: Session = Depends(get_db)) -> dict:
     operator = _account_operator(request, db)

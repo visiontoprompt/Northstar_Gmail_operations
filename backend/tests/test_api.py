@@ -483,6 +483,11 @@ def test_selected_profile_export_and_size_endpoint(tmp_path) -> None:
                 assert archive.read("portable@example.com/Local State") == b'{"profile":{"info_cache":{}}}'
                 assert archive.read("portable@example.com/Default/Cookies") == cookie_bytes
                 assert "portable@example.com/SingletonLock" not in archive.namelist()
+            streamed = client.get("/api/v1/profiles/export", params={"account_ids": account["id"]})
+            assert streamed.status_code == 200
+            assert streamed.headers["content-type"] == "application/zip"
+            with zipfile.ZipFile(BytesIO(streamed.content)) as archive:
+                assert archive.read("portable@example.com/Default/Cookies") == cookie_bytes
             restored = client.post(f"/api/v1/backups/profiles/account/{account['id']}", files={"file": ("profile.zip", exported.content, "application/zip")})
             assert restored.status_code == 200
             assert restored.json()["results"][0]["status"] == "REPLACED"
@@ -509,7 +514,9 @@ def test_profile_export_is_admin_only(tmp_path) -> None:
         with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
             with TestClient(app) as client:
                 response = client.post("/api/v1/profiles/export", json={"account_ids": [account["id"]]})
+                streamed_response = client.get("/api/v1/profiles/export", params={"account_ids": account["id"]})
         assert response.status_code == 403
+        assert streamed_response.status_code == 403
     finally:
         settings.profile_root = original_profile_root
 
