@@ -2336,6 +2336,10 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 }
 
 .ovh-recovery-panel { display: grid; gap: 14px; margin: 14px 0; padding: 18px; background: var(--color-surface); border: 1px solid var(--color-line); border-left: 4px solid #d99a25; border-radius: 13px; box-shadow: var(--shadow-card); }
+.ovh-recovery-notice { display: flex; align-items: center; gap: 9px; margin: 14px 0; padding: 10px 12px; color: var(--color-ink-soft); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 9px; font-size: 12px; }
+.ovh-recovery-notice > span { flex: 1; }
+.ovh-power-notice { display: flex; align-items: center; gap: 9px; margin: 14px 0; padding: 10px 12px; color: var(--color-success); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 9px; font-size: 12px; }
+.ovh-power-notice > span { flex: 1; }
 .ovh-recovery-panel.ready { border-left-color: var(--color-success); }
 .ovh-recovery-panel.failed { border-left-color: var(--color-danger); }
 .ovh-recovery-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }

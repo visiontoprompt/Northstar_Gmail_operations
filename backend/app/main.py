@@ -802,25 +802,22 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
         if payload.action == "start" and target_recovery:
             configured, reason = recovery_configured()
             if not configured:
-                recovery_warning = f"Proxy recovery is unavailable: {reason} The instance can start, but proxies are not verified or ready."
+                recovery_warning = f"Proxy verification was skipped: {reason} The instance can start, but proxies are not verified or ready."
             else:
                 try:
                     validate_openstack_config()
                 except RecoveryError as exc:
-                    recovery_warning = f"Proxy recovery is unavailable: {exc} The instance can start, but proxies are not verified or ready."
-            try:
-                recovery_job = create_recovery_job(settings.demo_org_id, payload.service_name, payload.instance_id or "", admin.employee_id, start=False)
-            except RecoveryError as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    recovery_warning = f"Proxy verification was skipped: {exc} The instance can start, but proxies are not verified or ready."
+            if not recovery_warning:
+                try:
+                    recovery_job = create_recovery_job(settings.demo_org_id, payload.service_name, payload.instance_id or "", admin.employee_id, start=False)
+                except RecoveryError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
         with configured_client(db, settings.demo_org_id) as client:
             client.power(payload.resource_type, payload.service_name, payload.instance_id, payload.action)
         record_power_action(db, settings.demo_org_id, admin.employee_id, payload.resource_type, payload.service_name, payload.instance_id, payload.action)
         if recovery_job:
-            if recovery_warning:
-                fail_recovery_job(recovery_job["id"], recovery_warning)
-                recovery_job = get_recovery_job(settings.demo_org_id, recovery_job["id"])
-            else:
-                start_recovery_thread(recovery_job["id"])
+            start_recovery_thread(recovery_job["id"])
         return {"status": "accepted", "resource_type": payload.resource_type, "service_name": payload.service_name, "instance_id": payload.instance_id, "action": payload.action, "recovery_job": recovery_job, "recovery_warning": recovery_warning}
     except OvhError as exc:
         if recovery_job:
