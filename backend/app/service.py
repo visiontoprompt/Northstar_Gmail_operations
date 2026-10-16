@@ -519,7 +519,7 @@ def add_account(db: Session, organization_id: str, actor_id: str, data: AccountS
     email = data.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise ImportValidationError("Enter a valid email address")
-    existing = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email == email).with_for_update())
+    existing = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.normalized_email == email).with_for_update(of=GmailAccount))
     if existing and existing.lifecycle_status != "ARCHIVED":
         raise ImportValidationError("An account with this email already exists")
     if existing:
@@ -669,7 +669,7 @@ def get_account(db: Session, organization_id: str, account_id: str) -> GmailAcco
 
 
 def update_account_metadata(db: Session, organization_id: str, actor_id: str, account_id: str, proxy_label: str | None, proxy_region: str | None, proxy_value: str | None | object = _UNSET) -> dict:
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update(of=GmailAccount))
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
@@ -786,7 +786,7 @@ def _publisher_signup_password(subscription: NewsletterSubscription, supplied: s
 
 
 def move_account_group(db: Session, organization_id: str, actor_id: str, account_id: str, destination_group_id: str) -> dict:
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update(of=GmailAccount))
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
@@ -807,7 +807,7 @@ def move_account_group(db: Session, organization_id: str, actor_id: str, account
 
 
 def archive_account(db: Session, organization_id: str, actor_id: str, account_id: str, confirmation_email: str) -> dict:
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update())
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.group), joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == account_id).with_for_update(of=GmailAccount))
     if not account:
         raise ImportValidationError("Account not found")
     if account.email.lower() != confirmation_email.lower():
@@ -1323,7 +1323,7 @@ def start_credential_change_plan(db: Session, organization_id: str, actor_id: st
             linked.metadata_json = linked_metadata
             db.commit()
         plan.session_id = None
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == plan.account_id).with_for_update())
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == plan.account_id).with_for_update(of=GmailAccount))
     if account is None:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
@@ -1395,7 +1395,7 @@ def confirm_credential_change_plan(db: Session, organization_id: str, actor_id: 
         raise ImportValidationError(f"A {plan.status.lower().replace('_', ' ')} credential plan cannot be confirmed")
     if not acknowledged:
         raise ImportValidationError("Confirm that the credential change was completed inside the Google session")
-    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == plan.account_id).with_for_update())
+    account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.secret), joinedload(GmailAccount.browser_profile)).where(GmailAccount.organization_id == organization_id, GmailAccount.id == plan.account_id).with_for_update(of=GmailAccount))
     if not account:
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
@@ -1489,7 +1489,7 @@ def confirm_credential_change_plan(db: Session, organization_id: str, actor_id: 
 
 
 def cancel_credential_change_plan(db: Session, organization_id: str, actor_id: str, plan_id: str) -> dict:
-    plan = db.scalar(select(CredentialChangePlan).options(joinedload(CredentialChangePlan.account)).where(CredentialChangePlan.organization_id == organization_id, CredentialChangePlan.id == plan_id).with_for_update())
+    plan = db.scalar(select(CredentialChangePlan).options(joinedload(CredentialChangePlan.account)).where(CredentialChangePlan.organization_id == organization_id, CredentialChangePlan.id == plan_id).with_for_update(of=CredentialChangePlan))
     if not plan:
         raise ImportValidationError("Credential change plan not found")
     if plan.status in CREDENTIAL_CHANGE_TERMINAL_STATES:
