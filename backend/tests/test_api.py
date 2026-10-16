@@ -1357,13 +1357,20 @@ def test_operation_drafts_are_versioned_and_reject_secret_fields() -> None:
 
 
 def test_delete_archives_account_closes_session_and_removes_it_from_registry() -> None:
+    import importlib
+
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
         account = client.post("/api/v1/accounts/single", json={"email": "archive-me@example.com", "password": "hidden-password", "recovery": "hidden@example.com", "2fa": "hidden-totp", "group_id": group_id}).json()
+        peer = client.post("/api/v1/accounts/single", json={"email": "archive-peer@example.com", "password": "secret", "group_id": group_id}).json()
         session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
+        job = client.post("/api/v1/login-jobs", json={"account_ids": [account["id"], peer["id"]], "concurrency_limit": 1}).json()
+        queue = importlib.import_module("app.service")._queue()
+        assert queue.queued_count(job["id"]) == 2
         deleted = client.request("DELETE", f"/api/v1/accounts/{account['id']}", json={"confirmation_email": "archive-me@example.com"})
         assert deleted.status_code == 200
         assert deleted.json()["lifecycle_status"] == "ARCHIVED"
+        assert [item["account_id"] for item in queue.peek(job["id"])] == [peer["id"]]
         assert client.get("/api/v1/accounts", params={"q": "archive-me@example.com"}).json()["total"] == 0
         assert client.get(f"/api/v1/sessions/{session['id']}").json()["state"] == "CLOSED"
         blocked = client.post(f"/api/v1/accounts/{account['id']}/sessions")
@@ -1373,6 +1380,39 @@ def test_delete_archives_account_closes_session_and_removes_it_from_registry() -
         assert any(event["action"] == "account.archived" for event in audit)
         assert any(event["target_id"] == session["id"] for event in audit)
         assert "hidden-password" not in str(audit)
+
+
+def test_archive_uses_authenticated_operator_and_enforces_group_access() -> None:
+    from unittest.mock import patch
+    from sqlalchemy import select
+    from app.auth import CurrentUser
+    from app.db import SessionLocal
+    from app.models import AuditEvent
+    import importlib
+    auth_module = importlib.import_module("app.auth")
+    main_module = importlib.import_module("app.main")
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        allowed = client.post("/api/v1/accounts/single", json={"email": "operator-archive@example.com", "password": "secret", "group_id": groups[0]["id"]}).json()
+        restricted = client.post("/api/v1/accounts/single", json={"email": "restricted-archive@example.com", "password": "secret", "group_id": groups[1]["id"]}).json()
+
+    operator = CurrentUser("employee_archive_test", settings.demo_org_id, "Account Operator", "operator@example.com", "ACCOUNT_OPERATOR", {groups[0]["id"]: "OPERATOR"})
+    with patch.object(main_module, "authenticate_request", return_value=operator), patch.object(auth_module, "authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            denied = client.request("DELETE", f"/api/v1/accounts/{restricted['id']}", json={"confirmation_email": restricted["email"]})
+            assert denied.status_code == 404
+            archived = client.request("DELETE", f"/api/v1/accounts/{allowed['id']}", json={"confirmation_email": allowed["email"]})
+            assert archived.status_code == 200
+            assert archived.json()["lifecycle_status"] == "ARCHIVED"
+
+    db = SessionLocal()
+    try:
+        event = db.scalar(select(AuditEvent).where(AuditEvent.target_id == allowed["id"], AuditEvent.action == "account.archived"))
+        assert event is not None
+        assert event.actor_id == operator.employee_id
+    finally:
+        db.close()
 
 
 def test_readded_account_is_reactivated_with_fresh_credentials() -> None:

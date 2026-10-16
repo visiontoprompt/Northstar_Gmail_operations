@@ -1271,12 +1271,21 @@ def move_account(account_id: str, payload: GroupMoveRequest, request: Request, d
 
 
 @app.delete("/api/v1/accounts/{account_id}", response_model=AccountResponse)
-def delete_account(account_id: str, payload: AccountDeleteRequest, db: Session = Depends(get_db)) -> dict:
+def delete_account(account_id: str, payload: AccountDeleteRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    account = _account_access(request, db, account_id, "OPERATOR")
     try:
-        return archive_account(db, settings.demo_org_id, "admin_demo", account_id, payload.confirmation_email)
+        return archive_account(db, settings.demo_org_id, _actor(request, db), account.id, payload.confirmation_email)
     except ImportValidationError as exc:
         message = str(exc).lower()
         raise HTTPException(status_code=404 if "not found" in message else 409, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("account archive failed for account %s", account_id)
+        raise HTTPException(status_code=409, detail="The account could not be archived because the database rejected the change. No account change was saved; check the API service log for the database cause.") from exc
+    except Exception as exc:
+        db.rollback()
+        logger.exception("unexpected account archive failure for account %s", account_id)
+        raise HTTPException(status_code=500, detail="The account could not be archived. No account change was saved; check the API service log and retry.") from exc
 
 
 @app.post("/api/v1/accounts/{account_id}/operation-drafts", response_model=OperationDraftResponse, status_code=status.HTTP_201_CREATED)

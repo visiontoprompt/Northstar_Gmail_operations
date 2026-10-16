@@ -242,7 +242,20 @@ h1 { margin-top: 9px; font-family: var(--font-display); font-size: clamp(29px, 3
 .result-meta { display: flex; min-height: 38px; align-items: center; gap: 8px; padding: 0 23px; color: #8b9895; font-family: var(--font-data); font-size: 10px; }
 .search-context { color: var(--color-primary); }
 .table-scroll { width: 100%; overflow-x: auto; }
-.profile-size-cell { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--color-muted); }
+.profile-size-cell { min-width: 142px; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--color-muted); }
+.profile-size-reference { color: var(--color-muted); font-family: var(--font-body); font-size: 9px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.profile-size-indicator { display: grid; min-width: 112px; gap: 5px; }
+.profile-size-meter { position: relative; height: 8px; overflow: hidden; background: var(--color-surface-muted); border: 1px solid var(--color-line); border-radius: 999px; }
+.profile-size-meter-fill { display: block; height: 100%; min-width: 0; border-radius: inherit; transition: width .2s ease; }
+.profile-size-meter-fill.low { background: var(--color-success); }
+.profile-size-meter-fill.medium { background: #d7a20b; }
+.profile-size-meter-fill.high { background: var(--color-accent); }
+.profile-size-meter-fill.critical { background: var(--color-danger); }
+.profile-size-reading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-family: var(--font-data); font-size: 10px; }
+.profile-size-reading strong { color: var(--color-ink-soft); font-weight: 500; }
+.profile-size-reading small { color: var(--color-muted); font-size: 9px; }
+.profile-size-unavailable { color: var(--color-muted); font-size: 10px; }
+@media (prefers-reduced-motion: reduce) { .profile-size-meter-fill { transition: none; } }
 .profile-export-button { white-space: nowrap; }
 table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: auto; }
 th { height: 39px; padding: 0 14px; color: #8a9894; background: #f9fbfa; border-top: 1px solid #edf1f0; border-bottom: 1px solid #edf1f0; font-family: var(--font-data); font-size: 9px; font-weight: 500; letter-spacing: .06em; text-align: left; text-transform: uppercase; }

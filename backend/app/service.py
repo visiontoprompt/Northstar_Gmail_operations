@@ -822,13 +822,15 @@ def archive_account(db: Session, organization_id: str, actor_id: str, account_id
         session.state = "CLOSED"
         session.closed_at = now
         session.last_event_at = now
-        session.profile.status = "ARCHIVED"
-        session.profile.lock_state = "UNLOCKED"
-        session.profile.active_session_id = None
-        session.profile.last_closed_at = now
+        if session.profile:
+            session.profile.status = "ARCHIVED"
+            session.profile.lock_state = "UNLOCKED"
+            session.profile.active_session_id = None
+            session.profile.last_closed_at = now
     for item in db.scalars(select(LoginJobItem).where(LoginJobItem.organization_id == organization_id, LoginJobItem.account_id == account.id, LoginJobItem.state.in_(["QUEUED", "RUNNING"]))).all():
         job = db.get(LoginJob, item.job_id)
-        if item.state == "RUNNING":
+        was_queued = item.state == "QUEUED"
+        if not was_queued:
             _release_item_lease(db, item)
             if job:
                 _bump_job(db, job, running_count=-1)
@@ -838,7 +840,13 @@ def archive_account(db: Session, organization_id: str, actor_id: str, account_id
         item.state = "CANCELLED"
         item.completed_at = now
         item.paused_reason = "Account archived by operator"
-        _queue().clear(item.job_id)
+        if was_queued:
+            try:
+                _queue().remove_queued_item(item.job_id, item.id, item.account_id)
+            except Exception:
+                # Database state is authoritative; a stale Redis queue member
+                # is discarded by dispatch when it sees the cancelled item.
+                logger.exception("could not remove archived account %s from login queue %s", item.account_id, item.job_id)
         if job and job.queued_count == 0 and job.running_count == 0 and job.status == "RUNNING":
             job.status = "COMPLETED"
             job.completed_at = now

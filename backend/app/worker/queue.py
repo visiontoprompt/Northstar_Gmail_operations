@@ -98,6 +98,10 @@ class RedisQueue:
     def queued_count(self, job_id: str) -> int:
         return int(self.client.zcard(_qkey(job_id)) or 0)
 
+    def remove_queued_item(self, job_id: str, item_id: str, account_id: str) -> int:
+        """Remove one cancelled item without disturbing its batch peers."""
+        return int(self.client.zrem(_qkey(job_id), _member(item_id, account_id)) or 0)
+
     def clear(self, job_id: str) -> None:
         self.client.delete(_qkey(job_id))
 
