@@ -1118,7 +1118,9 @@ def get_profile_sizes(payload: ProfileSizesRequest, request: Request, db: Sessio
 
 @app.post("/api/v1/profiles/export")
 def export_account_profiles(payload: ProfileExportRequest, request: Request, db: Session = Depends(get_db)) -> FileResponse:
-    operator = _account_operator(request, db)
+    # Profile archives contain reusable browser state, including authentication
+    # cookies. Keep their creation and download within administrator access.
+    operator = _admin(request, db)
     accounts = db.scalars(select(GmailAccount).where(
         GmailAccount.organization_id == settings.demo_org_id,
         GmailAccount.id.in_(payload.account_ids),

@@ -490,6 +490,30 @@ def test_selected_profile_export_and_size_endpoint(tmp_path) -> None:
         settings.profile_root = original_profile_root
 
 
+def test_profile_export_is_admin_only(tmp_path) -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path / "profiles")
+    try:
+        with TestClient(app) as client:
+            group_id = client.get("/api/v1/groups").json()[0]["id"]
+            account = client.post("/api/v1/accounts/single", json={"email": "admin-export@example.com", "password": "secret", "group_id": group_id}).json()
+            profile_dir = Path(settings.profile_root) / account["profile"]["id"]
+            (profile_dir / "Default").mkdir(parents=True)
+            (profile_dir / "Default" / "Cookies").write_bytes(b"sensitive cookies")
+
+        operator = CurrentUser("operator-profile-export", settings.demo_org_id, "Account Operator", "operator@example.com", "ACCOUNT_OPERATOR", {group_id: "OPERATOR"})
+        with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+            with TestClient(app) as client:
+                response = client.post("/api/v1/profiles/export", json={"account_ids": [account["id"]]})
+        assert response.status_code == 403
+    finally:
+        settings.profile_root = original_profile_root
+
+
 def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
