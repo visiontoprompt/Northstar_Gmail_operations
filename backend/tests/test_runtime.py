@@ -63,8 +63,9 @@ def test_focus_local_browser_profile_activates_matching_window(tmp_path) -> None
     settings.profile_root = str(tmp_path)
     calls = []
 
-    def run(args, **_kwargs):
+    def run(args, **kwargs):
         calls.append(args)
+        assert kwargs["env"]["DISPLAY"] == ":107"
         if args[1] == "-lp":
             return CompletedProcess(args, 0, "0x045 0 4321 localhost Chrome\n", "")
         return CompletedProcess(args, 0, "", "")
@@ -73,7 +74,7 @@ def test_focus_local_browser_profile_activates_matching_window(tmp_path) -> None
         with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
              patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
              patch("app.runtime.subprocess.run", side_effect=run):
-            assert runtime.focus_local_browser_profile("profile_1") is True
+            assert runtime.focus_local_browser_profile("profile_1", display=":107") is True
         assert calls == [["/usr/bin/wmctrl", "-lp"], ["/usr/bin/wmctrl", "-ia", "0x045"]]
     finally:
         settings.profile_root = original_profile_root

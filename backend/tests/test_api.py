@@ -1,4 +1,7 @@
 import os
+import zipfile
+from io import BytesIO
+from pathlib import Path
 
 os.environ["DATABASE_URL"] = "sqlite:///./data/test_gmail_ops.db"
 os.environ["SECRET_KEY"] = "test-secret-key-without-credential-material"
@@ -446,12 +449,45 @@ def test_browser_desktop_can_focus_an_existing_account_window(monkeypatch) -> No
         session = client.post(f"/api/v1/accounts/{account['id']}/sessions").json()
         focused_profiles = []
         monkeypatch.setattr(main, "local_browser_is_alive", lambda _profile_id, _session_id: True)
-        monkeypatch.setattr(main, "focus_local_browser_profile", lambda profile_id: focused_profiles.append(profile_id) or True)
+        monkeypatch.setattr(main, "ensure_operator_desktop", lambda employee_id: {"display": ":107", "websocket_port": 30007, "slot": 7})
+        monkeypatch.setattr(main, "focus_local_browser_profile", lambda profile_id, display=None: focused_profiles.append((profile_id, display)) or True)
         response = client.post(f"/api/v1/sessions/{session['id']}/focus")
 
     assert response.status_code == 200
     assert response.json() == {"focused": True}
-    assert focused_profiles == [session["profile_id"]]
+    assert focused_profiles == [(session["profile_id"], ":107")]
+
+
+def test_selected_profile_export_and_size_endpoint(tmp_path) -> None:
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path / "profiles")
+    try:
+        with TestClient(app) as client:
+            group_id = client.get("/api/v1/groups").json()[0]["id"]
+            account = client.post("/api/v1/accounts/single", json={"email": "portable@example.com", "password": "secret", "group_id": group_id}).json()
+            profile_dir = Path(settings.profile_root) / account["profile"]["id"]
+            (profile_dir / "Default").mkdir(parents=True)
+            (profile_dir / "Local State").write_text('{"profile":{"info_cache":{}}}', encoding="utf-8")
+            cookie_bytes = b"encrypted cookie database bytes"
+            (profile_dir / "Default" / "Cookies").write_bytes(cookie_bytes)
+            (profile_dir / "SingletonLock").write_text("volatile", encoding="utf-8")
+
+            sizes = client.post("/api/v1/profiles/sizes", json={"account_ids": [account["id"]]})
+            assert sizes.status_code == 200
+            assert sizes.json()["items"] == [{"account_id": account["id"], "size_bytes": len(b'{"profile":{"info_cache":{}}}') + len(cookie_bytes)}]
+
+            exported = client.post("/api/v1/profiles/export", json={"account_ids": [account["id"]]})
+            assert exported.status_code == 200
+            assert exported.headers["content-type"] == "application/zip"
+            with zipfile.ZipFile(BytesIO(exported.content)) as archive:
+                assert archive.read("portable@example.com/Local State") == b'{"profile":{"info_cache":{}}}'
+                assert archive.read("portable@example.com/Default/Cookies") == cookie_bytes
+                assert "portable@example.com/SingletonLock" not in archive.namelist()
+            restored = client.post(f"/api/v1/backups/profiles/account/{account['id']}", files={"file": ("profile.zip", exported.content, "application/zip")})
+            assert restored.status_code == 200
+            assert restored.json()["results"][0]["status"] == "REPLACED"
+    finally:
+        settings.profile_root = original_profile_root
 
 
 def test_login_session_reserves_profile_and_enforces_one_open_session() -> None:

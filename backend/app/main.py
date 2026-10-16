@@ -12,6 +12,7 @@ import time
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -24,7 +25,7 @@ from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountTagsUpdate, AccountPreferencesApplyRequest, AccountPreferencesResponse, AccountPreferencesUpdate, AccountResponse, AccountStructuredInput, AlertTopicResponse, AlertsOperationRequest, AuthStatusResponse, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialChangePlanConfirm, CredentialChangePlanCreate, CredentialChangePlanResponse, CredentialPlaintextResponse, CredentialRecordListResponse, CredentialRevisionResponse, CredentialRotateResponse, CredentialUpdate, EmployeeAuthResponse, EmployeeCreate, EmployeeGroupAccessResponse, EmployeeGroupAccessUpdate, EmployeeIdentityResponse, EmployeeLoginRequest, EmployeePasswordSet, EmployeePermissionsResponse, EmployeeResponse, EmployeeUpdate, GroupCreate, GroupMoveRequest, GroupResponse, GroupUpdate, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, MailWorkflowRequest, NewsletterAccountIdentityResponse, NewsletterAccountIdentityUpdate, NewsletterAccountTargetsRequest, NewsletterBulkDiscoveryResponse, NewsletterCatalogImportResponse, NewsletterConfirmationTestRequest, NewsletterConfirmationTestResponse, NewsletterCreate, NewsletterDirectorySeedResponse, NewsletterDiscoveryResponse, NewsletterGroupCreate, NewsletterGroupResponse, NewsletterGroupUpdate, NewsletterHealthResponse, NewsletterIdentityGenerateRequest, NewsletterIdentityGenerateResponse, NewsletterJobBulkDelete, NewsletterJobCreate, NewsletterJobListResponse, NewsletterJobResponse, NewsletterJobTaskSelection, NewsletterProfileCreate, NewsletterProfileDetailResponse, NewsletterProfileResponse, NewsletterProfileUpdate, NewsletterRediscoveryResponse, NewsletterResponse, NewsletterSkillResponse, NewsletterSignupTestRequest, NewsletterSignupTestResponse, NewsletterSubscriptionListResponse, NewsletterSubscriptionResponse, NewsletterUpdate, NotificationTestRequest, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, PasswordResetConfirm, PasswordResetRequest, ProxyAssignmentRequest, ProxyBulkImportRequest, ProxyBulkImportResponse, ProxyDeleteRequest, ProxyGroupAssignmentRequest, ProxyGroupDistributionRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest, WorkspaceSettingsResponse, WorkspaceSettingsUpdate
 from .schemas import MailWorkflowBulkRequest, OvhPowerRequest, OvhProxyGroupLinkRequest
-from .schemas import ProfileCompactRequest
+from .schemas import ProfileCompactRequest, ProfileExportRequest, ProfileSizesRequest
 from .schemas import ProxyGroupCreateRequest, ProxyGroupUpdateRequest, GoDaddyAccountCreate, GoDaddyAccountUpdate, GoDaddyDnsGroupReplace, GoDaddyDnsRecord
 from .godaddy_service import GoDaddyError, create_client as godaddy_client, list_accounts as list_godaddy_accounts, remove_account as remove_godaddy_account, save_account as save_godaddy_account
 from .ovh_service import OvhError, configured_client, record_power_action
@@ -81,6 +82,8 @@ from .notifications import NotificationError, consume_password_reset, create_pas
 from .alerts import list_alert_topics, seed_default_alert_topics
 from .worker.worker import start_login_worker, stop_login_worker
 from .runtime import focus_local_browser_profile
+from .runtime import local_browser_profiles_alive
+from .profile_export import profile_path, profile_size_bytes, write_profiles_zip
 
 settings = get_settings()
 _BACKUP_OPERATION_LOCK = threading.Lock()
@@ -473,10 +476,21 @@ def focus_browser_session(session_id: str, request: Request, db: Session = Depen
         raise HTTPException(status_code=409, detail="This browser session is no longer open")
     if not user.is_admin and not user.can_access_group(session.account.group_id, "OPERATOR"):
         raise HTTPException(status_code=404, detail="Resource not found")
+    if session.owner_employee_id != user.employee_id:
+        raise HTTPException(status_code=404, detail="Resource not found")
     if not local_browser_is_alive(session.profile_id, session.id):
         raise HTTPException(status_code=409, detail="Chrome is not running for this account yet")
-    if not focus_local_browser_profile(session.profile_id):
-        raise HTTPException(status_code=503, detail="The account browser is running, but its desktop window could not be focused. Use Alt+Tab in the VNC toolbar to switch windows.")
+    # Authenticated operators use a private X display. Focus the Chrome window
+    # on the display that owns this session instead of the shared install-time
+    # display, otherwise the request may succeed against an empty desktop.
+    owner_employee_id = session.owner_employee_id or user.employee_id
+    try:
+        desktop = ensure_operator_desktop(owner_employee_id)
+    except (RuntimeError, OSError) as exc:
+        logger.warning("browser session desktop could not be resolved for focus (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="The browser desktop for this session is unavailable. Retry the connection.") from exc
+    if not focus_local_browser_profile(session.profile_id, display=str(desktop["display"])):
+        raise HTTPException(status_code=503, detail="The account browser is running, but its window could not be focused on this operator's desktop. Refresh the session list and retry.")
     return {"focused": True}
 
 
@@ -1075,6 +1089,93 @@ def compact_profiles(payload: ProfileCompactRequest, request: Request, db: Sessi
         raise HTTPException(status_code=404, detail="Account not found")
     results = [compact_account_profile(db, settings.demo_org_id, operator.employee_id, account_id) for account_id in payload.account_ids]
     return {"results": results, "removed_bytes": sum(int(row["removed_bytes"]) for row in results)}
+
+
+@app.post("/api/v1/profiles/sizes")
+def get_profile_sizes(payload: ProfileSizesRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    operator = _account_operator(request, db)
+    accounts = db.scalars(select(GmailAccount).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.id.in_(payload.account_ids),
+        GmailAccount.lifecycle_status != "ARCHIVED",
+        GmailAccount.account_type != "EXTERNAL_RECIPIENT",
+    )).all()
+    by_id = {account.id: account for account in accounts}
+    if len(by_id) != len(payload.account_ids) or any(not operator.can_access_group(account.group_id, "OPERATOR") for account in accounts):
+        raise HTTPException(status_code=404, detail="Account not found")
+    root = Path(settings.profile_root).resolve()
+    items = []
+    for account_id in payload.account_ids:
+        account = by_id[account_id]
+        profile_id = account.profile_id or (account.browser_profile.id if account.browser_profile else None)
+        try:
+            size_bytes = profile_size_bytes(profile_path(root, profile_id))
+        except (OSError, ValueError):
+            size_bytes = None
+        items.append({"account_id": account_id, "size_bytes": size_bytes})
+    return {"items": items}
+
+
+@app.post("/api/v1/profiles/export")
+def export_account_profiles(payload: ProfileExportRequest, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    operator = _account_operator(request, db)
+    accounts = db.scalars(select(GmailAccount).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.id.in_(payload.account_ids),
+        GmailAccount.lifecycle_status != "ARCHIVED",
+        GmailAccount.account_type != "EXTERNAL_RECIPIENT",
+    ).with_for_update(of=GmailAccount)).all()
+    by_id = {account.id: account for account in accounts}
+    if len(by_id) != len(payload.account_ids) or any(not operator.can_access_group(account.group_id, "OPERATOR") for account in accounts):
+        raise HTTPException(status_code=404, detail="Account not found")
+    root = Path(settings.profile_root).resolve()
+    profiles: list[tuple[str, str]] = []
+    profile_ids: set[str] = set()
+    for account_id in payload.account_ids:
+        account = by_id[account_id]
+        profile_id = account.profile_id or (account.browser_profile.id if account.browser_profile else None)
+        if not profile_path(root, profile_id):
+            raise HTTPException(status_code=409, detail=f"No saved browser profile is available for {account.email}.")
+        profiles.append((account.email, str(profile_id)))
+        profile_ids.add(str(profile_id))
+    active = db.scalar(select(BrowserSession.id).where(
+        BrowserSession.account_id.in_(payload.account_ids),
+        BrowserSession.state.in_({"STARTING", "LOGIN_REQUIRED", "RUNNING", "NEEDS_ATTENTION"}),
+        BrowserSession.closed_at.is_(None),
+    ).limit(1))
+    if active or local_browser_profiles_alive(profile_ids):
+        raise HTTPException(status_code=409, detail="Close the selected account browsers before exporting profiles so the archive is complete and consistent.")
+    if any(account.browser_profile and (account.browser_profile.lock_state == "LOCKED" or account.browser_profile.active_session_id) for account in by_id.values()):
+        raise HTTPException(status_code=409, detail="A selected profile is locked by another operation. Retry after it completes.")
+    if not _BACKUP_OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another backup or profile transfer is running. Retry when it finishes.")
+    temporary: Path | None = None
+    try:
+        root.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix="northstar-profile-export-", dir=root.parent))
+        temporary.chmod(0o700)
+        archive_path = temporary / "northstar-profiles.zip"
+        archive_path.touch(mode=0o600)
+        try:
+            file_count, byte_count = write_profiles_zip(root, profiles, archive_path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=settings.demo_org_id, actor_id=operator.employee_id,
+            action="browser_profile.exported", target_type="browser_profiles", target_id=operator.employee_id, result="success",
+            metadata_json={"account_ids": payload.account_ids, "profile_count": len(profiles), "file_count": file_count, "size_bytes": byte_count}))
+        db.commit()
+        filename = f"northstar-profiles-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.zip"
+        response = FileResponse(archive_path, media_type="application/zip", filename=filename,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+            background=BackgroundTask(shutil.rmtree, temporary, ignore_errors=True))
+        temporary = None
+        return response
+    finally:
+        if temporary:
+            shutil.rmtree(temporary, ignore_errors=True)
+        _BACKUP_OPERATION_LOCK.release()
 
 
 @app.get("/api/v1/profiles/compact-targets")

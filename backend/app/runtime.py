@@ -129,12 +129,12 @@ def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bo
     return bool(_find_chrome_pids_for_profile(profile_path))
 
 
-def focus_local_browser_profile(profile_id: str) -> bool:
+def focus_local_browser_profile(profile_id: str, display: str | None = None) -> bool:
     """Raise the visible Chrome window belonging to one saved account profile.
 
-    All browser sessions share the server's X display. Matching the window's
-    owning PID to the profile-specific Chrome command line lets the desktop
-    session switcher focus the requested account without launching a duplicate.
+    Matching the window's owning PID to the profile-specific Chrome command
+    line lets the desktop session switcher focus the requested account without
+    launching a duplicate. Authenticated operators pass their private X display.
     """
     profile_path = (Path(get_settings().profile_root) / profile_id).resolve()
     browser_pids = set(_find_chrome_pids_for_profile(profile_path))
@@ -144,9 +144,12 @@ def focus_local_browser_profile(profile_id: str) -> bool:
     if not wmctrl:
         logger.warning("cannot focus browser profile %s: wmctrl is not installed", profile_id)
         return False
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
     try:
         windows = subprocess.run(
-            [wmctrl, "-lp"], capture_output=True, text=True, check=False, timeout=3
+            [wmctrl, "-lp"], capture_output=True, text=True, check=False, timeout=3, env=env
         )
     except (OSError, subprocess.TimeoutExpired):
         logger.exception("cannot list desktop windows while focusing profile %s", profile_id)
@@ -167,7 +170,7 @@ def focus_local_browser_profile(profile_id: str) -> bool:
         try:
             focused = subprocess.run(
                 [wmctrl, "-ia", columns[0]], capture_output=True, text=True,
-                check=False, timeout=3,
+                check=False, timeout=3, env=env,
             )
         except (OSError, subprocess.TimeoutExpired):
             logger.exception("cannot focus desktop window for profile %s", profile_id)

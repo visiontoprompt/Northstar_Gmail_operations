@@ -46,7 +46,7 @@ From the repository root:
 ./dev.sh
 ```
 
-This starts the backend on port 8000 and the frontend on port 5173. Keep the terminal open; press Ctrl+C to stop both services together.
+This applies pending Alembic migrations to the configured local database, then starts the backend on port 8000 and the frontend on port 5173. Keep the terminal open; press Ctrl+C to stop both services together. If a backend is already running on port 8000, stop it before restarting `./dev.sh` so the migration runs before startup recovery.
 
 ### Backend
 

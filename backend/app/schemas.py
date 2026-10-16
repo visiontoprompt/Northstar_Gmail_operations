@@ -474,6 +474,28 @@ class ProfileCompactRequest(BaseModel):
         return value
 
 
+class ProfileSizesRequest(BaseModel):
+    account_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("account_ids")
+    @classmethod
+    def unique_account_ids(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Account IDs must be unique")
+        return value
+
+
+class ProfileExportRequest(BaseModel):
+    account_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("account_ids")
+    @classmethod
+    def unique_account_ids(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Account IDs must be unique")
+        return value
+
+
 class AccountTagsUpdate(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=20)
 

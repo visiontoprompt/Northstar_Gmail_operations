@@ -68,6 +68,10 @@ fi
 if [[ "$backend_ready" != true ]]; then
   (
     cd "$BACKEND_DIR"
+    # Keep the local database schema in step with the checked-out application.
+    # Without this, a prior SQLite file can lack columns required during
+    # startup recovery and Uvicorn exits before the UI can use the API.
+    ./.venv/bin/python -m alembic -c alembic.ini upgrade head
     # Local development always opens the dedicated account browser window and
     # runs the full login automation (observer + auto sign-in with stored
     # credentials and generated TOTP). Production workers must supply these
