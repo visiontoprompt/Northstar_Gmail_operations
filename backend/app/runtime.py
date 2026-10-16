@@ -159,6 +159,29 @@ def _descendant_process_pids(root_pids: set[int], proc_root: Path = Path("/proc"
     return descendants
 
 
+def _window_pid_uses_profile(pid: int, profile_path: Path, root_pids: set[int], proc_root: Path = Path("/proc")) -> bool:
+    """Match a window owner to its profile-bearing Chrome ancestor."""
+    target = str(profile_path)
+    seen: set[int] = set()
+    current = pid
+    for _ in range(64):
+        if current <= 1 or current in seen:
+            break
+        if current in root_pids:
+            return True
+        seen.add(current)
+        proc = proc_root / str(current)
+        try:
+            command = (proc / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+            if target in command:
+                return True
+            fields = (proc / "stat").read_text().rsplit(")", 1)[-1].split()
+            current = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return False
+
+
 def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bool:
     """Return whether the account's dedicated browser is still alive.
 
@@ -210,7 +233,7 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
             window_pid = int(columns[2])
         except ValueError:
             continue
-        if window_pid not in browser_pids:
+        if window_pid not in browser_pids and not _window_pid_uses_profile(window_pid, profile_path, browser_roots):
             continue
         # Prefer a window owned by Chrome's profile-bearing root process, then
         # try windows owned by its renderer/utility children. This avoids
@@ -224,10 +247,22 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
             )
         except (OSError, subprocess.TimeoutExpired):
             logger.exception("cannot focus desktop window for profile %s", profile_id)
-            return False
-        if focused.returncode == 0:
+            focused = None
+        if focused is not None and focused.returncode == 0:
             return True
-    logger.info("no visible desktop window found for browser profile %s", profile_id)
+        xdotool = shutil.which("xdotool")
+        if xdotool:
+            try:
+                raised = subprocess.run([xdotool, "windowraise", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
+                activated = subprocess.run([xdotool, "windowactivate", "--sync", "--clearmodifiers", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
+                if raised.returncode == 0 and activated.returncode == 0:
+                    return True
+            except (OSError, subprocess.TimeoutExpired):
+                logger.exception("xdotool could not focus desktop window for profile %s", profile_id)
+    if not candidates:
+        logger.warning("no X11 window matched browser profile %s on display %s", profile_id, env.get("DISPLAY", ""))
+    else:
+        logger.warning("all %s X11 focus attempts failed for browser profile %s on display %s", len(candidates), profile_id, env.get("DISPLAY", ""))
     return False
 
 

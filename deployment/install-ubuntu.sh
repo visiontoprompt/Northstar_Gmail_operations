@@ -29,7 +29,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl gnupg rsync build-essential python3 python3-venv python3-dev \
   postgresql postgresql-contrib redis-server nginx certbot unar \
-  xvfb openbox x11vnc novnc python3-websockify wmctrl dbus-x11 fonts-liberation fonts-noto-color-emoji \
+  xvfb openbox x11vnc novnc python3-websockify wmctrl xdotool dbus-x11 fonts-liberation fonts-noto-color-emoji \
   libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2t64 libxkbcommon0 ufw
 
 # Ubuntu 24.04's default Node.js package is older than this frontend's test
