@@ -2825,12 +2825,30 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
                 purpose = "reuse" if saved_profile and saved_profile.authenticated_at else "login"
                 session = start_login_session(db, organization_id, actor_id, item.account_id, purpose=purpose)
         except BrowserLaunchError as exc:
-            # Launch failed before anything was persisted: leave the item queued
-            # and stop this wave so the worker does not hot-loop the same item.
-            # The item stays eligible for the next tick.
+            # Do not leave an item looking like a healthy queued launch forever.
+            # BrowserLaunchError is raised before a session row is persisted, so
+            # the account lease is safe to release and the same item can be
+            # retried. Bound retries so a broken browser installation becomes a
+            # visible terminal result instead of an endless spinner.
             locks.force_release(item.account_id)
-            queue.requeue(job.id, item.id, item.account_id)
-            logger.warning("login item %s (account=%s) not dispatched; requeued: %s", item.id, item.account_id, exc)
+            item.attempts += 1
+            item.last_error = str(exc)[:500] or "Browser could not be started"
+            if item.attempts >= max(1, settings.worker_retry_limit):
+                item.state = "FAILED"
+                item.completed_at = utcnow()
+                _bump_job(db, job, queued_count=-1, failed_count=1)
+                db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="login_job.item_failed", target_type="login_job_item", target_id=item.id, result="failed", metadata_json={"job_id": job.id, "account_id": item.account_id, "reason": "browser_launch_failed", "attempt": item.attempts}))
+                logger.error("login item %s (account=%s) failed to launch after %s attempt(s): %s", item.id, item.account_id, item.attempts, exc)
+                if job.queued_count == 0 and job.running_count == 0:
+                    job.status = "COMPLETED"
+                    job.completed_at = utcnow()
+                    queue.clear(job.id)
+            else:
+                retry_delay = min(30.0, 5.0 * (2 ** (item.attempts - 1)))
+                item.paused_reason = f"Browser launch failed; retry {item.attempts + 1} of {settings.worker_retry_limit} scheduled"
+                queue.requeue(job.id, item.id, item.account_id, when=time.time() + retry_delay)
+                logger.warning("login item %s (account=%s) not dispatched; retry %s/%s in %.0fs: %s", item.id, item.account_id, item.attempts, settings.worker_retry_limit, retry_delay, exc)
+            db.commit()
             break
         except ImportValidationError as exc:
             locks.force_release(item.account_id)

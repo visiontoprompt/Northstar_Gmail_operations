@@ -106,6 +106,30 @@ def test_per_job_concurrency_limit_enforced() -> None:
         assert sum(state == "RUNNING" for state in states.values()) == 2
 
 
+def test_browser_launch_failure_is_reported_instead_of_remaining_queued(monkeypatch) -> None:
+    from app import service
+
+    settings = get_settings()
+    settings.worker_retry_limit = 1
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (False, None))
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = _make_accounts(client, group_id, 1, prefix="launch-failure")[0]
+        job = _job_for(client, group_id, [account], concurrency=1)
+
+        started = start_job(client, job["id"])
+
+    assert started["status"] == "COMPLETED"
+    assert started["queued_count"] == 0
+    assert started["running_count"] == 0
+    assert started["failed_count"] == 1
+    item = started["items"][0]
+    assert item["state"] == "FAILED"
+    assert item["attempts"] == 1
+    assert "Browser could not be launched" in item["last_error"]
+
+
 def test_mail_workflow_bulk_uses_queue_concurrency_and_per_account_limit() -> None:
     with TestClient(app) as client:
         group_id = client.get("/api/v1/groups").json()[0]["id"]
