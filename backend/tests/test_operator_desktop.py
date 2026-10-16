@@ -60,6 +60,25 @@ def test_spawn_keeps_process_errors_visible_to_service_journal(monkeypatch) -> N
     assert captured["stdout"] is operator_desktop.subprocess.DEVNULL
 
 
+def test_operator_desktop_starts_openbox_on_its_display_without_unsupported_flag(monkeypatch) -> None:
+    spawned = []
+    monkeypatch.setattr(operator_desktop, "_slot_for", lambda _employee_id: 7)
+    monkeypatch.setattr(Path, "exists", lambda _path: True)
+    monkeypatch.setattr(operator_desktop, "_process_is_alive", lambda *_args: True)
+    monkeypatch.setattr(operator_desktop, "_port_open", lambda _port: True)
+
+    def spawn(key, argv, env):
+        spawned.append((key, argv, env["DISPLAY"]))
+
+    monkeypatch.setattr(operator_desktop, "_spawn", spawn)
+    monkeypatch.setattr(operator_desktop, "_window_manager_ready", lambda _env: bool(spawned))
+
+    desktop = operator_desktop.ensure_operator_desktop("operator_test")
+
+    assert desktop["display"] == ":107"
+    assert spawned == [(("operator_test", "openbox"), ["openbox", "--sm-disable"], ":107")]
+
+
 def test_listener_check_does_not_connect_to_vnc() -> None:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

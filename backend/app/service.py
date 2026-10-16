@@ -2792,6 +2792,11 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
     # API-triggered starts where the background worker may be disabled.
     reconcile_queue_mirrors(db, organization_id)
     worker_id = _worker_token() if actor_id.startswith(WORKER_PREFIX) else API_WORKER_ID
+    # The worker owns the queue lease, but every browser window must belong to
+    # the employee who created the job. Otherwise a later worker tick opens
+    # queued accounts on a separate worker desktop that the employee cannot
+    # see or control.
+    session_actor_id = job.created_by
     started = 0
     deferred = 0
     # An account that already holds one of this wave's slots keeps the rest of
@@ -2838,11 +2843,11 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
         leased_accounts.add(item.account_id)
         try:
             if job.operation_type == "mail":
-                session = start_mail_workflow(db, organization_id, actor_id, item.account_id, dict(job.operation_config or {}))
+                session = start_mail_workflow(db, organization_id, session_actor_id, item.account_id, dict(job.operation_config or {}))
             else:
                 saved_profile = db.scalar(select(BrowserProfile).where(BrowserProfile.account_id == item.account_id))
                 purpose = "reuse" if saved_profile and saved_profile.authenticated_at else "login"
-                session = start_login_session(db, organization_id, actor_id, item.account_id, purpose=purpose)
+                session = start_login_session(db, organization_id, session_actor_id, item.account_id, purpose=purpose)
         except BrowserLaunchError as exc:
             # Do not leave an item looking like a healthy queued launch forever.
             # BrowserLaunchError is raised before a session row is persisted, so

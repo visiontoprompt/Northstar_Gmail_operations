@@ -129,6 +129,23 @@ def _process_is_alive(key: tuple[str, str], pattern: str) -> bool:
     return _process_matches(pattern)
 
 
+def _window_manager_ready(env: dict[str, str]) -> bool:
+    """Check the actual X display rather than searching process arguments.
+
+    Openbox takes its display from DISPLAY, so its command line cannot identify
+    which operator desktop it owns. wmctrl also confirms the EWMH window list
+    that the account switcher needs.
+    """
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-m"], env=env, capture_output=True, text=True,
+            check=False, timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _spawn(key: tuple[str, str], argv: list[str], env: dict[str, str] | None = None) -> None:
     process = _PROCESSES.get(key)
     if process is not None and process.poll() is None:
@@ -162,11 +179,21 @@ def ensure_operator_desktop(employee_id: str) -> dict[str, int | str]:
             time.sleep(0.1)
         if not Path(f"/tmp/.X11-unix/X{display_number}").exists():
             raise RuntimeError("Private virtual display could not be started")
-        try:
-            if not _process_matches(f"[o]penbox --sm-disable --display {display}$"):
-                _spawn((employee_id, "openbox"), ["openbox", "--sm-disable", "--display", display], env)
-        except FileNotFoundError:
-            _spawn((employee_id, "openbox"), ["openbox", "--sm-disable", "--display", display], env)
+        if not _window_manager_ready(env):
+            # Ubuntu 24.04 Openbox has no --display option. DISPLAY is already
+            # scoped to this operator's Xvfb, and an unsupported flag caused
+            # Openbox to exit silently while Chrome continued without a WM.
+            _spawn((employee_id, "openbox"), ["openbox", "--sm-disable"], env)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not _window_manager_ready(env):
+                process = _PROCESSES.get((employee_id, "openbox"))
+                if process is not None and process.poll() is not None:
+                    break
+                time.sleep(0.1)
+            if not _window_manager_ready(env):
+                process = _PROCESSES.get((employee_id, "openbox"))
+                logger.error("Private window manager startup failed slot=%s display=%s exit_code=%s", slot, display, process.poll() if process is not None else None)
+                raise RuntimeError("Private desktop window manager could not be started")
         if _port_open(vnc_port) and not _process_is_alive((employee_id, "x11vnc"), f"[x]11vnc .* -rfbport {vnc_port}($| )"):
             raise RuntimeError("The allocated private VNC port is occupied by an unknown process")
         if not _port_open(vnc_port):

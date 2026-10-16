@@ -2375,6 +2375,9 @@ def _dispatch_newsletter_job_locked(db: Session, organization_id: str, actor_id:
     db.commit()
     job = db.get(NewsletterJob, job.id)
     worker_id = _worker_token() if actor_id.startswith("worker-") else "orchestrator-api"
+    # Worker ticks may launch the next account after the API request returns.
+    # Headed browser sessions must remain on the job creator's private desktop.
+    session_actor_id = job.created_by
     started = 0
     deferred = 0
     paused_all_busy = False
@@ -2530,13 +2533,13 @@ def _dispatch_newsletter_job_locked(db: Session, organization_id: str, actor_id:
             if confirmation_step:
                 if not subscription:
                     raise NewsletterValidationError("Subscription record is missing")
-                session = start_newsletter_confirmation_test(db, organization_id, actor_id, task.newsletter_id, task.account_id, profile.id if profile else None, subscription.id, job_id=job.id, task_id=task.id)
+                session = start_newsletter_confirmation_test(db, organization_id, session_actor_id, task.newsletter_id, task.account_id, profile.id if profile else None, subscription.id, job_id=job.id, task_id=task.id)
                 mode = "confirmation"
             else:
                 session = start_newsletter_signup_test(
                     db,
                     organization_id,
-                    actor_id,
+                    session_actor_id,
                     task.newsletter_id,
                     task.account_id,
                     profile.id if profile else None,

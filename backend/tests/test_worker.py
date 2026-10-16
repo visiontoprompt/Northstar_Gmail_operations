@@ -124,6 +124,23 @@ def test_per_job_concurrency_limit_enforced() -> None:
         assert sum(state == "RUNNING" for state in states.values()) == 2
 
 
+def test_worker_dispatched_browser_belongs_to_job_creator() -> None:
+    from app.service import dispatch_ready_items, update_login_job_state
+
+    with TestClient(app) as client:
+        group_id = client.get("/api/v1/groups").json()[0]["id"]
+        account = _make_accounts(client, group_id, 1, prefix="worker-owner")[0]
+        job = _job_for(client, group_id, [account], concurrency=1)
+        with SessionLocal() as db:
+            row = db.get(LoginJob, job["id"])
+            owner_id = row.created_by
+            update_login_job_state(db, row.organization_id, owner_id, row.id, "RUNNING")
+            dispatch_ready_items(db, row.organization_id, "worker-background-tick", row.id)
+            opened = db.scalar(select(BrowserSession).where(BrowserSession.account_id == account["id"], BrowserSession.state.in_(["RUNNING", "LOGIN_REQUIRED"])))
+            assert opened is not None
+            assert opened.owner_employee_id == owner_id
+
+
 def test_browser_launch_failure_is_reported_instead_of_remaining_queued(monkeypatch) -> None:
     from app import service
 
