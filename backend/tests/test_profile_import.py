@@ -169,3 +169,26 @@ def test_legacy_import_record_is_reconciled_without_claiming_authentication(work
     assert profile.status == "IMPORTED"
     assert account.login_status == "PROFILE_IMPORTED"
     assert profile.authenticated_at is None
+
+
+def test_legacy_saved_profile_with_review_status_uses_imported_profile_check(workspace, monkeypatch):
+    db, root, _tmp_path = workspace
+    profile = db.get(BrowserProfile, "profile-acct-a")
+    account = db.get(GmailAccount, "acct-a")
+    profile.status = "SAVED"
+    account.profile_status = "SAVED"
+    account.login_status = "VERIFICATION_REQUIRED"
+    (root / profile.id / "Default").mkdir(parents=True)
+    db.commit()
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(profile_root=str(root), browser_desktop_enabled=False,
+        browser_launch_enabled=True, browser_observer_enabled=False, browser_observe_interval=1.0, worker_enabled=False))
+    monkeypatch.setattr(service, "launch_local_browser", lambda *_args: (True, None))
+    starts = []
+    monkeypatch.setattr(service, "_start_observer", lambda *_args, **kwargs: starts.append(kwargs) or True)
+
+    session = service.start_login_session(db, "org-import", "admin", "acct-a")
+
+    assert session.login_state == "PROFILE_CHECK"
+    assert starts[0]["imported_profile"] is True
+    assert session.metadata_json["imported_profile_pending"] is True
+    assert account.login_status == "PROFILE_IMPORTED"

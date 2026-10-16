@@ -4054,7 +4054,12 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
-    imported_profile = profile.authenticated_at is None and profile.status == "IMPORTED"
+    # Older profile uploads could be recorded as SAVED even though they have
+    # no Northstar authentication timestamp. Treat that on-disk profile as an
+    # imported profile and visibly check its Gmail cookies before asking the
+    # operator to sign in. This keeps valid local sign-in state usable while
+    # never treating the archive itself as proof of authentication.
+    imported_profile = profile.authenticated_at is None and profile.status in {"IMPORTED", "SAVED"}
     if imported_profile and not (Path(get_settings().profile_root) / profile.id).is_dir():
         raise ImportValidationError("The imported browser profile files are missing on the server. Upload the profile again before opening it.")
     if purpose not in {"login", "reuse", "contacts", "labels_markers", "security", "addons", "mail", "alerts", "credential_change", "newsletter", "newsletter_confirm", "account_preferences"}:

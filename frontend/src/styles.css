@@ -2228,6 +2228,7 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 .desktop-inspector-operation-button > span { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; color: var(--color-primary-dark); background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); border-radius: 6px; }
 .desktop-inspector-operation-button:disabled { color: var(--color-muted); opacity: .55; cursor: not-allowed; }
 .desktop-inspector-stop-all { width: 100%; justify-content: center; }
+.desktop-inspector-compact { width: 100%; justify-content: center; }
 .desktop-operation-help { color: var(--color-muted); font-size: 9px; line-height: 1.4; }
 .desktop-operation-hint { padding: 9px; color: var(--color-muted); background: var(--color-surface); border: 1px dashed var(--color-line-strong); border-radius: 7px; font-size: 9px; line-height: 1.4; }
 .desktop-inspector-operation-host:empty { display: none; }
