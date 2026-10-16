@@ -137,7 +137,12 @@ textarea { resize: none; }
 .desktop-viewer-label > div { display: grid; gap: 3px; }
 .desktop-viewer-label strong { color: var(--color-ink); font-size: 12px; }
 .desktop-live-mark { width: 9px; height: 9px; flex: 0 0 auto; background: var(--color-success); border-radius: 50%; box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 13%, transparent); }
-.desktop-viewer-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.desktop-viewer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.desktop-stop-all-control { position: relative; display: flex; flex: 0 0 auto; }
+.desktop-stop-all-confirm { position: absolute; z-index: 12; top: calc(100% + 8px); right: 0; display: grid; width: min(280px, calc(100vw - 32px)); gap: 7px; padding: 11px; color: var(--color-ink-soft); background: var(--color-surface); border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-line)); border-radius: 9px; box-shadow: 0 12px 28px rgb(18 28 36 / 18%); font-size: 10px; line-height: 1.4; }
+.desktop-stop-all-confirm strong { color: var(--color-ink); font-size: 11px; }
+.desktop-stop-all-confirm > div { display: flex; justify-content: flex-end; gap: 6px; }
+.desktop-stop-all-confirm .button { justify-content: center; }
 .desktop-session-switcher { display: flex; min-height: 46px; gap: 7px; overflow-x: auto; padding: 7px 10px; background: var(--color-surface-muted); border-bottom: 1px solid var(--color-line); scrollbar-width: thin; }
 .desktop-session-tab { display: inline-flex; min-width: 160px; max-width: 260px; min-height: 31px; align-items: center; gap: 8px; padding: 0 10px; color: var(--color-muted); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 7px; font-size: 10px; text-align: left; cursor: pointer; }
 .desktop-session-tab > span:nth-child(2) { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
@@ -2244,7 +2249,6 @@ html[data-theme="dark"] .agent-chain-reorder .icon-button { color: #c1cdd1; back
 .desktop-inspector-operation-button.danger { color: var(--color-danger); }
 .desktop-inspector-operation-button > span { display: grid; width: 22px; height: 22px; flex: 0 0 auto; place-items: center; color: var(--color-primary-dark); background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); border-radius: 6px; }
 .desktop-inspector-operation-button:disabled { color: var(--color-muted); opacity: .55; cursor: not-allowed; }
-.desktop-inspector-stop-all { width: 100%; justify-content: center; }
 .desktop-inspector-compact { width: 100%; justify-content: center; }
 .desktop-operation-help { color: var(--color-muted); font-size: 9px; line-height: 1.4; }
 .desktop-operation-hint { padding: 9px; color: var(--color-muted); background: var(--color-surface); border: 1px dashed var(--color-line-strong); border-radius: 7px; font-size: 9px; line-height: 1.4; }
