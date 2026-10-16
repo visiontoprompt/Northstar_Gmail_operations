@@ -51,9 +51,25 @@ This is an automated workaround for the observed OVH networking behavior, not a 
 Configure these values on the server, not in the UI or source repository:
 
 1. In `/etc/northstar/northstar.env`, set `OVH_PROXY_RECOVERY_USERNAME` and `OVH_PROXY_RECOVERY_PASSWORD` to the Squid credentials and retain the configured project, instance, region, and port values. The environment file should remain owned by `root:northstar` and mode `0640`.
-2. Create `/etc/northstar/openstack/` with owner `root:northstar`, mode `0750`, then place an OVH-generated `clouds.yaml` there, owned by `root:northstar` and mode `0640`. Use the OpenStack credentials for the US project and set the cloud entry name to `northstar-ovh-us`; its `project_id` must be `239fa25938524e2f87575cc424a2b6fc` and `region_name` must be `US-EAST-VA-1`. Set `OS_CLIENT_CONFIG_FILE` to that file path in the environment file. Do not use OVH application/consumer keys as Keystone credentials.
+2. Create `/etc/northstar/openstack/` with owner `root:northstar`, mode `0750`, then place a `clouds.yaml` built from the OVH OpenStack user/configuration there, owned by `root:northstar` and mode `0640`. OVH may provide an `openrc.sh` rather than a ready-made `clouds.yaml`; use its Keystone auth URL, user/domain, and project details to build the [OpenStack SDK configuration](https://docs.openstack.org/openstacksdk/latest/user/config/configuration.html), and enter the OpenStack user's password privately. Use the US project and set the cloud entry name to `northstar-ovh-us`; its `project_id` must be `239fa25938524e2f87575cc424a2b6fc` and `region_name` must be `US-EAST-VA-1`. Set `OS_CLIENT_CONFIG_FILE` to that file path in the environment file. Do not use OVH application/consumer keys as Keystone credentials.
 3. Grant the OpenStack identity only what is needed to list/get existing Floating IPs, read their existing ports, and update the Floating IP `port_id` association (`network:list_floatingips`, `network:get_floatingip`, `network:get_port`, and `network:update_floatingip`, or OVH's equivalent project-level network permissions). The SDK verifies the configured project and region before it can change any association; the app also confirms each port belongs to the configured instance and contains the expected fixed IP.
 4. Install/update the app so Alembic applies the recovery-job migration, then restart `northstar`. The OVH Start action remains available when recovery credentials are missing; the resulting recovery job is marked **needs attention**, and the app never marks proxies ready without verification. Once the server credentials are configured, use **Verify/recover proxies** on the running instance to check every Floating IP and apply the bounded workaround where needed. The same action can verify an instance started directly from OVHcloud.
+
+The protected file should have this shape; fill the auth fields from the OpenStack user and configuration for the US project, not from the OVH API application keys. Edit the file with `sudoedit` so the real password never appears in shell history:
+
+```yaml
+clouds:
+  northstar-ovh-us:
+    auth:
+      auth_url: "<Keystone URL from the OVH OpenStack configuration>"
+      username: "<OpenStack username>"
+      password: "<OpenStack user password>"
+      project_id: "239fa25938524e2f87575cc424a2b6fc"
+      user_domain_name: "<user domain from OpenStack configuration>"
+    region_name: "US-EAST-VA-1"
+    interface: public
+    identity_api_version: 3
+```
 
 Example server-side setup (replace `clouds.yaml` with the account's securely obtained OpenStack configuration; do not paste secrets into shell history):
 
@@ -63,6 +79,18 @@ sudo install -o root -g northstar -m 0640 /secure/path/clouds.yaml /etc/northsta
 sudoedit /etc/northstar/northstar.env
 sudo systemctl restart northstar
 ```
+
+If **Verify/recover proxies** reports that `OS_CLIENT_CONFIG_FILE` is missing, the Squid username/password may already be loaded. Those credentials only authenticate the HTTP proxy; a separate OpenStack `clouds.yaml` is required to read and update Neutron Floating IP associations. Obtain an OpenStack user and configuration for the same OVH US Public Cloud project, then create the SDK file using those details. The application cannot safely create it from the OVH application/consumer keys or from the Squid password.
+
+After installing the file, confirm the service can read it without printing its contents or secrets:
+
+```bash
+sudo -u northstar test -r /etc/northstar/openstack/clouds.yaml && echo 'OpenStack file readable'
+sudo systemctl restart northstar
+sudo systemctl is-active northstar
+```
+
+Keep `OS_CLIENT_CONFIG_FILE=/etc/northstar/openstack/clouds.yaml` and `OPENSTACK_CLOUD=northstar-ovh-us` in `/etc/northstar/northstar.env`, with the latter matching the cloud entry in the file. Use `sudoedit /etc/northstar/northstar.env` to correct them; do not paste passwords into terminal commands. The OVH page retains the last recovery job as history, including an earlier missing-Squid-credentials failure. Its timestamp identifies that older attempt; pressing **Verify/recover proxies** checks the current configuration and starts a new job after it succeeds.
 
 The OVH page displays job stages and per-proxy outcomes. `Proxy ready` is shown only when all 15 authenticated checks return the corresponding Floating IP as their IPv4 exit address.
 

@@ -59,8 +59,15 @@ def recovery_configured() -> tuple[bool, str | None]:
     import os
     from pathlib import Path
     config_path = os.environ.get("OS_CLIENT_CONFIG_FILE", "")
-    if not config_path or not Path(config_path).is_file():
-        return False, "Set OS_CLIENT_CONFIG_FILE to a protected OpenStack clouds.yaml."
+    if not config_path:
+        return False, "Set OS_CLIENT_CONFIG_FILE in /etc/northstar/northstar.env to the OpenStack clouds.yaml path."
+    cloud_file = Path(config_path)
+    if not cloud_file.is_file():
+        return False, "The OpenStack clouds.yaml set by OS_CLIENT_CONFIG_FILE does not exist on the application server."
+    if not os.access(cloud_file, os.R_OK, effective_ids=True):
+        return False, "The northstar service cannot read the OpenStack clouds.yaml set by OS_CLIENT_CONFIG_FILE."
+    if cloud_file.stat().st_size == 0:
+        return False, "The OpenStack clouds.yaml set by OS_CLIENT_CONFIG_FILE is empty."
     if not settings.openstack_cloud:
         return False, "Set OPENSTACK_CLOUD to the cloud name in clouds.yaml."
     return True, None

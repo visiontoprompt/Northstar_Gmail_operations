@@ -203,3 +203,20 @@ def test_external_probe_distinguishes_timeout_and_407(monkeypatch) -> None:
     monkeypatch.setattr(recovery.httpx, "Client", TimeoutClient)
     timeout_result = recovery.probe_proxy("40.160.98.129", proxy_port=18080, username="proxyuser", password="secret", url="https://api4.ipify.org")
     assert timeout_result["status"] == "TIMEOUT"
+
+
+def test_recovery_config_reports_missing_openstack_file_after_proxy_credentials(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(recovery, "get_settings", lambda: _settings())
+    monkeypatch.setenv("OS_CLIENT_CONFIG_FILE", str(tmp_path / "clouds.yaml"))
+    ready, reason = recovery.recovery_configured()
+    assert ready is False
+    assert "does not exist" in reason
+    assert "OVH_PROXY_RECOVERY_USERNAME" not in reason
+
+
+def test_recovery_config_reports_missing_proxy_credentials_first(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(recovery, "get_settings", lambda: _settings(ovh_proxy_recovery_password=""))
+    monkeypatch.setenv("OS_CLIENT_CONFIG_FILE", str(tmp_path / "clouds.yaml"))
+    ready, reason = recovery.recovery_configured()
+    assert ready is False
+    assert "OVH_PROXY_RECOVERY_PASSWORD" in reason
