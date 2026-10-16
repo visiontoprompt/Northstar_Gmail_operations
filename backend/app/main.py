@@ -794,6 +794,7 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
     admin = _account_operator(request, db)
     target_recovery = payload.resource_type == "instance" and bool(payload.instance_id) and recovery_target(payload.service_name, payload.instance_id or "")
     recovery_job = None
+    recovery_warning = None
     try:
         if payload.action == "stop" and target_recovery:
             if not request_recovery_cancel(settings.demo_org_id, payload.service_name, payload.instance_id or ""):
@@ -801,11 +802,12 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
         if payload.action == "start" and target_recovery:
             configured, reason = recovery_configured()
             if not configured:
-                raise HTTPException(status_code=422, detail=f"Automatic Floating IP recovery is not configured: {reason}")
-            try:
-                validate_openstack_config()
-            except RecoveryError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+                recovery_warning = f"Proxy recovery is unavailable: {reason} The instance can start, but proxies are not verified or ready."
+            else:
+                try:
+                    validate_openstack_config()
+                except RecoveryError as exc:
+                    recovery_warning = f"Proxy recovery is unavailable: {exc} The instance can start, but proxies are not verified or ready."
             try:
                 recovery_job = create_recovery_job(settings.demo_org_id, payload.service_name, payload.instance_id or "", admin.employee_id, start=False)
             except RecoveryError as exc:
@@ -814,8 +816,12 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
             client.power(payload.resource_type, payload.service_name, payload.instance_id, payload.action)
         record_power_action(db, settings.demo_org_id, admin.employee_id, payload.resource_type, payload.service_name, payload.instance_id, payload.action)
         if recovery_job:
-            start_recovery_thread(recovery_job["id"])
-        return {"status": "accepted", "resource_type": payload.resource_type, "service_name": payload.service_name, "instance_id": payload.instance_id, "action": payload.action, "recovery_job": recovery_job}
+            if recovery_warning:
+                fail_recovery_job(recovery_job["id"], recovery_warning)
+                recovery_job = get_recovery_job(settings.demo_org_id, recovery_job["id"])
+            else:
+                start_recovery_thread(recovery_job["id"])
+        return {"status": "accepted", "resource_type": payload.resource_type, "service_name": payload.service_name, "instance_id": payload.instance_id, "action": payload.action, "recovery_job": recovery_job, "recovery_warning": recovery_warning}
     except OvhError as exc:
         if recovery_job:
             fail_recovery_job(recovery_job["id"], "OVH rejected the Start request; no proxy recovery was performed.")
@@ -827,6 +833,31 @@ def ovh_power(payload: OvhPowerRequest, request: Request, db: Session = Depends(
             fail_recovery_job(recovery_job["id"], "The Start request failed; no proxy recovery was performed.")
         logger.error("OVH power action failed; exception detail redacted")
         raise HTTPException(status_code=502, detail="OVH power action failed. Check API service logs.") from exc
+
+
+@app.post("/api/v1/infrastructure/ovh/recovery/start", status_code=status.HTTP_202_ACCEPTED)
+def ovh_start_proxy_recovery(request: Request, db: Session = Depends(get_db)) -> dict:
+    actor = _account_operator(request, db)
+    project_id = settings.ovh_proxy_recovery_project_id
+    instance_id = settings.ovh_proxy_recovery_instance_id
+    if not recovery_target(project_id, instance_id):
+        raise HTTPException(status_code=409, detail="Floating IP recovery is disabled for this instance.")
+    configured, reason = recovery_configured()
+    if not configured:
+        raise HTTPException(status_code=422, detail=f"Proxy recovery is unavailable: {reason}")
+    try:
+        validate_openstack_config()
+        with configured_client(db, settings.demo_org_id) as client:
+            items = client.list_resources().get("items", [])
+        target = next((item for item in items if item.get("resource_type") == "instance" and item.get("service_name") == project_id and item.get("instance_id") == instance_id), None)
+        if target is None or str(target.get("status", "")).upper() not in {"ACTIVE", "RUNNING"}:
+            raise HTTPException(status_code=409, detail="Start the configured OVH instance before verifying its proxies.")
+        job = create_recovery_job(settings.demo_org_id, project_id, instance_id, actor.employee_id)
+    except RecoveryError as exc:
+        raise HTTPException(status_code=409 if "already active" in str(exc).lower() else 422, detail=str(exc)) from exc
+    except OvhError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return job
 
 
 @app.get("/api/v1/infrastructure/ovh/recovery/latest")

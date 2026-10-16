@@ -116,6 +116,93 @@ def test_ovh_api_lists_resources_and_audits_accepted_power_request(monkeypatch) 
             assert audit.target_id == "vps-123"
 
 
+def test_ovh_start_succeeds_with_clear_unverified_proxy_result_when_recovery_is_unconfigured(monkeypatch) -> None:
+    from app.main import settings
+
+    calls = []
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def power(self, resource_type, service_name, instance_id, action):
+            calls.append((resource_type, service_name, instance_id, action))
+
+    monkeypatch.setattr("app.main.configured_client", lambda *_args: FakeClient())
+    monkeypatch.setattr("app.main.recovery_configured", lambda: (False, "Set OVH_PROXY_RECOVERY_USERNAME and OVH_PROXY_RECOVERY_PASSWORD in the server environment."))
+    monkeypatch.setattr("app.main.start_recovery_thread", lambda *_args: pytest.fail("Unconfigured recovery must not start"))
+    with TestClient(app) as client:
+        result = client.post("/api/v1/infrastructure/ovh/power", json={"resource_type": "instance", "service_name": settings.ovh_proxy_recovery_project_id, "instance_id": settings.ovh_proxy_recovery_instance_id, "action": "start"})
+        assert result.status_code == 202, result.text
+        assert calls == [("instance", settings.ovh_proxy_recovery_project_id, settings.ovh_proxy_recovery_instance_id, "start")]
+        assert "OVH_PROXY_RECOVERY_USERNAME" in result.json()["recovery_warning"]
+        assert result.json()["recovery_job"]["status"] == "FAILED"
+        assert result.json()["recovery_job"]["stage"] == "NEEDS_ATTENTION"
+        assert client.get(f"/api/v1/infrastructure/ovh/recovery/{result.json()['recovery_job']['id']}").json()["status"] == "FAILED"
+        assert client.post("/api/v1/infrastructure/ovh/recovery/start").status_code == 422
+
+
+def test_running_ovh_instance_can_start_manual_proxy_verification_without_power_cycle(monkeypatch) -> None:
+    from app.main import settings
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def list_resources(self):
+            return {"items": [{"resource_type": "instance", "service_name": settings.ovh_proxy_recovery_project_id, "instance_id": settings.ovh_proxy_recovery_instance_id, "status": "ACTIVE"}]}
+
+    monkeypatch.setattr("app.main.configured_client", lambda *_args: FakeClient())
+    monkeypatch.setattr("app.main.recovery_configured", lambda: (True, None))
+    monkeypatch.setattr("app.main.validate_openstack_config", lambda: None)
+    monkeypatch.setattr("app.ovh_proxy_recovery.start_recovery_thread", lambda *_args: None)
+    with TestClient(app) as client:
+        started = client.post("/api/v1/infrastructure/ovh/recovery/start")
+        assert started.status_code == 202, started.text
+        assert started.json()["status"] == "QUEUED"
+        assert client.post("/api/v1/infrastructure/ovh/recovery/start").status_code == 409
+
+
+def test_configured_ovh_start_keeps_automatic_proxy_recovery(monkeypatch) -> None:
+    from app.main import settings
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def power(self, *_args): return {"accepted": True}
+
+    started = []
+    monkeypatch.setattr("app.main.configured_client", lambda *_args: FakeClient())
+    monkeypatch.setattr("app.main.recovery_configured", lambda: (True, None))
+    monkeypatch.setattr("app.main.validate_openstack_config", lambda: None)
+    monkeypatch.setattr("app.main.start_recovery_thread", started.append)
+    with TestClient(app) as client:
+        result = client.post("/api/v1/infrastructure/ovh/power", json={"resource_type": "instance", "service_name": settings.ovh_proxy_recovery_project_id, "instance_id": settings.ovh_proxy_recovery_instance_id, "action": "start"})
+        assert result.status_code == 202, result.text
+        assert result.json()["recovery_warning"] is None
+        assert result.json()["recovery_job"]["status"] == "QUEUED"
+        assert started == [result.json()["recovery_job"]["id"]]
+
+
+def test_ovh_start_still_works_when_openstack_validation_fails(monkeypatch) -> None:
+    from app.main import settings
+    from app.ovh_proxy_recovery import RecoveryError
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def power(self, *_args): return {"accepted": True}
+
+    def invalid_openstack() -> None:
+        raise RecoveryError("OpenStack cloud configuration is unavailable.")
+
+    monkeypatch.setattr("app.main.configured_client", lambda *_args: FakeClient())
+    monkeypatch.setattr("app.main.recovery_configured", lambda: (True, None))
+    monkeypatch.setattr("app.main.validate_openstack_config", invalid_openstack)
+    with TestClient(app) as client:
+        result = client.post("/api/v1/infrastructure/ovh/power", json={"resource_type": "instance", "service_name": settings.ovh_proxy_recovery_project_id, "instance_id": settings.ovh_proxy_recovery_instance_id, "action": "start"})
+        assert result.status_code == 202, result.text
+        assert result.json()["recovery_job"]["status"] == "FAILED"
+        assert "OpenStack cloud configuration is unavailable" in result.json()["recovery_warning"]
+
+
 def test_ovh_resource_can_be_linked_to_proxy_group_and_shows_live_status(monkeypatch) -> None:
     with SessionLocal() as db:
         db.add(ProxyInventory(id="proxy-1", organization_id="org_demo", proxy_group="Proxy pool A", encrypted_payload=None))

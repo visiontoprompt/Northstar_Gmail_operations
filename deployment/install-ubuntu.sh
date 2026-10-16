@@ -120,6 +120,11 @@ ensure_env_setting OVH_PROXY_RECOVERY_POLL_SECONDS 5
 ensure_env_setting OPENSTACK_CLOUD northstar-ovh-us
 ensure_env_setting OS_CLIENT_CONFIG_FILE "$ENV_DIR/openstack/clouds.yaml"
 chown root:northstar "$ENV_FILE"; chmod 0640 "$ENV_FILE"
+recovery_clouds_file="$(sed -n 's/^OS_CLIENT_CONFIG_FILE=//p' "$ENV_FILE" | tail -n 1)"
+recovery_clouds_file="${recovery_clouds_file#\"}"; recovery_clouds_file="${recovery_clouds_file%\"}"
+if ! grep -Eq '^OVH_PROXY_RECOVERY_USERNAME=.+$' "$ENV_FILE" || ! grep -Eq '^OVH_PROXY_RECOVERY_PASSWORD=.+$' "$ENV_FILE" || [[ ! -s "$recovery_clouds_file" ]]; then
+  echo 'NOTICE: OVH power controls will work, but automatic Floating IP recovery remains unavailable until Squid credentials and OpenStack clouds.yaml are configured in /etc/northstar/.' >&2
+fi
 
 # Copy this checkout, excluding local environments, secrets, and build caches.
 install -d -o root -g root -m 0755 "$INSTALL_ROOT"
