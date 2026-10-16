@@ -1071,6 +1071,12 @@ def _launch_profile_context(pw, observer: "BrowserObserver"):
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
+        # Give the window manager a stable per-profile identity. PID ownership
+        # is not reliable for every Chromium build (some report the browser
+        # process or a shared helper as _NET_WM_PID), so the desktop switcher
+        # can still select the right account window by WM_CLASS.
+        f"--class=northstar-profile-{hashlib.sha256(observer.profile_id.encode()).hexdigest()[:16]}",
+        "--new-window",
     ]
     if observer.newsletter_config.get("ephemeral_browser"):
         # External-recipient runs must never inherit a saved Gmail session.

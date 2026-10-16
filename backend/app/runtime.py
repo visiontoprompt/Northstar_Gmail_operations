@@ -1,4 +1,5 @@
 import os
+import hashlib
 import shutil
 import signal
 import subprocess
@@ -182,6 +183,14 @@ def _window_pid_uses_profile(pid: int, profile_path: Path, root_pids: set[int], 
     return False
 
 
+def _window_id_value(value: str) -> int | None:
+    """Normalize window IDs from wmctrl (hex) and xdotool (decimal)."""
+    try:
+        return int(value, 16) if value.lower().startswith("0x") else int(value, 10)
+    except ValueError:
+        return None
+
+
 def local_browser_is_alive(profile_id: str, session_id: str | None = None) -> bool:
     """Return whether the account's dedicated browser is still alive.
 
@@ -216,7 +225,7 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
         env["DISPLAY"] = display
     try:
         windows = subprocess.run(
-            [wmctrl, "-lp"], capture_output=True, text=True, check=False, timeout=3, env=env
+            [wmctrl, "-lpx"], capture_output=True, text=True, check=False, timeout=3, env=env
         )
     except (OSError, subprocess.TimeoutExpired):
         logger.exception("cannot list desktop windows while focusing profile %s", profile_id)
@@ -225,40 +234,61 @@ def focus_local_browser_profile(profile_id: str, display: str | None = None) -> 
         logger.warning("wmctrl could not list windows while focusing profile %s", profile_id)
         return False
     candidates: list[tuple[int, str]] = []
+    window_class = f"northstar-profile-{hashlib.sha256(profile_id.encode()).hexdigest()[:16]}"
     for line in windows.stdout.splitlines():
-        columns = line.split(maxsplit=4)
-        if len(columns) < 4:
+        columns = line.split(maxsplit=5)
+        if len(columns) < 5:
             continue
         try:
             window_pid = int(columns[2])
         except ValueError:
+            window_pid = -1
+        class_match = window_class.casefold() in columns[3].casefold()
+        pid_match = window_pid in browser_pids or _window_pid_uses_profile(window_pid, profile_path, browser_roots)
+        if not class_match and not pid_match:
             continue
-        if window_pid not in browser_pids and not _window_pid_uses_profile(window_pid, profile_path, browser_roots):
-            continue
-        # Prefer a window owned by Chrome's profile-bearing root process, then
-        # try windows owned by its renderer/utility children. This avoids
-        # activating an arbitrary transient child window first.
-        candidates.append((0 if window_pid in browser_roots else 1, columns[0]))
+        # The per-profile class is authoritative. Keep PID matching as a
+        # migration path for Chrome windows opened before this identity was
+        # added, preferring the root process over descendants.
+        rank = 0 if class_match else (1 if window_pid in browser_roots else 2)
+        candidates.append((rank, columns[0]))
     for _rank, window_id in sorted(candidates):
+        xdotool = shutil.which("xdotool")
+        activated = False
         try:
             focused = subprocess.run(
                 [wmctrl, "-ia", window_id], capture_output=True, text=True,
                 check=False, timeout=3, env=env,
             )
+            activated = focused.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             logger.exception("cannot focus desktop window for profile %s", profile_id)
-            focused = None
-        if focused is not None and focused.returncode == 0:
-            return True
-        xdotool = shutil.which("xdotool")
         if xdotool:
             try:
-                raised = subprocess.run([xdotool, "windowraise", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
-                activated = subprocess.run([xdotool, "windowactivate", "--sync", "--clearmodifiers", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
-                if raised.returncode == 0 and activated.returncode == 0:
-                    return True
+                subprocess.run([xdotool, "windowraise", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
+                xdotool_activation = subprocess.run([xdotool, "windowactivate", "--sync", "--clearmodifiers", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
+                activated = activated or xdotool_activation.returncode == 0
+                if not activated:
+                    focused = subprocess.run([xdotool, "windowfocus", "--sync", window_id], capture_output=True, text=True, check=False, timeout=3, env=env)
+                    activated = focused.returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 logger.exception("xdotool could not focus desktop window for profile %s", profile_id)
+            if activated:
+                # A zero exit status only means the WM accepted the request.
+                # Confirm the VNC display's active window before reporting a
+                # successful switch to the UI.
+                for _attempt in range(5):
+                    try:
+                        active = subprocess.run([xdotool, "getwindowfocus"], capture_output=True, text=True, check=False, timeout=2, env=env)
+                    except (OSError, subprocess.TimeoutExpired):
+                        break
+                    if active.returncode == 0 and _window_id_value(active.stdout.strip()) == _window_id_value(window_id):
+                        return True
+                    time.sleep(0.1)
+        elif activated:
+            # wmctrl -ia can return success while Openbox declines an
+            # activation. Without xdotool, at least retain the WM result.
+            return True
     if not candidates:
         logger.warning("no X11 window matched browser profile %s on display %s", profile_id, env.get("DISPLAY", ""))
     else:

@@ -67,16 +67,16 @@ def test_focus_local_browser_profile_activates_matching_window(tmp_path) -> None
     def run(args, **kwargs):
         calls.append(args)
         assert kwargs["env"]["DISPLAY"] == ":107"
-        if args[1] == "-lp":
-            return CompletedProcess(args, 0, "0x045 0 4321 localhost Chrome\n", "")
+        if args[1] == "-lpx":
+            return CompletedProcess(args, 0, "0x045 0 4321 google-chrome.Google-chrome localhost Chrome\n", "")
         return CompletedProcess(args, 0, "", "")
 
     try:
         with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
-             patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
+             patch("app.runtime.shutil.which", side_effect=lambda name: "/usr/bin/wmctrl" if name == "wmctrl" else None), \
              patch("app.runtime.subprocess.run", side_effect=run):
             assert runtime.focus_local_browser_profile("profile_1", display=":107") is True
-        assert calls == [["/usr/bin/wmctrl", "-lp"], ["/usr/bin/wmctrl", "-ia", "0x045"]]
+        assert calls == [["/usr/bin/wmctrl", "-lpx"], ["/usr/bin/wmctrl", "-ia", "0x045"]]
     finally:
         settings.profile_root = original_profile_root
 
@@ -89,7 +89,7 @@ def test_focus_local_browser_profile_reports_missing_window(tmp_path) -> None:
     try:
         with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
              patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
-             patch("app.runtime.subprocess.run", return_value=CompletedProcess([], 0, "0x045 0 8765 localhost Chrome\n", "")):
+             patch("app.runtime.subprocess.run", return_value=CompletedProcess([], 0, "0x045 0 8765 google-chrome.Google-chrome localhost Chrome\n", "")):
             assert runtime.focus_local_browser_profile("profile_1") is False
     finally:
         settings.profile_root = original_profile_root
@@ -104,17 +104,17 @@ def test_focus_local_browser_profile_matches_chrome_child_window(tmp_path) -> No
 
     def run(args, **kwargs):
         calls.append(args)
-        if args[1] == "-lp":
-            return CompletedProcess(args, 0, "0x071 0 8765 localhost Chrome\n", "")
+        if args[1] == "-lpx":
+            return CompletedProcess(args, 0, "0x071 0 8765 google-chrome.Google-chrome localhost Chrome\n", "")
         return CompletedProcess(args, 0, "", "")
 
     try:
         with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
              patch("app.runtime._descendant_process_pids", return_value={4321, 8765}), \
-             patch("app.runtime.shutil.which", return_value="/usr/bin/wmctrl"), \
+             patch("app.runtime.shutil.which", side_effect=lambda name: "/usr/bin/wmctrl" if name == "wmctrl" else None), \
              patch("app.runtime.subprocess.run", side_effect=run):
             assert runtime.focus_local_browser_profile("profile_1", display=":107") is True
-        assert calls == [["/usr/bin/wmctrl", "-lp"], ["/usr/bin/wmctrl", "-ia", "0x071"]]
+        assert calls == [["/usr/bin/wmctrl", "-lpx"], ["/usr/bin/wmctrl", "-ia", "0x071"]]
     finally:
         settings.profile_root = original_profile_root
 
@@ -126,10 +126,12 @@ def test_focus_local_browser_profile_falls_back_to_xdotool(tmp_path) -> None:
     settings.profile_root = str(tmp_path)
 
     def run(args, **kwargs):
-        if args[1] == "-lp":
-            return CompletedProcess(args, 0, "0x072 0 4321 localhost Chrome\n", "")
+        if args[1] == "-lpx":
+            return CompletedProcess(args, 0, "0x072 0 4321 google-chrome.Google-chrome localhost Chrome\n", "")
         if args[0] == "/usr/bin/wmctrl":
             return CompletedProcess(args, 1, "", "cannot activate window")
+        if args[1:] == ["getwindowfocus"]:
+            return CompletedProcess(args, 0, "0x072\n", "")
         return CompletedProcess(args, 0, "", "")
 
     try:
@@ -137,7 +139,37 @@ def test_focus_local_browser_profile_falls_back_to_xdotool(tmp_path) -> None:
              patch("app.runtime.shutil.which", side_effect=lambda name: f"/usr/bin/{name}" if name in {"wmctrl", "xdotool"} else None), \
              patch("app.runtime.subprocess.run", side_effect=run) as run_mock:
             assert runtime.focus_local_browser_profile("profile_1", display=":107") is True
-        assert [call.args[0][1:] for call in run_mock.call_args_list] == [["-lp"], ["-ia", "0x072"], ["windowraise", "0x072"], ["windowactivate", "--sync", "--clearmodifiers", "0x072"]]
+        assert [call.args[0][1:] for call in run_mock.call_args_list] == [["-lpx"], ["-ia", "0x072"], ["windowraise", "0x072"], ["windowactivate", "--sync", "--clearmodifiers", "0x072"], ["getwindowfocus"]]
+    finally:
+        settings.profile_root = original_profile_root
+
+
+def test_focus_local_browser_profile_uses_profile_window_class(tmp_path) -> None:
+    from subprocess import CompletedProcess
+    import hashlib
+
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path)
+    expected_class = f"northstar-profile-{hashlib.sha256(b'profile_2').hexdigest()[:16]}"
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1:] == ["-lpx"]:
+            # PID is deliberately unrelated; class identity should win.
+            return CompletedProcess(args, 0, f"0x400001 0 9999 {expected_class}.{expected_class} localhost Chrome\n", "")
+        if args[1:] == ["getwindowfocus"]:
+            return CompletedProcess(args, 0, "4194305\n", "")
+        return CompletedProcess(args, 0, "", "")
+
+    try:
+        with patch("app.runtime._find_chrome_pids_for_profile", return_value=[4321]), \
+             patch("app.runtime.shutil.which", side_effect=lambda name: f"/usr/bin/{name}" if name in {"wmctrl", "xdotool"} else None), \
+             patch("app.runtime.subprocess.run", side_effect=run):
+            assert runtime.focus_local_browser_profile("profile_2", display=":107") is True
+        assert calls[0] == ["/usr/bin/wmctrl", "-lpx"]
+        assert ["/usr/bin/wmctrl", "-ia", "0x400001"] in calls
+        assert ["/usr/bin/xdotool", "getwindowfocus"] in calls
     finally:
         settings.profile_root = original_profile_root
 

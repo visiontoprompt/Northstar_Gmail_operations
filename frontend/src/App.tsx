@@ -1184,6 +1184,7 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
     setSelectedSessionId((current) => activeRows.some((session) => session.id === current && session.browser_alive)
       ? current
       : activeRows.find((session) => session.browser_alive)?.id ?? activeRows[0]?.id ?? "");
+    return activeRows;
   }, [groupId]);
 
   useEffect(() => {
@@ -1233,8 +1234,20 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
     }
     setFocusing(session.id); setError(""); setNotice("");
     try {
-      await api<{ focused: boolean }>(`/api/v1/sessions/${session.id}/focus`, { method: "POST" });
-      setSelectedSessionId(session.id);
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          await api<{ focused: boolean }>(`/api/v1/sessions/${session.id}/focus`, { method: "POST" });
+          setSelectedSessionId(session.id);
+          return;
+        } catch (requestError) {
+          lastError = requestError;
+          const message = (requestError as Error).message || "";
+          if (!message.includes("window could not be focused") || attempt === 4) throw requestError;
+          await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+        }
+      }
+      throw lastError;
     }
     catch (requestError) { setError((requestError as Error).message || "The Chrome window could not be focused. Use Alt+Tab in the VNC toolbar to switch windows."); }
     finally { setFocusing(""); }
@@ -1292,8 +1305,23 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
         const created = await api<LoginJob>("/api/v1/login-jobs", { method: "POST", body: JSON.stringify({ group_id: null, account_ids: pendingAccounts.map((account) => account.id), concurrency_limit: concurrency }) });
         const started = await api<LoginJob>(`/api/v1/login-jobs/${created.id}/start`, { method: "POST" });
         setJob(started);
-        setNotice(`Batch started for ${pendingAccounts.length} accounts. The desktop will open up to ${started.concurrency_limit} sessions at once.`);
-        await loadSessions();
+        const pendingIds = new Set(pendingAccounts.map((account) => account.id));
+        const deadline = Date.now() + 15_000;
+        let opened = await loadSessions();
+        const livePendingCount = () => opened.filter((session) => pendingIds.has(session.account_id) && session.browser_alive).length;
+        while (livePendingCount() < pendingAccounts.length && Date.now() < deadline) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          opened = await loadSessions();
+        }
+        const target = opened.find((session) => pendingIds.has(session.account_id) && session.browser_alive);
+        if (target) {
+          try { await focusSession(target); }
+          catch { setSelectedSessionId(target.id); }
+        }
+        const liveCount = livePendingCount();
+        setNotice(liveCount
+          ? `Batch dispatched for ${pendingAccounts.length} accounts; ${liveCount} of ${pendingAccounts.length} browser windows are open. Select any account tab to switch windows.`
+          : `Batch dispatched for ${pendingAccounts.length} accounts, but no Chrome windows have appeared yet. Check batch progress and retry failed accounts.`);
       }
       setSelectedIds([]); onRefresh();
     } catch (requestError) { setError((requestError as Error).message || "The selected browser sessions could not be started."); }
