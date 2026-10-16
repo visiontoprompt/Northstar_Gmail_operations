@@ -79,7 +79,17 @@ def test_restore_replaces_database_and_profile_data_transactionally(tmp_path: Pa
     with source_engine.begin() as connection:
         connection.execute(Organization.__table__.insert().values(id="org-source", name="Source", created_at=datetime(2026, 10, 15, tzinfo=timezone.utc)))
     measured: list[tuple[str, int | None, int | None]] = []
-    archive = backup.create_backup("a-long-and-safe-passphrase", progress=lambda stage, done, total: measured.append((stage, done, total)))
+    archive = backup.create_backup("a-long-and-safe-passphrase", persistent=True, kind="workspace", created_by="admin-test", progress=lambda stage, done, total: measured.append((stage, done, total)))
+    listed = backup.list_backup_archives()
+    assert len(listed) == 1
+    assert listed[0]["name"] == archive.name
+    assert listed[0]["kind"] == "workspace"
+    assert listed[0]["table_count"] == len(backup.Base.metadata.tables)
+    assert listed[0]["profile_files"] == 1
+    assert listed[0]["created_by"] == "admin-test"
+    assert listed[0]["size_bytes"] == archive.stat().st_size
+    assert backup.backup_archive_path(archive.name) == archive
+    assert backup.backup_archive_path("../northstar.env") is None
     assert any(stage == "Exporting database tables" and done == total for stage, done, total in measured)
     assert any(stage == "Encrypting archive" and done == total for stage, done, total in measured)
     settings.profile_root = str(target_profile)

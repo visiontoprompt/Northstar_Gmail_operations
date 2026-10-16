@@ -12,13 +12,12 @@ import time
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from starlette.background import BackgroundTask
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .config import get_settings
-from .backup import BackupError, MAX_UPLOAD_BYTES, create_backup, restore_backup, validate_backup_file
+from .backup import BackupError, MAX_UPLOAD_BYTES, backup_archive_path, create_backup, list_backup_archives, restore_backup, validate_backup_file
 from . import backup_progress
 from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
@@ -594,6 +593,21 @@ def workspace_backup_progress(operation_id: str, request: Request, db: Session =
     return progress
 
 
+@app.get("/api/v1/backups/catalog")
+def workspace_backup_catalog(request: Request, db: Session = Depends(get_db)) -> dict:
+    _admin(request, db)
+    return {"items": list_backup_archives()}
+
+
+@app.get("/api/v1/backups/archive/{backup_name}")
+def download_saved_workspace_backup(backup_name: str, request: Request, db: Session = Depends(get_db)) -> FileResponse:
+    _admin(request, db)
+    archive = backup_archive_path(backup_name)
+    if archive is None:
+        raise HTTPException(status_code=404, detail="Backup archive not found.")
+    return FileResponse(archive, media_type="application/octet-stream", filename=archive.name, headers={"Cache-Control": "no-store"})
+
+
 @app.post("/api/v1/backups")
 def download_workspace_backup(request: Request, passphrase: str = Form(...), operation_id: str | None = Form(None), db: Session = Depends(get_db)) -> FileResponse:
     admin = _admin(request, db)
@@ -603,7 +617,7 @@ def download_workspace_backup(request: Request, passphrase: str = Form(...), ope
     if operation_id:
         backup_progress.begin(operation_id, admin.employee_id, "download")
     try:
-        archive = create_backup(passphrase, progress=lambda stage, done, total: backup_progress.update(operation_id, stage, done, total))
+        archive = create_backup(passphrase, persistent=True, kind="workspace", created_by=admin.employee_id, progress=lambda stage, done, total: backup_progress.update(operation_id, stage, done, total))
     except BackupError as exc:
         backup_progress.finish(operation_id, False)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -618,10 +632,11 @@ def download_workspace_backup(request: Request, passphrase: str = Form(...), ope
         db.commit()
     except Exception:
         backup_progress.finish(operation_id, False)
-        shutil.rmtree(archive.parent, ignore_errors=True)
+        archive.unlink(missing_ok=True)
+        archive.with_suffix(".json").unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="The backup file was prepared, but its audit record could not be saved. Retry the backup.")
     backup_progress.finish(operation_id, True)
-    return FileResponse(archive, media_type="application/octet-stream", filename=f"northstar-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.nstar", background=BackgroundTask(shutil.rmtree, archive.parent, ignore_errors=True))
+    return FileResponse(archive, media_type="application/octet-stream", filename=archive.name, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/v1/backups/restore")
@@ -651,7 +666,7 @@ def restore_workspace_backup(request: Request, file: UploadFile = File(...), pas
             raise HTTPException(status_code=422, detail="Choose a Northstar backup file to restore.")
         validate_backup_file(uploaded, passphrase, progress=progress)
         # Preserve the current state first, encrypted with the same passphrase.
-        safety_archive = create_backup(passphrase, persistent=True, progress=lambda stage, done, total: progress(f"Safety copy · {stage}", done, total))
+        safety_archive = create_backup(passphrase, persistent=True, kind="safety", created_by=admin.employee_id, progress=lambda stage, done, total: progress(f"Safety copy · {stage}", done, total))
         result = restore_backup(uploaded, passphrase, db, actor_id=admin.employee_id, safety_backup_name=safety_archive.name, progress=progress)
         result["safety_backup"] = safety_archive.name
         backup_progress.finish(operation_id, True)
@@ -682,11 +697,10 @@ def download_restore_safety_backup(backup_name: str, request: Request, db: Sessi
     _admin(request, db)
     if not backup_name.startswith("restore-safety-") or not backup_name.endswith(".nstar") or "/" in backup_name or "\\" in backup_name:
         raise HTTPException(status_code=404, detail="Safety backup not found.")
-    backup_dir = Path(settings.profile_root).resolve().parent / "backups"
-    archive = (backup_dir / backup_name).resolve()
-    if not archive.is_relative_to(backup_dir.resolve()) or not archive.is_file():
+    archive = backup_archive_path(backup_name)
+    if archive is None:
         raise HTTPException(status_code=404, detail="Safety backup not found.")
-    return FileResponse(archive, media_type="application/octet-stream", filename=backup_name)
+    return FileResponse(archive, media_type="application/octet-stream", filename=backup_name, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/v1/infrastructure/ovh")

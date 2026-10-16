@@ -2386,6 +2386,33 @@ html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"]
 .backup-progress-track.indeterminate > span { width: 32%; animation: backup-progress-move 1.3s ease-in-out infinite alternate; }
 .backup-progress > p { margin: 9px 0 0; color: var(--color-muted); font-size: 10px; }
 @keyframes backup-progress-move { from { transform: translateX(-100%); } to { transform: translateX(320%); } }
+.backup-catalog { overflow: hidden; border: 1px solid var(--color-line); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-card); }
+.backup-catalog-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 22px; border-bottom: 1px solid var(--color-line); }
+.backup-catalog-heading h3 { display: flex; align-items: center; gap: 9px; margin: 4px 0; color: var(--color-ink); font-size: 16px; }
+.backup-catalog-heading h3 span { display: grid; min-width: 23px; height: 23px; place-items: center; padding: 0 5px; border-radius: 7px; color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 11%, var(--color-surface)); font-size: 11px; }
+.backup-catalog-heading p { margin: 0; color: var(--color-muted); font-size: 11px; line-height: 1.5; }
+.backup-catalog-heading .button { flex: 0 0 auto; }
+.backup-catalog-state { display: flex; min-height: 140px; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--color-muted); font-size: 12px; }
+.backup-catalog-state strong { color: var(--color-ink); font-size: 13px; }
+.backup-catalog-list { display: grid; }
+.backup-catalog-item { display: grid; grid-template-columns: minmax(230px, 1.4fr) minmax(300px, 1fr) auto; align-items: center; gap: 16px; padding: 17px 22px; border-top: 1px solid var(--color-line); }
+.backup-catalog-item:first-child { border-top: 0; }
+.backup-catalog-item:hover { background: color-mix(in srgb, var(--color-primary) 3%, var(--color-surface)); }
+.backup-catalog-item-main { display: flex; align-items: flex-start; gap: 11px; min-width: 0; }
+.backup-catalog-item-main > div { display: grid; gap: 4px; min-width: 0; }
+.backup-catalog-item-icon { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; border-radius: 10px; color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); }
+.backup-catalog-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.backup-catalog-title strong { color: var(--color-ink); font-size: 12px; }
+.backup-catalog-title span { padding: 3px 6px; border-radius: 5px; color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface)); font-size: 9px; font-weight: 700; }
+.backup-catalog-item code { max-width: 100%; overflow: hidden; color: var(--color-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.backup-catalog-item small { color: var(--color-muted); font-size: 10px; }
+.backup-catalog-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.backup-catalog-metrics span { display: grid; gap: 3px; }
+.backup-catalog-metrics strong { color: var(--color-ink); font-size: 12px; font-variant-numeric: tabular-nums; }
+.backup-catalog-metrics small { white-space: nowrap; }
+.backup-catalog-download { white-space: nowrap; }
+@media (max-width: 1100px) { .backup-catalog-item { grid-template-columns: minmax(0, 1fr) auto; } .backup-catalog-metrics { grid-column: 1 / -1; grid-row: 2; margin-left: 47px; } }
+@media (max-width: 600px) { .backup-catalog-heading { align-items: flex-start; flex-wrap: wrap; padding: 16px; } .backup-catalog-item { gap: 12px; padding: 16px; } .backup-catalog-item-main { grid-column: 1 / -1; } .backup-catalog-metrics { grid-column: 1 / -1; grid-row: auto; margin-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); } .backup-catalog-download { grid-column: 1 / -1; justify-content: center; } }
 .settings-tabs { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 @media (max-width: 1100px) { .settings-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .settings-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } .backup-grid { grid-template-columns: 1fr; } }

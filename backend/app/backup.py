@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -38,6 +39,7 @@ CHUNK_SIZE = 1024 * 1024
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 MIN_PASSPHRASE_LENGTH = 12
 ProgressCallback = Callable[[str, int | None, int | None], None]
+BACKUP_NAME_RE = re.compile(r"^(?:workspace|restore-safety)-\d{8}T\d{6}Z-[a-f0-9]{8}\.nstar$")
 
 
 class BackupError(ValueError):
@@ -62,14 +64,23 @@ def _encrypt_file(source: Path, destination: Path, passphrase: str) -> None:
         dst.write(encryptor.tag)
 
 
-def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> None:
+def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> int:
     """Stream tar contents directly into AES-GCM to avoid a plaintext tar copy."""
     salt, nonce = os.urandom(16), os.urandom(12)
     encryptor = Cipher(algorithms.AES(_passphrase_key(passphrase, salt)), modes.GCM(nonce)).encryptor()
     # Measure source bytes once so archive progress represents actual bytes handled.
     if progress:
         progress("Measuring archive contents", None, None)
-    source_bytes = sum(path.stat().st_size for root in (content, profile_root) if root.exists() for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+    source_bytes = 0
+    profile_files = 0
+    for root in (content, profile_root):
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                source_bytes += path.stat().st_size
+                if root == profile_root:
+                    profile_files += 1
     with destination.open("wb") as output:
         output.write(MAGIC + bytes([VERSION]) + salt + nonce)
 
@@ -104,6 +115,7 @@ def _encrypt_archive(content: Path, profile_root: Path, destination: Path, passp
         output.write(encryptor.tag)
     if progress:
         progress("Encrypting archive", 1, 1)
+    return profile_files
 
 
 def _decrypt_file(source: Path, destination: Path, passphrase: str, progress: ProgressCallback | None = None) -> None:
@@ -211,8 +223,54 @@ def _runtime_files(staging: Path) -> dict[str, Any]:
     return {"included": copied}
 
 
-def create_backup(passphrase: str, *, persistent: bool = False, progress: ProgressCallback | None = None) -> Path:
-    """Create and return an encrypted backup file in a temporary directory."""
+def backup_directory() -> Path:
+    return Path(get_settings().profile_root).resolve().parent / "backups"
+
+
+def backup_archive_path(name: str) -> Path | None:
+    """Resolve only app-created archives within the protected backup directory."""
+    if not BACKUP_NAME_RE.fullmatch(name):
+        return None
+    archive = backup_directory() / name
+    return archive if archive.is_file() and not archive.is_symlink() else None
+
+
+def list_backup_archives() -> list[dict[str, Any]]:
+    directory = backup_directory()
+    if not directory.is_dir():
+        return []
+    items: list[dict[str, Any]] = []
+    for archive in directory.iterdir():
+        if not BACKUP_NAME_RE.fullmatch(archive.name) or not archive.is_file() or archive.is_symlink():
+            continue
+        stat = archive.stat()
+        item: dict[str, Any] = {
+            "name": archive.name,
+            "kind": "safety" if archive.name.startswith("restore-safety-") else "workspace",
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "size_bytes": stat.st_size,
+            "encrypted": True,
+            "table_count": None,
+            "record_count": None,
+            "profile_files": None,
+            "created_by": None,
+        }
+        manifest = archive.with_suffix(".json")
+        try:
+            if manifest.is_file() and not manifest.is_symlink():
+                details = json.loads(manifest.read_text(encoding="utf-8"))
+                if isinstance(details, dict):
+                    item.update({key: details[key] for key in ("created_at", "table_count", "record_count", "profile_files", "created_by") if key in details})
+        except (OSError, ValueError):
+            logger.warning("Backup catalog metadata is unavailable for %s", archive.name)
+        items.append(item)
+    return sorted(items, key=lambda item: item["created_at"], reverse=True)
+
+
+def create_backup(passphrase: str, *, persistent: bool = False, kind: str = "safety", created_by: str | None = None, progress: ProgressCallback | None = None) -> Path:
+    """Create and return an encrypted backup; persistent archives are cataloged."""
+    if kind not in {"workspace", "safety"}:
+        raise ValueError("Invalid backup kind")
     _passphrase_key(passphrase, os.urandom(16))  # validate before doing expensive work
     settings = get_settings()
     parent = Path(get_settings().profile_root).resolve().parent
@@ -241,13 +299,30 @@ def create_backup(passphrase: str, *, persistent: bool = False, progress: Progre
                     progress("Exporting database tables", index + 1, len(tables))
         (content / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         profile_root = Path(settings.profile_root).resolve()
-        _encrypt_archive(content, profile_root, encrypted, passphrase, progress)
+        profile_files = _encrypt_archive(content, profile_root, encrypted, passphrase, progress)
         if persistent:
-            backup_dir = parent / "backups"
+            backup_dir = backup_directory()
             backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            final_path = backup_dir / f"restore-safety-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}.nstar"
+            prefix = "workspace" if kind == "workspace" else "restore-safety"
+            final_path = backup_dir / f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}.nstar"
             encrypted.replace(final_path)
             final_path.chmod(0o600)
+            manifest = final_path.with_suffix(".json")
+            manifest_tmp = backup_dir / f".{manifest.name}.{uuid.uuid4().hex}.tmp"
+            try:
+                manifest_tmp.write_text(json.dumps({
+                    "created_at": metadata["created_at"],
+                    "table_count": len(metadata["tables"]),
+                    "record_count": sum(item["rows"] for item in metadata["tables"]),
+                    "profile_files": profile_files,
+                    "created_by": created_by,
+                }), encoding="utf-8")
+                manifest_tmp.chmod(0o600)
+                manifest_tmp.replace(manifest)
+            except Exception:
+                manifest_tmp.unlink(missing_ok=True)
+                final_path.unlink(missing_ok=True)
+                raise
             shutil.rmtree(tmp_root, ignore_errors=True)
             return final_path
         return encrypted
