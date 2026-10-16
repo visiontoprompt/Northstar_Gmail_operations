@@ -2,6 +2,7 @@ import { FormEvent, createContext, useCallback, useContext, useEffect, useRef, u
 import { createPortal } from "react-dom";
 import {
   Activity,
+  Archive,
   Contact as AddressBook,
   ArrowRight,
   Bell,
@@ -59,6 +60,7 @@ import { NewsletterPage } from "./newsletters/NewsletterPage";
 import { runProxyTestQueue } from "./proxy-test";
 import { api } from "./api";
 import { AccountProfileImportModal, BulkProfileImportSection } from "./profile-import/ProfileImport";
+import { ProfileCompactionModal } from "./profile-compaction/ProfileCompactionModal";
 import { OvhPage } from "./ovh/OvhPage";
 import { GoDaddyPage } from "./godaddy/GoDaddyPage";
 import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, selectedLiveSessions, type DesktopAccountFilter } from "./desktop-contract";
@@ -238,6 +240,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
   const [activeAdminAction, setActiveAdminAction] = useState<{ kind: "edit" | "move" | "delete"; accounts: Account[] } | null>(null);
   const [tagTargets, setTagTargets] = useState<Account[] | null>(null);
   const [profileImportAccount, setProfileImportAccount] = useState<Account | null>(null);
+  const [profileCompactionOpen, setProfileCompactionOpen] = useState(false);
   const [stopGroupConfirmOpen, setStopGroupConfirmOpen] = useState(false);
   const [stopAllConfirmOpen, setStopAllConfirmOpen] = useState(false);
   const [credentialAccount, setCredentialAccount] = useState<Account | null>(null);
@@ -339,6 +342,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     setActiveAdminAction(null);
     setTagTargets(null);
     setProfileImportAccount(null);
+    setProfileCompactionOpen(false);
     setCredentialAccount(null);
     setCredentialChoiceAccount(null);
     setCredentialField(null);
@@ -502,6 +506,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
     {activeAdminAction && <BulkAdminDesigner accounts={activeAdminAction.accounts} groups={groups} kind={activeAdminAction.kind} onClose={() => setActiveAdminAction(null)} onSaved={(message) => { setActiveAdminAction(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
     {tagTargets && <AccountTagsModal accounts={tagTargets} onClose={() => setTagTargets(null)} onSaved={(message) => { setTagTargets(null); notify("success", message); reload(); }} onError={(message) => notify("error", message)} />}
     {profileImportAccount && <AccountProfileImportModal account={{ id: profileImportAccount.id, email: profileImportAccount.email }} onClose={() => setProfileImportAccount(null)} onImported={() => { notify("success", `Saved browser profile for ${profileImportAccount.email}.`); reload(); }} />}
+    {profileCompactionOpen && <ProfileCompactionModal selected={selectedAccountIds.map((id) => ({ id, email: accounts.find((account) => account.id === id)?.email ?? id }))} onClose={() => setProfileCompactionOpen(false)} />}
   </>;
   const presentedOperationDialogs = desktopOperationHost && activeView === "desktop"
     ? createPortal(<DesktopInspectorContext.Provider value><div className="desktop-inspector-operation-layer">{operationDialogs}</div></DesktopInspectorContext.Provider>, desktopOperationHost)
@@ -549,7 +554,7 @@ function WorkspaceApp({ auth, onSignOut }: { auth: AuthSession; onSignOut: () =>
           {activeView === "newsletters" && <NewsletterPage accounts={accounts.map((account) => ({ id: account.id, email: account.email, group_id: account.group_id, group_name: account.group_name, profile_status: account.profile.status }))} accountGroups={groups.map((group) => ({ id: group.id, name: group.name, account_count: group.account_count }))} canManage={auth.permissions.is_admin} canOperate={auth.permissions.can_operate_accounts} refreshKey={refreshKey} onNotify={notify} onOpenSettings={() => setActiveView("settings")} initialAccountIds={newsletterLaunchAccountIds} onClearInitialAccountIds={() => setNewsletterLaunchAccountIds([])} />}
           {isInfrastructureView(activeView) && <InfrastructurePage view={activeView} groups={groups} refreshKey={refreshKey} onRefresh={reload} canDeleteHistory={auth.permissions.is_admin} onDeleteHistory={async () => { const result = await api<{ deleted_count: number; active_preserved_count: number }>("/api/v1/sessions/history", { method: "DELETE" }); notify("success", `Deleted ${result.deleted_count} session record${result.deleted_count === 1 ? "" : "s"}; preserved ${result.active_preserved_count} active session${result.active_preserved_count === 1 ? "" : "s"}.`); reload(); }} onOpenAccount={async (accountId) => { try { setActiveAccount(await api<Account>(`/api/v1/accounts/${accountId}`)); } catch (requestError) { notify("error", (requestError as Error).message); } }} onOpenSession={(session) => setActiveSession(session)} onEditCredentials={(account, field) => { setCredentialAccount(account); setCredentialField(field); }} onPreparePlan={(account) => setCredentialChoiceAccount(account)} onNotify={notify} />}
           {activeView === "accounts" && <div className="accounts-workspace">
-          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE / ACCOUNTS</div><h1>Accounts <span className="heading-count">{total.toLocaleString()}</span></h1><p>Review account access, status, groups, and assigned infrastructure.</p></div><div className="heading-actions"><button type="button" className="button secondary" onClick={() => setContactLibraryOpen(true)}><AddressBook size={17} /> Contact files</button><button type="button" className="button secondary" onClick={() => setOnboardingOpen(true)}><Plus size={17} /> Add account</button><button type="button" className="button primary" onClick={() => setOnboardingOpen(true)}><ClipboardCheck size={17} /> Import accounts</button></div></section>
+          <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> WORKSPACE / ACCOUNTS</div><h1>Accounts <span className="heading-count">{total.toLocaleString()}</span></h1><p>Review account access, status, groups, and assigned infrastructure.</p></div><div className="heading-actions">{auth.permissions.can_operate_accounts && <button type="button" className="button secondary" onClick={() => setProfileCompactionOpen(true)}><Archive size={17} /> Compact profiles</button>}<button type="button" className="button secondary" onClick={() => setContactLibraryOpen(true)}><AddressBook size={17} /> Contact files</button><button type="button" className="button secondary" onClick={() => setOnboardingOpen(true)}><Plus size={17} /> Add account</button><button type="button" className="button primary" onClick={() => setOnboardingOpen(true)}><ClipboardCheck size={17} /> Import accounts</button></div></section>
           <section className="handoff-banner" aria-label="Phase 1 boundary"><div className="handoff-rail" /><div className="handoff-icon"><ShieldCheck size={19} /></div><div className="handoff-copy"><strong>Safe hand-off to Phase 2</strong><span>New records are encrypted, deduplicated, and ready for a profile-backed automatic login session.</span></div><span className="handoff-state">BOUNDARY LOCKED</span></section>
 
           <AttentionStrip accounts={attentionAccounts} onOpen={setActiveAccount} />

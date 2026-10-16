@@ -26,6 +26,7 @@ from .schemas import NEWSLETTER_SIGNABLE_PROFILE_STATUSES, AccountStructuredInpu
 from .security import SecretCipher, mask_recovery
 from .notifications import notification_settings, publish, safe_notification_settings
 from .runtime import close_local_browser, launch_local_browser, local_browser_is_alive, local_browser_profiles_alive, remove_local_profile, resolve_browser_executable
+from .profile_compaction import compact_closed_profile
 from .operator_desktop import ensure_operator_desktop
 from .observer import BrowserObserver
 from .newsletter_discovery import NewsletterDiscoveryError, validate_newsletter_runtime_url
@@ -77,13 +78,13 @@ _UNSET = object()
 # Keep the reservation and the browser hand-off atomic inside this process so
 # two rapid bulk clicks cannot both pass the profile check and then kill each
 # other's Chrome instance during launch.
-_ACCOUNT_START_LOCKS: dict[str, threading.Lock] = {}
+_ACCOUNT_START_LOCKS: dict[str, threading.RLock] = {}
 _ACCOUNT_START_LOCKS_GUARD = threading.Lock()
 
 
-def _account_start_lock(account_id: str) -> threading.Lock:
+def _account_start_lock(account_id: str) -> threading.RLock:
     with _ACCOUNT_START_LOCKS_GUARD:
-        return _ACCOUNT_START_LOCKS.setdefault(account_id, threading.Lock())
+        return _ACCOUNT_START_LOCKS.setdefault(account_id, threading.RLock())
 
 
 def _worker_token() -> str:
@@ -1568,6 +1569,7 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
         db.commit()
         return get_login_job(db, organization_id, job.id)
     if next_state == "CANCELLED":
+        closed_account_ids: set[str] = set()
         for item in db.scalars(select(LoginJobItem).where(LoginJobItem.job_id == job.id, LoginJobItem.state.in_(["QUEUED", "RUNNING"]))).all():
             if item.session_id:
                 session = get_session(db, organization_id, item.session_id)
@@ -1583,6 +1585,7 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
                     session.profile.active_session_id = None
                     session.profile.last_closed_at = now
                     _prune_unsaved_profile_folder(session)
+                    closed_account_ids.add(session.account_id)
                     item.session_id = None
             if item.state == "RUNNING":
                 _release_item_lease(db, item)
@@ -1594,6 +1597,12 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
         db.flush()
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action=f"login_job.{next_state.lower()}", target_type="login_job", target_id=job.id, result="success", metadata_json={"concurrency_limit": job.concurrency_limit}))
     db.commit()
+    if next_state == "CANCELLED":
+        for closed_account_id in closed_account_ids:
+            try:
+                compact_account_profile(db, organization_id, "system", closed_account_id)
+            except Exception:
+                logger.exception("post-close profile cache compaction failed for account %s", closed_account_id)
     return get_login_job(db, organization_id, job.id)
 
 
@@ -1926,6 +1935,12 @@ def _on_observer_browser_closed(session_id: str) -> None:
             _maybe_start_newsletter_confirmation(db, session)
             if newsletter_task_id and newsletter_job is not None:
                 _maybe_dispatch_newsletter_next(db, newsletter_job)
+            # Queue dispatch has priority. If it immediately reuses this
+            # account, compaction safely skips it and runs after the last close.
+            try:
+                compact_account_profile(db, session.organization_id, "system", session.account_id)
+            except Exception:
+                logger.exception("post-close profile cache compaction failed for account %s", session.account_id)
     except Exception:  # noqa: BLE001 - observer shutdown must remain best effort
         db.rollback()
         logger.exception("browser-close bookkeeping failed for session %s", session_id)
@@ -2643,6 +2658,12 @@ def recover_orphaned_sessions(db: Session, organization_id: str, actor_id: str =
         recovered += 1
     if recovered:
         db.commit()
+        for session in rows:
+            if session.state == "CLOSED":
+                try:
+                    compact_account_profile(db, organization_id, "system", session.account_id)
+                except Exception:
+                    logger.exception("startup profile cache compaction failed for account %s", session.account_id)
         logger.info("startup recovered %s orphaned active session%s", recovered, "" if recovered == 1 else "s")
     return recovered
 
@@ -4359,6 +4380,11 @@ def record_session_event(db: Session, organization_id: str, actor_id: str, sessi
     if event_type in {"LOGIN_COMPLETED", "VERIFICATION_REQUIRED", "ACCOUNT_NOT_FOUND"}:
         publish(db, organization_id, "account_status", f"Account status · {session.account.email}", f"{session.account.email}: {event_type.replace('_', ' ').title()}\nGroup: {session.account.group.name if session.account.group else 'Unassigned'}")
     _maybe_dispatch_next(db, job)
+    if session.state == "CLOSED":
+        try:
+            compact_account_profile(db, organization_id, "system", session.account_id)
+        except Exception:
+            logger.exception("post-close profile cache compaction failed for account %s", session.account_id)
     return get_session(db, organization_id, session.id)
 
 
@@ -4391,7 +4417,50 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.closed", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": session.account_id, "profile_id": session.profile_id}))
     db.commit()
     _maybe_dispatch_next(db, job)
+    # The callback can run before this commit when observer.stop joins the
+    # thread. Retry here; the live-process check skips any browser still closing.
+    try:
+        compact_account_profile(db, organization_id, "system", session.account_id)
+    except Exception:
+        logger.exception("post-close profile cache compaction failed for account %s", session.account_id)
     return get_session(db, organization_id, session.id)
+
+
+def compact_account_profile(db: Session, organization_id: str, actor_id: str, account_id: str) -> dict:
+    """Compact a single saved profile only when no session or Chrome owns it."""
+    with _account_start_lock(account_id):
+        account = db.scalar(select(GmailAccount).options(joinedload(GmailAccount.browser_profile)).where(
+            GmailAccount.organization_id == organization_id,
+            GmailAccount.id == account_id,
+            GmailAccount.lifecycle_status != "ARCHIVED",
+            GmailAccount.account_type != "EXTERNAL_RECIPIENT",
+        ))
+        if not account:
+            raise ImportValidationError("Account not found")
+        profile = account.browser_profile
+        result = {"account_id": account.id, "email": account.email, "status": "MISSING", "removed_bytes": 0, "removed_directories": 0}
+        if not profile:
+            return result
+        active = db.scalar(select(BrowserSession.id).where(
+            BrowserSession.organization_id == organization_id,
+            BrowserSession.account_id == account_id,
+            BrowserSession.state.in_(ACTIVE_SESSION_STATES),
+        ).limit(1))
+        if active or profile.active_session_id or profile.lock_state == "LOCKED" or profile.status == "OPEN" or profile.id in local_browser_profiles_alive({profile.id}):
+            return {**result, "status": "SKIPPED_ACTIVE"}
+        try:
+            cleaned = compact_closed_profile(profile.id)
+        except (OSError, ValueError) as exc:
+            logger.warning("profile cache compaction failed for account %s: %s", account.id, type(exc).__name__)
+            return {**result, "status": "FAILED"}
+        result.update(cleaned)
+        if cleaned["removed_directories"]:
+            db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id,
+                action="browser_profile.cache_compacted", target_type="browser_profile", target_id=profile.id,
+                result="success", metadata_json={"account_id": account.id, "removed_bytes": cleaned["removed_bytes"],
+                    "removed_directories": cleaned["removed_directories"]}))
+            db.commit()
+        return result
 
 
 def observe_session_page(db: Session, organization_id: str, actor_id: str, session_id: str, url: str, title: str, text: str) -> tuple[str, str, BrowserSession]:

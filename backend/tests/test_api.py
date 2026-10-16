@@ -30,6 +30,27 @@ def test_employees_endpoint_lists_workspace_employees() -> None:
     assert isinstance(response.json(), list)
 
 
+def test_profile_compaction_respects_operator_group_access() -> None:
+    from unittest.mock import patch
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        first = client.post("/api/v1/accounts/single", json={"email": "compact-one@example.com", "password": "secret", "group_id": groups[0]["id"]}).json()
+        second = client.post("/api/v1/accounts/single", json={"email": "compact-two@example.com", "password": "secret", "group_id": groups[1]["id"]}).json()
+    operator = CurrentUser("operator-compact", settings.demo_org_id, "Operator", "operator@example.com", "ACCOUNT_OPERATOR", {groups[0]["id"]: "OPERATOR", groups[1]["id"]: "VIEWER"})
+    with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            targets = client.get("/api/v1/profiles/compact-targets")
+            assert targets.status_code == 200
+            assert [item["id"] for item in targets.json()["items"]] == [first["id"]]
+            assert client.post("/api/v1/profiles/compact", json={"account_ids": [second["id"]]}).status_code == 404
+            assert client.post("/api/v1/profiles/compact", json={"account_ids": [first["id"], second["id"]]}).status_code == 404
+            result = client.post("/api/v1/profiles/compact", json={"account_ids": [first["id"]]})
+            assert result.status_code == 200
+            assert result.json()["results"][0]["account_id"] == first["id"]
+
+
 def test_production_api_requires_bearer_token() -> None:
     from unittest.mock import MagicMock, patch
 

@@ -68,6 +68,8 @@ With an enabled workspace 2Captcha key, a visible reCAPTCHA v2 or standalone Tur
 
 ## Validation and sensitive values
 
+- Browser profile compaction runs after the persistent Chrome context closes and is also available from Accounts for selected or all operator-accessible accounts. It removes only exact Chromium cache directories; account cookies, site storage, Service Workers, preferences, and unknown data remain untouched. A locked, active, or still-running profile is skipped and reported. Manual progress counts processed accounts and reports actual cache bytes removed.
+
 - Backup creation opens a selection dialog before any work starts. The database and encrypted credentials are required; browser profiles and deployment configuration are optional and selected by default. The archive records the selected components. Restoring an archive without profiles preserves the server's live profile directory; restoring one without deployment configuration does not create an empty staged configuration directory. A full safety snapshot is made before either restore.
 
 - Email is normalized case-insensitively for deduplication.

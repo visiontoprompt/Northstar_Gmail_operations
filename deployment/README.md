@@ -28,6 +28,12 @@ The Accounts action bar can upload a ZIP or RAR profile archive for one selected
 
 Close affected browser sessions before importing. Locked or running profiles are reported and left unchanged. Replacement moves the previous directory to a timestamped safety copy under `PROFILE_ROOT/../profile-import-safety/` before installing the new one. Keep that directory in your backup plan until imports have been verified. The installer includes `unar` for RAR extraction and rerunning it installs the dependency on an existing server. Uploaded archives are limited to 20 GB and the extracted contents to 40 GB; allow additional temporary disk space during import. Profile archives can contain live cookies and other account data, so store and transfer them securely.
 
+## Browser profile cache compaction
+
+Northstar compacts a saved profile after its Chrome context has closed. Accounts → **Compact profiles** can also check selected accounts or all accounts accessible to the operator, showing real per-account results and bytes of cache files removed. Open or locked profiles are skipped. This does not change credentials or account authentication state.
+
+The cleanup allowlist contains only directories named `Cache`, `Code Cache`, `GPUCache`, and `Media Cache` directly under a Chrome user-data directory or a standard profile directory (`Default`, `System Profile`, or `Profile N`). It never searches for arbitrary `cache` names. `Local State`, `Network/Cookies`, `Preferences`, `Local Storage`, `IndexedDB`, `Service Worker` (including its `CacheStorage`), and other unknown files remain untouched. The app checks both its session lock and live Chrome processes before removal and does not follow symlinked cache directories. The cache will gradually grow again as Chrome visits sites. No installer or schema change is needed for this feature; updating the application code is sufficient.
+
 All browser windows share one desktop, so multiple concurrent sessions may overlap. Use Alt+Tab in the viewer to switch between windows. The application worker cap is set to 10; the account UI's configured concurrency remains the operational limit. Session state and profile locks continue to be managed by the existing app.
 
 ## Services and checks

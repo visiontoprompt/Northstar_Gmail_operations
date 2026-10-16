@@ -463,6 +463,17 @@ class AccountMetadataUpdate(BaseModel):
         return " ".join(value.split()) if value is not None and value.strip() else None
 
 
+class ProfileCompactRequest(BaseModel):
+    account_ids: list[str] = Field(min_length=1, max_length=25)
+
+    @field_validator("account_ids")
+    @classmethod
+    def unique_account_ids(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("Account IDs must be unique")
+        return value
+
+
 class AccountTagsUpdate(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=20)
 

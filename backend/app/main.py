@@ -24,6 +24,7 @@ from .db import Base, SessionLocal, engine, get_db, verify_production_schema
 from .models import AccountGroup, AuditEvent, BrowserProfile, BrowserSession, Employee, EmployeeAuth, EmployeeSession, GmailAccount, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterGroup, NewsletterJob, NewsletterSubscription, Organization, OvhProxyGroupLink, ProxyInventory
 from .schemas import AccountDeleteRequest, AccountListResponse, AccountMetadataUpdate, AccountTagsUpdate, AccountPreferencesApplyRequest, AccountPreferencesResponse, AccountPreferencesUpdate, AccountResponse, AccountStructuredInput, AlertTopicResponse, AlertsOperationRequest, AuthStatusResponse, AuditEventResponse, BrowserProfileResponse, BrowserSessionResponse, BulkImportRequest, BulkPreviewRequest, BulkPreviewResponse, ContactFileResponse, ContactsImportRequest, ContactsImportResponse, CredentialChangePlanConfirm, CredentialChangePlanCreate, CredentialChangePlanResponse, CredentialPlaintextResponse, CredentialRecordListResponse, CredentialRevisionResponse, CredentialRotateResponse, CredentialUpdate, EmployeeAuthResponse, EmployeeCreate, EmployeeGroupAccessResponse, EmployeeGroupAccessUpdate, EmployeeIdentityResponse, EmployeeLoginRequest, EmployeePasswordSet, EmployeePermissionsResponse, EmployeeResponse, EmployeeUpdate, GroupCreate, GroupMoveRequest, GroupResponse, GroupUpdate, ImportSummary, LoginJobCreate, LoginJobProgressResponse, LoginJobResponse, MailWorkflowRequest, NewsletterAccountIdentityResponse, NewsletterAccountIdentityUpdate, NewsletterAccountTargetsRequest, NewsletterBulkDiscoveryResponse, NewsletterCatalogImportResponse, NewsletterConfirmationTestRequest, NewsletterConfirmationTestResponse, NewsletterCreate, NewsletterDirectorySeedResponse, NewsletterDiscoveryResponse, NewsletterGroupCreate, NewsletterGroupResponse, NewsletterGroupUpdate, NewsletterHealthResponse, NewsletterIdentityGenerateRequest, NewsletterIdentityGenerateResponse, NewsletterJobBulkDelete, NewsletterJobCreate, NewsletterJobListResponse, NewsletterJobResponse, NewsletterJobTaskSelection, NewsletterProfileCreate, NewsletterProfileDetailResponse, NewsletterProfileResponse, NewsletterProfileUpdate, NewsletterRediscoveryResponse, NewsletterResponse, NewsletterSkillResponse, NewsletterSignupTestRequest, NewsletterSignupTestResponse, NewsletterSubscriptionListResponse, NewsletterSubscriptionResponse, NewsletterUpdate, NotificationTestRequest, OperationDraftCreate, OperationDraftResponse, PageObservationCreate, PageObservationResponse, PasswordResetConfirm, PasswordResetRequest, ProxyAssignmentRequest, ProxyBulkImportRequest, ProxyBulkImportResponse, ProxyDeleteRequest, ProxyGroupAssignmentRequest, ProxyGroupDistributionRequest, ProxyResponse, ProxyTestRequest, ProxyTestResponse, ProxyUpdate, SessionEventCreate, SessionStartRequest, WorkspaceSettingsResponse, WorkspaceSettingsUpdate
 from .schemas import MailWorkflowBulkRequest, OvhPowerRequest, OvhProxyGroupLinkRequest
+from .schemas import ProfileCompactRequest
 from .schemas import ProxyGroupCreateRequest, ProxyGroupUpdateRequest, GoDaddyAccountCreate, GoDaddyAccountUpdate, GoDaddyDnsGroupReplace, GoDaddyDnsRecord
 from .godaddy_service import GoDaddyError, create_client as godaddy_client, list_accounts as list_godaddy_accounts, remove_account as remove_godaddy_account, save_account as save_godaddy_account
 from .ovh_service import OvhError, configured_client, record_power_action
@@ -74,6 +75,7 @@ from .newsletter_service import (
 from .newsletter_discovery import NewsletterDiscoveryError, discover_newsletter
 from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, assign_proxy_accounts, cancel_credential_change_plan, cleanup_unsaved_invalid_profiles, close_active_sessions, close_group_sessions, close_session, confirm_credential_change_plan, contact_file_response, create_credential_change_plan, create_employee, create_login_job, create_operation_draft, credential_records, credential_revisions, credential_plaintext, delete_account_group, delete_contact_file, dispatch_login_job, distribute_proxies_to_group, generate_newsletter_account_identity, get_account, get_account_preferences, get_employee_group_access, get_login_job, get_newsletter_account_identity, get_session, get_workspace_settings, import_accounts, import_proxy_inventory, list_accounts, list_browser_profiles, list_contact_files, list_credential_change_plans, list_employees, list_login_jobs, list_operation_drafts, list_proxies, list_sessions, local_browser_is_alive, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, remove_proxy_assignments, replace_proxy_group_assignments, resume_login_job, rotate_account_credentials, session_response, set_employee_group_access, start_account_preferences_operation, start_addons_operation, start_alerts_operation, start_contacts_import, start_credential_change_plan, start_labels_markers_operation, start_login_session, start_mail_workflow, start_newsletter_confirmation_test, start_newsletter_signup_test, start_security_operation, test_proxy, update_account_metadata, update_account_tags, update_account_preferences, update_employee, update_credentials, update_group, update_login_job_state, update_newsletter_account_identity, update_proxy, update_workspace_settings, upload_account_preference_avatar
 from .service import create_mail_workflow_job
+from .service import compact_account_profile
 from .service import create_proxy_group, list_proxy_groups, update_proxy_group
 from .notifications import NotificationError, consume_password_reset, create_password_reset, send_group_status_report, send_test, update_notification_settings, publish
 from .alerts import list_alert_topics, seed_default_alert_topics
@@ -1057,6 +1059,36 @@ def accounts(q: str | None = Query(default=None, max_length=320), group_id: str 
     if visible is not None and group_id and group_id not in visible:
         raise HTTPException(status_code=404, detail="Resource not found")
     return list_accounts(db, settings.demo_org_id, q, group_id, status_filter, page, page_size, visible_group_ids=visible)
+
+
+@app.post("/api/v1/profiles/compact")
+def compact_profiles(payload: ProfileCompactRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    operator = _account_operator(request, db)
+    accounts = db.scalars(select(GmailAccount).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.id.in_(payload.account_ids),
+        GmailAccount.lifecycle_status != "ARCHIVED",
+        GmailAccount.account_type != "EXTERNAL_RECIPIENT",
+    )).all()
+    if len(accounts) != len(payload.account_ids) or any(not operator.can_access_group(account.group_id, "OPERATOR") for account in accounts):
+        raise HTTPException(status_code=404, detail="Account not found")
+    results = [compact_account_profile(db, settings.demo_org_id, operator.employee_id, account_id) for account_id in payload.account_ids]
+    return {"results": results, "removed_bytes": sum(int(row["removed_bytes"]) for row in results)}
+
+
+@app.get("/api/v1/profiles/compact-targets")
+def compact_profile_targets(request: Request, db: Session = Depends(get_db)) -> dict:
+    operator = _account_operator(request, db)
+    query = select(GmailAccount.id, GmailAccount.email).where(
+        GmailAccount.organization_id == settings.demo_org_id,
+        GmailAccount.lifecycle_status != "ARCHIVED",
+        GmailAccount.account_type != "EXTERNAL_RECIPIENT",
+    )
+    if not operator.is_admin:
+        group_ids = [group_id for group_id in operator.group_access if operator.can_access_group(group_id, "OPERATOR")]
+        query = query.where(GmailAccount.group_id.in_(group_ids or ["__no_access__"]))
+    rows = db.execute(query.order_by(GmailAccount.email)).all()
+    return {"items": [{"id": account_id, "email": email} for account_id, email in rows], "total": len(rows)}
 
 
 @app.get("/api/v1/accounts/{account_id}", response_model=AccountResponse)

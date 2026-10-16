@@ -2369,6 +2369,34 @@ html[data-theme="dark"] .ovh-recovery-badge.auth_failed, html[data-theme="dark"]
 /* Admin backup and restore surface */
 .backup-workspace { display: grid; gap: 14px; }
 .profile-import-section { gap: 17px; }
+.profile-compact-modal { width: min(630px, calc(100vw - 32px)); }
+.profile-compact-body { display: grid; gap: 16px; }
+.profile-compact-safety { display: flex; gap: 12px; padding: 13px; border: 1px solid var(--color-line); border-radius: 10px; background: color-mix(in srgb, var(--color-success) 7%, var(--color-surface)); }
+.profile-compact-safety svg { flex: 0 0 auto; color: var(--color-success); }
+.profile-compact-safety div { display: grid; gap: 4px; color: var(--color-ink); font-size: 12px; }
+.profile-compact-safety span { color: var(--color-muted); line-height: 1.5; }
+.profile-compact-scope { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+.profile-compact-scope legend { margin-bottom: 8px; color: var(--color-ink); font-size: 12px; font-weight: 700; }
+.profile-compact-scope label { display: flex; gap: 10px; padding: 11px 12px; border: 1px solid var(--color-line); border-radius: 10px; background: var(--color-surface); cursor: pointer; }
+.profile-compact-scope label:has(input:checked) { border-color: var(--color-primary); background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface)); }
+.profile-compact-scope label:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+.profile-compact-scope input { margin-top: 3px; accent-color: var(--color-primary); }
+.profile-compact-scope label span { display: grid; gap: 3px; }
+.profile-compact-scope strong { color: var(--color-ink); font-size: 12px; }
+.profile-compact-scope small { color: var(--color-muted); font-size: 11px; }
+.profile-compact-progress { display: grid; gap: 8px; }
+.profile-compact-progress > div { display: flex; justify-content: space-between; color: var(--color-ink); font-size: 12px; }
+.profile-compact-progress progress { width: 100%; height: 7px; accent-color: var(--color-primary); }
+.profile-compact-outcome { display: grid; gap: 10px; }
+.profile-compact-summary { display: grid; gap: 5px; color: var(--color-ink); font-size: 12px; }
+.profile-compact-summary > span { display: flex; align-items: center; gap: 5px; }
+.profile-compact-summary svg { color: var(--color-success); }
+.profile-compact-summary small { color: var(--color-muted); }
+.profile-compact-list { max-height: 200px; overflow-y: auto; border: 1px solid var(--color-line); border-radius: 10px; }
+.profile-compact-list > div { display: flex; justify-content: space-between; gap: 14px; padding: 8px 11px; color: var(--color-ink-soft); font-size: 11px; }
+.profile-compact-list > div + div { border-top: 1px solid var(--color-line); }
+.profile-compact-list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-compact-list strong { flex: 0 0 auto; color: var(--color-ink); }
 .profile-import-section > .button { align-self: flex-start; }
 .profile-import-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(250px, 1fr); gap: 18px; width: 100%; }
 .profile-import-picker { display: grid; align-content: start; gap: 7px; min-width: 0; }
