@@ -75,7 +75,7 @@ from .newsletter_service import (
 from .newsletter_discovery import NewsletterDiscoveryError, discover_newsletter
 from .service import _UNSET, ImportValidationError, account_response, add_account, add_contact_file, archive_account, assign_proxy_accounts, cancel_credential_change_plan, cleanup_unsaved_invalid_profiles, close_active_sessions, close_group_sessions, close_session, confirm_credential_change_plan, contact_file_response, create_credential_change_plan, create_employee, create_login_job, create_operation_draft, credential_records, credential_revisions, credential_plaintext, delete_account_group, delete_contact_file, dispatch_login_job, distribute_proxies_to_group, generate_newsletter_account_identity, get_account, get_account_preferences, get_employee_group_access, get_login_job, get_newsletter_account_identity, get_session, get_workspace_settings, import_accounts, import_proxy_inventory, list_accounts, list_browser_profiles, list_contact_files, list_credential_change_plans, list_employees, list_login_jobs, list_operation_drafts, list_proxies, list_sessions, local_browser_is_alive, login_job_progress, move_account_group, observe_session_page, preview_import, record_session_event, recover_orphaned_sessions, recover_stale_locks, remove_proxy_assignments, replace_proxy_group_assignments, resume_login_job, rotate_account_credentials, session_response, set_employee_group_access, start_account_preferences_operation, start_addons_operation, start_alerts_operation, start_contacts_import, start_credential_change_plan, start_labels_markers_operation, start_login_session, start_mail_workflow, start_newsletter_confirmation_test, start_newsletter_signup_test, start_security_operation, test_proxy, update_account_metadata, update_account_tags, update_account_preferences, update_employee, update_credentials, update_group, update_login_job_state, update_newsletter_account_identity, update_proxy, update_workspace_settings, upload_account_preference_avatar
 from .service import create_mail_workflow_job
-from .service import compact_account_profile
+from .service import compact_account_profile, reconcile_imported_profiles
 from .service import create_proxy_group, list_proxy_groups, update_proxy_group
 from .notifications import NotificationError, consume_password_reset, create_password_reset, send_group_status_report, send_test, update_notification_settings, publish
 from .alerts import list_alert_topics, seed_default_alert_topics
@@ -142,6 +142,7 @@ def startup() -> None:
                 db.add(AccountGroup(id=f"group_{key}", organization_id=org.id, name=name, description=description, capacity=300))
             db.commit()
         seed_default_alert_topics(db, settings.demo_org_id)
+        reconcile_imported_profiles(db, settings.demo_org_id)
         cleanup_unsaved_invalid_profiles(db, settings.demo_org_id)
         recover_orphaned_sessions(db, settings.demo_org_id)
     finally:

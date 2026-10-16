@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import AccountGroup, BrowserProfile, GmailAccount, Organization
-from app import profile_import
+from app import profile_import, service
 from app.profile_import import ProfileImportError, import_profiles
 from app.service import profile_folder_name
 
@@ -54,7 +54,10 @@ def test_bulk_import_maps_account_folders_and_skips_existing(workspace):
     assert (result["imported"], result["skipped"], result["unmatched"]) == (1, 1, ["unknown@example.com"])
     assert (current / "Preferences").read_bytes() == b"original"
     assert (root / "profile-acct-b" / "Default" / "Preferences").read_bytes() == b"incoming-b"
-    assert db.get(GmailAccount, "acct-b").profile_status == "SAVED"
+    account = db.get(GmailAccount, "acct-b")
+    assert account.profile_status == "IMPORTED"
+    assert account.login_status == "PROFILE_IMPORTED"
+    assert account.browser_profile.authenticated_at is None
 
 
 def test_replace_keeps_previous_profile_and_refuses_locked_profile(workspace):
@@ -111,3 +114,58 @@ def test_failed_install_restores_previous_profile(workspace, monkeypatch):
     result = import_profiles(db, "org-import", "admin", zipped, "replace", "acct-a")
     assert result["failed"] == 1
     assert (current / "Preferences").read_bytes() == b"original"
+
+
+def test_imported_profile_opens_gmail_before_claiming_authentication(workspace, monkeypatch):
+    db, root, tmp_path = workspace
+    zipped = archive(tmp_path / "connected.zip", {"Default/Preferences": b"browser-state", "Default/Network/Cookies": b"saved-cookies"})
+    assert import_profiles(db, "org-import", "admin", zipped, "replace", "acct-a")["imported"] == 1
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(profile_root=str(root), browser_desktop_enabled=False,
+        browser_launch_enabled=True, browser_observer_enabled=False, browser_observe_interval=1.0, worker_enabled=False))
+    monkeypatch.setattr(service, "launch_local_browser", lambda *_args: (True, None))
+    starts = []
+    monkeypatch.setattr(service, "_start_observer", lambda *_args, **kwargs: starts.append(kwargs) or True)
+    session = service.start_login_session(db, "org-import", "admin", "acct-a")
+    assert session.state == "RUNNING"
+    assert session.login_state == "PROFILE_CHECK"
+    assert starts[0]["imported_profile"] is True
+    assert db.get(GmailAccount, "acct-a").login_status == "PROFILE_IMPORTED"
+    assert session.profile.authenticated_at is None
+    service.observe_session_page(db, "org-import", "admin", session.id, "https://mail.google.com/mail/u/0/#inbox", "Inbox", "Inbox")
+    assert db.get(GmailAccount, "acct-a").login_status == "AUTHENTICATED"
+    assert db.get(BrowserProfile, "profile-acct-a").authenticated_at is not None
+    assert (root / "profile-acct-a" / "Default" / "Network" / "Cookies").read_bytes() == b"saved-cookies"
+
+
+def test_imported_profile_survives_login_prompt_and_close(workspace, monkeypatch):
+    db, root, tmp_path = workspace
+    zipped = archive(tmp_path / "connected.zip", {"Default/Preferences": b"browser-state", "Default/Network/Cookies": b"saved-cookies"})
+    import_profiles(db, "org-import", "admin", zipped, "replace", "acct-a")
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(profile_root=str(root), browser_desktop_enabled=False,
+        browser_launch_enabled=True, browser_observer_enabled=False, browser_observe_interval=1.0, worker_enabled=False))
+    monkeypatch.setattr(service, "launch_local_browser", lambda *_args: (True, None))
+    monkeypatch.setattr(service, "_start_observer", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(service, "_stop_observer", lambda *_args: True)
+    session = service.start_login_session(db, "org-import", "admin", "acct-a")
+    service.observe_session_page(db, "org-import", "admin", session.id, "https://accounts.google.com/v3/signin/identifier", "Sign in", "Email or phone")
+    assert db.get(GmailAccount, "acct-a").login_status == "REQUIRED"
+    service.close_session(db, "org-import", "admin", session.id)
+    assert db.get(BrowserProfile, "profile-acct-a").status == "IMPORTED"
+    assert db.get(GmailAccount, "acct-a").profile_status == "IMPORTED"
+    assert (root / "profile-acct-a" / "Default" / "Network" / "Cookies").read_bytes() == b"saved-cookies"
+
+
+def test_legacy_import_record_is_reconciled_without_claiming_authentication(workspace, monkeypatch):
+    db, root, _tmp_path = workspace
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(profile_root=str(root)))
+    profile = db.get(BrowserProfile, "profile-acct-a")
+    account = db.get(GmailAccount, "acct-a")
+    profile.status = "SAVED"
+    account.profile_status = "SAVED"
+    account.login_status = "NOT_STARTED"
+    (root / profile.id / "Default").mkdir(parents=True)
+    db.commit()
+    assert service.reconcile_imported_profiles(db, "org-import") == 1
+    assert profile.status == "IMPORTED"
+    assert account.login_status == "PROFILE_IMPORTED"
+    assert profile.authenticated_at is None

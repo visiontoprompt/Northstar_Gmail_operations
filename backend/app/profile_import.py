@@ -203,11 +203,15 @@ def import_profiles(db: Session, organization_id: str, actor_id: str, archive_pa
                     profile = BrowserProfile(id=profile_id, organization_id=organization_id, account_id=account.id,
                         storage_reference=account.profile_storage_ref or f"profiles/{organization_id}/{account.id}", status="SAVED", lock_state="UNLOCKED")
                     db.add(profile)
-                profile.status = "SAVED"
-                profile.authenticated_at = None  # Imported cookies are not authentication evidence.
+                # Preserve the imported user-data directory without claiming
+                # its Google session is still valid on this server. The first
+                # browser launch checks Gmail and records authentication only
+                # after observing the signed-in page.
+                profile.status = "IMPORTED"
+                profile.authenticated_at = None
                 account.profile_id = profile_id
-                account.profile_status = "SAVED"
-                account.login_status = "NOT_STARTED"
+                account.profile_status = "IMPORTED"
+                account.login_status = "PROFILE_IMPORTED"
                 account.gmail_status = "NOT_CHECKED"
                 db.add(AuditEvent(id=f"audit_{uuid.uuid4().hex[:18]}", organization_id=organization_id, actor_id=actor_id,
                     action="browser_profile.imported", target_type="browser_profile", target_id=profile_id, result="success",

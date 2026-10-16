@@ -1580,10 +1580,14 @@ def update_login_job_state(db: Session, organization_id: str, actor_id: str, job
                     session.state = "CLOSED"
                     session.closed_at = now
                     session.last_event_at = now
-                    session.profile.status = "RESERVED"
+                    imported_pending = bool((session.metadata_json or {}).get("imported_profile_pending")) and session.profile.authenticated_at is None
+                    session.profile.status = "IMPORTED" if imported_pending else "RESERVED"
                     session.profile.lock_state = "UNLOCKED"
                     session.profile.active_session_id = None
                     session.profile.last_closed_at = now
+                    if imported_pending:
+                        session.account.profile_status = "IMPORTED"
+                        session.account.login_status = "REQUIRED" if session.login_state == "REQUIRED" else "PROFILE_IMPORTED"
                     _prune_unsaved_profile_folder(session)
                     closed_account_ids.add(session.account_id)
                     item.session_id = None
@@ -1683,7 +1687,7 @@ def _resolve_two_captcha_key(organization_id: str) -> str | None:
             return None
 
 
-def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login", contacts_csv_path: str | None = None, addon_candidates: list[dict[str, str]] | None = None, mail_workflow: dict[str, object] | None = None, alerts_topics: list[str] | None = None, newsletter_config: dict[str, object] | None = None, account_preferences: dict[str, object] | None = None) -> bool:
+def _start_observer(session_id: str, profile_id: str, organization_id: str, actor_id: str, purpose: str = "login", contacts_csv_path: str | None = None, addon_candidates: list[dict[str, str]] | None = None, mail_workflow: dict[str, object] | None = None, alerts_topics: list[str] | None = None, newsletter_config: dict[str, object] | None = None, account_preferences: dict[str, object] | None = None, imported_profile: bool = False) -> bool:
     settings = get_settings()
     if not settings.browser_observer_enabled:
         logger.warning("AUTOMATION DISABLED: session %s opened a browser window but BROWSER_OBSERVER_ENABLED is false; automation will not run", session_id)
@@ -1733,6 +1737,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
             if purpose == "newsletter_confirm"
             else str((newsletter_config or {}).get("signup_url") or "")
             if purpose == "newsletter"
+            else "https://mail.google.com/"
+            if purpose == "login" and imported_profile
             else None
         ),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
@@ -2461,10 +2467,11 @@ def _report_observer_event(session_id: str, event: str, detail: str = "", result
                 session.account.login_status = "AUTHENTICATED"
                 session.account.profile_status = "SAVED"
             elif event == "login.failed" and session.profile.authenticated_at is None:
-                session.account.login_status = "NOT_STARTED"
-                session.account.profile_status = "RESERVED"
+                imported_pending = bool((session.metadata_json or {}).get("imported_profile_pending"))
+                session.account.login_status = "PROFILE_IMPORTED" if imported_pending else "NOT_STARTED"
+                session.account.profile_status = "IMPORTED" if imported_pending else "RESERVED"
             if not newsletter_reuse_requested:
-                session.profile.status = "RESERVED"
+                session.profile.status = "IMPORTED" if (session.metadata_json or {}).get("imported_profile_pending") and session.profile.authenticated_at is None else "RESERVED"
                 session.profile.lock_state = "UNLOCKED"
                 session.profile.active_session_id = None
                 session.profile.last_closed_at = now
@@ -2608,9 +2615,45 @@ def _prune_unsaved_profile_folder(session: BrowserSession) -> None:
         return
     if session.profile is not None and session.profile.authenticated_at is not None:
         return
+    # An imported user-data directory is valuable even when Google asks for
+    # fresh verification. Never treat it like disposable first-login scratch.
+    if (session.metadata_json or {}).get("imported_profile_pending") or (session.profile and session.profile.status == "IMPORTED"):
+        return
     if session.login_state == "AUTHENTICATED":
         return
     remove_local_profile(session.profile_id)
+
+
+def reconcile_imported_profiles(db: Session, organization_id: str) -> int:
+    """Repair imports made before the imported/verification state existed.
+
+    Older uploads wrote SAVED while clearing authenticated_at and marking the
+    account NOT_STARTED or REQUIRED. Only that combination is migrated; no browser
+    cookie or file is treated as proof of a valid Google session.
+    """
+    rows = db.scalars(select(BrowserProfile).join(GmailAccount).where(
+        BrowserProfile.organization_id == organization_id,
+        BrowserProfile.status == "SAVED",
+        BrowserProfile.authenticated_at.is_(None),
+        GmailAccount.profile_status == "SAVED",
+        GmailAccount.login_status.in_(["NOT_STARTED", "REQUIRED"]),
+    )).all()
+    root = Path(get_settings().profile_root).resolve()
+    changed = 0
+    for profile in rows:
+        folder = root / profile.id
+        if folder.is_dir() and not folder.is_symlink():
+            profile.status = "IMPORTED"
+            profile.account.profile_status = "IMPORTED"
+            profile.account.login_status = "PROFILE_IMPORTED"
+        else:
+            profile.status = "RESERVED"
+            profile.account.profile_status = "RESERVED"
+        changed += 1
+    if changed:
+        db.commit()
+        logger.info("reconciled %s legacy uploaded browser profile records", changed)
+    return changed
 
 
 def cleanup_unsaved_invalid_profiles(db: Session, organization_id: str) -> int:
@@ -2676,13 +2719,17 @@ def _recover_stale_session(db: Session, organization_id: str, actor_id: str, ses
     session.state = "CLOSED"
     session.closed_at = now
     session.last_event_at = now
-    session.profile.status = "RESERVED"
+    imported_pending = bool((session.metadata_json or {}).get("imported_profile_pending")) and session.profile.authenticated_at is None
+    session.profile.status = "IMPORTED" if imported_pending else "RESERVED"
     session.profile.lock_state = "UNLOCKED"
     session.profile.active_session_id = None
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
-        session.account.login_status = "NOT_STARTED"
-        session.account.profile_status = "RESERVED"
+        session.account.login_status = "REQUIRED" if imported_pending else "NOT_STARTED"
+        session.account.profile_status = "IMPORTED" if imported_pending else "RESERVED"
+    elif imported_pending:
+        session.account.login_status = "PROFILE_IMPORTED"
+        session.account.profile_status = "IMPORTED"
     elif session.profile.authenticated_at is not None:
         session.account.login_status = "AUTHENTICATED"
         session.account.profile_status = "SAVED"
@@ -3063,6 +3110,8 @@ def _session_automation_hint(session: BrowserSession) -> str | None:
         return "Launcher and observer are both required for automation (BROWSER_LAUNCH_ENABLED and BROWSER_OBSERVER_ENABLED must be true)."
     if not bool(session.metadata_json.get("observer_attached")):
         return "Browser open but the observer could not attach; check that playwright is installed and BROWSER_OBSERVER_ENABLED=true."
+    if (session.metadata_json or {}).get("imported_profile_pending") and session.login_state == "PROFILE_CHECK":
+        return "Checking the imported browser profile in Gmail. If its saved sign-in is still valid, the account will be confirmed automatically."
     if not settings.browser_auto_login:
         return "Auto sign-in is disabled (BROWSER_AUTO_LOGIN=false); sign in manually in the opened browser."
     secret = session.account.secret if session.account else None
@@ -4005,6 +4054,9 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot open login sessions")
     profile = _ensure_browser_profile(db, account)
+    imported_profile = profile.authenticated_at is None and profile.status == "IMPORTED"
+    if imported_profile and not (Path(get_settings().profile_root) / profile.id).is_dir():
+        raise ImportValidationError("The imported browser profile files are missing on the server. Upload the profile again before opening it.")
     if purpose not in {"login", "reuse", "contacts", "labels_markers", "security", "addons", "mail", "alerts", "credential_change", "newsletter", "newsletter_confirm", "account_preferences"}:
         raise ImportValidationError("Session purpose is not supported")
     external_newsletter = purpose == "newsletter" and account.account_type == "EXTERNAL_RECIPIENT"
@@ -4059,6 +4111,8 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     if purpose == "alerts" and not alerts_topics:
         raise ImportValidationError("Choose at least one Google Alerts topic")
     session_metadata = {"boundary": "human_login", "purpose": purpose, "browser_opened": True, "process_id": process_id, "contacts_csv_path": contacts_csv_path}
+    if imported_profile:
+        session_metadata["imported_profile_pending"] = True
     if purpose == "mail":
         session_metadata["mail_workflow"] = dict(mail_workflow or {})
     if purpose == "addons":
@@ -4082,19 +4136,19 @@ def _start_login_session_locked(db: Session, organization_id: str, actor_id: str
     runtime_type = "LOCAL_CHROME_HEADLESS_EPHEMERAL" if external_newsletter and headless_newsletter else "LOCAL_CHROME_EPHEMERAL" if external_newsletter else "LOCAL_CHROME"
     session_metadata["headless_browser"] = headless_newsletter
     session_metadata["browser_mode"] = "HEADLESS" if headless_newsletter else "VISIBLE"
-    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, owner_employee_id=actor_id, state="RUNNING" if existing_auth else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "REQUIRED", runtime_type=runtime_type, metadata_json=session_metadata)
+    session = BrowserSession(id=session_id, organization_id=organization_id, account_id=account.id, profile_id=profile.id, owner_employee_id=actor_id, state="RUNNING" if existing_auth or imported_profile else "LOGIN_REQUIRED", login_state="AUTHENTICATED" if existing_auth else "PROFILE_CHECK" if imported_profile else "REQUIRED", runtime_type=runtime_type, metadata_json=session_metadata)
     profile.status = "OPEN"
     profile.lock_state = "LOCKED"
     profile.active_session_id = session.id
     profile.last_opened_at = utcnow()
     if not existing_auth:
-        account.login_status = "REQUIRED"
+        account.login_status = "PROFILE_IMPORTED" if imported_profile else "REQUIRED"
         account.profile_status = "OPEN"
     db.add(session)
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.started", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="session.browser_opened", target_type="browser_session", target_id=session.id, result="success", metadata_json={"account_id": account.id, "profile_id": profile.id, "runtime": "LOCAL_CHROME"}))
     db.commit()
-    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose, contacts_csv_path=contacts_csv_path, addon_candidates=addon_candidates, mail_workflow=observer_mail_workflow, alerts_topics=alerts_topics, newsletter_config=newsletter_config, account_preferences=account_preferences)
+    observer_started = _start_observer(session.id, profile.id, organization_id, actor_id, purpose=purpose, contacts_csv_path=contacts_csv_path, addon_candidates=addon_candidates, mail_workflow=observer_mail_workflow, alerts_topics=alerts_topics, newsletter_config=newsletter_config, account_preferences=account_preferences, imported_profile=imported_profile)
     logger.info("session %s: observer started=%s", session.id, observer_started)
     return get_session(db, organization_id, session.id)
 
@@ -4401,13 +4455,17 @@ def close_session(db: Session, organization_id: str, actor_id: str, session_id: 
     session.state = "CLOSED"
     session.last_event_at = now
     session.closed_at = now
-    session.profile.status = "RESERVED"
+    imported_pending = bool((session.metadata_json or {}).get("imported_profile_pending")) and session.profile.authenticated_at is None
+    session.profile.status = "IMPORTED" if imported_pending else "RESERVED"
     session.profile.lock_state = "UNLOCKED"
     session.profile.active_session_id = None
     session.profile.last_closed_at = now
     if session.login_state == "REQUIRED" and session.profile.authenticated_at is None:
-        session.account.login_status = "NOT_STARTED"
-        session.account.profile_status = "RESERVED"
+        session.account.login_status = "REQUIRED" if imported_pending else "NOT_STARTED"
+        session.account.profile_status = "IMPORTED" if imported_pending else "RESERVED"
+    elif imported_pending:
+        session.account.login_status = "PROFILE_IMPORTED"
+        session.account.profile_status = "IMPORTED"
     elif session.profile.authenticated_at is not None:
         session.account.login_status = "AUTHENTICATED"
         session.account.profile_status = "SAVED"
@@ -4472,6 +4530,18 @@ def observe_session_page(db: Session, organization_id: str, actor_id: str, sessi
     signal, action = classify_page(PageObservation(url=url, title=title, text=text))
     parsed = urlparse(url)
     metadata = {"account_id": session.account_id, "signal": signal.value, "host": parsed.hostname or "unknown", "path": parsed.path[:160]}
+    if signal == PageSignal.LOGIN_FORM and (session.metadata_json or {}).get("imported_profile_pending") and session.login_state == "PROFILE_CHECK":
+        # The uploaded cookies did not get us into Gmail. Only now is a
+        # login-required status supported by browser evidence.
+        session.state = "LOGIN_REQUIRED"
+        session.login_state = "REQUIRED"
+        session.account.login_status = "REQUIRED"
+        session.last_event_at = utcnow()
+        db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id,
+            action="browser_profile.imported_login_required", target_type="browser_profile", target_id=session.profile_id,
+            result="attention", metadata_json=metadata))
+        db.commit()
+        return signal.value, action.value, get_session(db, organization_id, session.id)
     if signal in {PageSignal.CAPTCHA, PageSignal.PHONE_VERIFICATION, PageSignal.MFA_OR_SECURITY_CHECK, PageSignal.RECOVERY_VERIFICATION}:
         if signal == PageSignal.MFA_OR_SECURITY_CHECK and is_totp_challenge_url(url) and _account_has_totp_secret(db, session):
             logger.info("session %s: MFA step on %s; auto sign-in will enter the TOTP", session_id, url)
