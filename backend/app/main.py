@@ -1249,10 +1249,11 @@ def create_account(payload: AccountStructuredInput, request: Request, db: Sessio
 
 
 @app.patch("/api/v1/accounts/{account_id}", response_model=AccountResponse)
-def edit_account_metadata(account_id: str, payload: AccountMetadataUpdate, db: Session = Depends(get_db)) -> dict:
+def edit_account_metadata(account_id: str, payload: AccountMetadataUpdate, request: Request, db: Session = Depends(get_db)) -> dict:
+    _account_access(request, db, account_id, "OPERATOR")
     try:
         proxy_value = payload.proxy if "proxy" in payload.model_fields_set else _UNSET
-        return update_account_metadata(db, settings.demo_org_id, "admin_demo", account_id, payload.proxy_label, payload.proxy_region, proxy_value)
+        return update_account_metadata(db, settings.demo_org_id, _actor(request, db), account_id, payload.proxy_label, payload.proxy_region, proxy_value)
     except ImportValidationError as exc:
         raise HTTPException(status_code=404 if "not found" in str(exc).lower() else 409, detail=str(exc)) from exc
 

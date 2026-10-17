@@ -674,6 +674,8 @@ def update_account_metadata(db: Session, organization_id: str, actor_id: str, ac
         raise ImportValidationError("Account not found")
     if account.lifecycle_status == "ARCHIVED":
         raise ImportValidationError("Archived accounts cannot be edited")
+    if proxy_value is not _UNSET and account.browser_profile and account.browser_profile.lock_state == "LOCKED":
+        raise ImportValidationError("Close active sessions for the affected account before changing its proxy")
     payload: dict = {}
     if account.secret:
         try:
@@ -3309,6 +3311,30 @@ def list_proxies(db: Session, organization_id: str, query_text: str | None = Non
             "account_refs": [],
             **_proxy_inventory_item(observation),
         }
+    # Older records can carry encrypted account proxy data without a matching
+    # ProxyInventory row. Include their stable proxy IDs in the shared list,
+    # but never expose accounts outside the caller's group scope.
+    legacy_assignments = db.execute(
+        select(GmailAccount.proxy_id, GmailAccount.proxy_label, GmailAccount.proxy_region)
+        .where(
+            GmailAccount.organization_id == organization_id,
+            GmailAccount.lifecycle_status != "ARCHIVED",
+            GmailAccount.proxy_id.is_not(None),
+        )
+    ).all()
+    for proxy_id, label, region in legacy_assignments:
+        grouped.setdefault(proxy_id, {
+            "id": proxy_id,
+            "label": label,
+            "proxy_group": None,
+            "region": region,
+            "status": "ASSIGNED",
+            "account_count": 0,
+            "authenticated_count": 0,
+            "account_emails": [],
+            "account_refs": [],
+            **_proxy_inventory_item(None),
+        })
     for account in accounts:
         if not account.proxy_id:
             continue
@@ -3322,10 +3348,9 @@ def list_proxies(db: Session, organization_id: str, query_text: str | None = Non
             item["label"] = account.proxy_label
         if item["region"] is None and account.proxy_region:
             item["region"] = account.proxy_region
-    if visible_group_ids is not None:
-        # Operators can inspect only proxy records attached to accounts in
-        # their assigned groups; unassigned inventory belongs to admins.
-        grouped = {key: item for key, item in grouped.items() if item["account_count"] > 0}
+    # Proxy endpoints are organization-shared inventory. Scoped users see the
+    # same endpoints as admins, while account counts and account references
+    # above remain limited to the groups they are allowed to inspect.
     if query_text:
         needle = query_text.strip().lower()
         grouped = {key: item for key, item in grouped.items() if needle in " ".join([str(item.get("id") or ""), str(item.get("label") or ""), str(item.get("proxy_group") or ""), str(item.get("region") or ""), str(item.get("provider") or ""), str(item.get("country") or ""), *item["account_emails"]]).lower()}
@@ -3736,10 +3761,12 @@ def distribute_proxies_to_group(db: Session, organization_id: str, actor_id: str
 def remove_proxy_assignments(db: Session, organization_id: str, actor_id: str, proxy_id: str, account_ids: list[str] | None = None, *, commit: bool = True) -> int:
     if _proxy_inventory_record(db, organization_id, proxy_id) is None and db.scalar(select(GmailAccount.id).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id)) is None:
         raise ImportValidationError("Proxy assignment not found")
-    query = select(GmailAccount).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").with_for_update()
+    query = select(GmailAccount).options(joinedload(GmailAccount.browser_profile), joinedload(GmailAccount.secret)).where(GmailAccount.organization_id == organization_id, GmailAccount.proxy_id == proxy_id, GmailAccount.lifecycle_status != "ARCHIVED").with_for_update(of=GmailAccount)
     if account_ids:
         query = query.where(GmailAccount.id.in_(account_ids))
     accounts = db.scalars(query).all()
+    if any(account.browser_profile and account.browser_profile.lock_state == "LOCKED" for account in accounts):
+        raise ImportValidationError("Close active sessions for the affected accounts before changing proxies")
     for account in accounts:
         account.proxy_id = None
         account.proxy_label = None

@@ -520,6 +520,55 @@ def test_group_operator_can_assign_proxy_only_inside_their_groups() -> None:
             assert denied.status_code == 404
 
 
+def test_proxy_inventory_is_shared_but_account_references_stay_group_scoped() -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        allowed_group, blocked_group = groups[0]["id"], groups[1]["id"]
+        allowed = client.post("/api/v1/accounts/single", json={"email": "proxy-public-allowed@example.com", "password": "secret", "group_id": allowed_group}).json()
+        blocked = client.post("/api/v1/accounts/single", json={"email": "proxy-public-hidden@example.com", "password": "secret", "group_id": blocked_group}).json()
+        shared = client.post("/api/v1/proxies/import", json={"lines": "198.51.100.81:8080 | Shared endpoint"}).json()["rows"][0]["proxy_id"]
+        private_to_other_group = client.post("/api/v1/proxies/assignments", json={"proxy": "198.51.100.82:8080", "account_ids": [blocked["id"]]}).json()["proxy_id"]
+        with SessionLocal() as db:
+            db.delete(db.get(ProxyInventory, private_to_other_group))
+            db.commit()
+
+    operator = CurrentUser("operator_shared_proxy", "org_demo", "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {allowed_group: "OPERATOR"})
+    with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            inventory = client.get("/api/v1/proxies").json()
+            assert {item["id"] for item in inventory} == {shared, private_to_other_group}
+            foreign = next(item for item in inventory if item["id"] == private_to_other_group)
+            assert foreign["account_count"] == 0
+            assert foreign["account_refs"] == []
+            assert "proxy-public-hidden@example.com" not in foreign["account_emails"]
+            assigned = client.post(f"/api/v1/proxies/{shared}/group-assignments", json={"group_id": allowed_group, "account_ids": [allowed["id"]]})
+            assert assigned.status_code == 200, assigned.text
+
+
+def test_account_metadata_proxy_edit_requires_access_to_that_account_group() -> None:
+    from unittest.mock import patch
+
+    from app.auth import CurrentUser
+
+    with TestClient(app) as client:
+        groups = client.get("/api/v1/groups").json()
+        allowed_group, blocked_group = groups[0]["id"], groups[1]["id"]
+        allowed = client.post("/api/v1/accounts/single", json={"email": "proxy-edit-allowed@example.com", "password": "secret", "group_id": allowed_group}).json()
+        blocked = client.post("/api/v1/accounts/single", json={"email": "proxy-edit-blocked@example.com", "password": "secret", "group_id": blocked_group}).json()
+
+    operator = CurrentUser("operator_proxy_edit", "org_demo", "Scoped operator", "operator@example.com", "ACCOUNT_OPERATOR", {allowed_group: "OPERATOR"})
+    with patch("app.main.authenticate_request", return_value=operator), patch("app.auth.authenticate_request", return_value=operator):
+        with TestClient(app) as client:
+            allowed_edit = client.patch(f"/api/v1/accounts/{allowed['id']}", json={"proxy": "198.51.100.83:8080"})
+            assert allowed_edit.status_code == 200, allowed_edit.text
+            denied_edit = client.patch(f"/api/v1/accounts/{blocked['id']}", json={"proxy": "198.51.100.84:8080"})
+            assert denied_edit.status_code == 404
+
+
 def test_observer_does_not_fall_back_to_direct_when_proxy_resolution_fails(tmp_path) -> None:
     playwright = MagicMock()
     observer = BrowserObserver("s1", "account@example.com__org", 0, profile_dir=str(tmp_path), executable="fake-browser", headless=True, resolve_proxy=lambda _session_id: (_ for _ in ()).throw(RuntimeError("proxy unavailable")))
