@@ -674,6 +674,15 @@ class ProxyGroupCreateRequest(BaseModel):
         return " ".join(value.split())
 
 
+class ProxyGroupRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        return " ".join(value.split())
+
+
 class ProxyUpdate(BaseModel):
     proxy: str | None = Field(default=None, max_length=512)
     label: str | None = Field(default=None, max_length=160)

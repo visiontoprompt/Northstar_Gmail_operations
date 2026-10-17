@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from app.models import AuditEvent, BrowserSession, GmailAccount, ProxyInventory
+from app.models import AuditEvent, BrowserSession, GmailAccount, OvhProxyGroupLink, ProxyGroup, ProxyInventory
 from app.observer import BrowserObserver, _launch_profile_context
 from app.proxy import ProxyValidationError, parse_proxy
 from app.security import SecretCipher
@@ -297,6 +297,77 @@ def test_bulk_proxy_import_assigns_all_new_endpoints_to_selected_group() -> None
         assert {proxy["proxy_group"] for proxy in proxies} == {"US East"}
         groups = client.get("/api/v1/proxies/groups").json()
         assert next(group for group in groups if group["name"] == "US East")["proxy_count"] == 2
+
+
+def test_proxy_group_rename_updates_endpoints_and_ovh_links_without_changing_account_assignment() -> None:
+    with TestClient(app) as client:
+        created = client.post("/api/v1/proxies/groups", json={"name": "East pool"})
+        assert created.status_code == 201, created.text
+        group = created.json()
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.87:8080|East endpoint", "group_name": "East pool"})
+        assert imported.status_code == 201, imported.text
+        proxy_id = imported.json()["rows"][0]["proxy_id"]
+        account_group = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "group-rename@example.com", "password": "secret", "group_id": account_group}).json()
+        assigned = client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [account["id"]]})
+        assert assigned.status_code == 200, assigned.text
+        with SessionLocal() as db:
+            organization_id = db.get(ProxyInventory, proxy_id).organization_id
+            db.add(OvhProxyGroupLink(id="ovh-group-rename-test", organization_id=organization_id, proxy_group="East pool", resource_type="instance", service_name="test-instance", instance_id="test-instance"))
+            db.commit()
+
+        renamed = client.patch(f"/api/v1/proxies/groups/{group['id']}", json={"name": "East production"})
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["proxy_count"] == 1
+        assert any(item["id"] == group["id"] and item["name"] == "East production" for item in client.get("/api/v1/proxies/groups").json())
+        assert next(item for item in client.get("/api/v1/proxies").json() if item["id"] == proxy_id)["proxy_group"] == "East production"
+        with SessionLocal() as db:
+            assert db.query(OvhProxyGroupLink).filter_by(id="ovh-group-rename-test").one().proxy_group == "East production"
+            assert db.get(GmailAccount, account["id"]).proxy_id == proxy_id
+
+
+def test_deleting_proxy_group_ungroups_only_and_preserves_endpoint_and_account_assignment() -> None:
+    with TestClient(app) as client:
+        group = client.post("/api/v1/proxies/groups", json={"name": "Temporary pool"}).json()
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.88:8080|Keep endpoint", "group_name": "Temporary pool"})
+        proxy_id = imported.json()["rows"][0]["proxy_id"]
+        account_group = client.get("/api/v1/groups").json()[0]["id"]
+        account = client.post("/api/v1/accounts/single", json={"email": "group-delete@example.com", "password": "secret", "group_id": account_group}).json()
+        assert client.post("/api/v1/proxies/assignments", json={"proxy_id": proxy_id, "account_ids": [account["id"]]}).status_code == 200
+        with SessionLocal() as db:
+            organization_id = db.get(ProxyInventory, proxy_id).organization_id
+            db.add(OvhProxyGroupLink(id="ovh-group-delete-test", organization_id=organization_id, proxy_group="Temporary pool", resource_type="instance", service_name="test-instance", instance_id="test-instance"))
+            db.commit()
+
+        deleted = client.delete(f"/api/v1/proxies/groups/{group['id']}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["ungrouped_count"] == 1
+        assert not any(item["name"] == "Temporary pool" for item in client.get("/api/v1/proxies/groups").json())
+        proxy = next(item for item in client.get("/api/v1/proxies").json() if item["id"] == proxy_id)
+        assert proxy["proxy_group"] is None
+        assert proxy["account_count"] == 1
+        with SessionLocal() as db:
+            assert db.get(GmailAccount, account["id"]).proxy_id == proxy_id
+            assert db.get(ProxyInventory, proxy_id) is not None
+            assert db.get(OvhProxyGroupLink, "ovh-group-delete-test") is None
+
+
+def test_legacy_proxy_group_can_be_renamed_and_duplicate_names_are_rejected() -> None:
+    with TestClient(app) as client:
+        imported = client.post("/api/v1/proxies/import", json={"lines": "203.0.113.89:8080|Legacy endpoint"})
+        proxy_id = imported.json()["rows"][0]["proxy_id"]
+        with SessionLocal() as db:
+            db.get(ProxyInventory, proxy_id).proxy_group = "Legacy pool"
+            db.commit()
+        groups = client.get("/api/v1/proxies/groups").json()
+        legacy = next(item for item in groups if item["name"] == "Legacy pool")
+        renamed = client.patch(f"/api/v1/proxies/groups/{legacy['id']}", json={"name": "Legacy renamed"})
+        assert renamed.status_code == 200, renamed.text
+        duplicate = client.post("/api/v1/proxies/groups", json={"name": "Existing"})
+        assert duplicate.status_code == 201
+        collision = client.patch(f"/api/v1/proxies/groups/{renamed.json()['id']}", json={"name": "Existing"})
+        assert collision.status_code == 422
+        assert next(item for item in client.get("/api/v1/proxies").json() if item["id"] == proxy_id)["proxy_group"] == "Legacy renamed"
 
 
 def test_bulk_proxy_import_reports_invalid_and_duplicate_rows_without_overwriting_endpoint() -> None:

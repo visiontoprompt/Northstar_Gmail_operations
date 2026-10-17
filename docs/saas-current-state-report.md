@@ -569,7 +569,7 @@ These are important constraints, not hidden features:
 
 ### Newsletter Automation
 
-There is no complete Newsletter Automation page documented as an active, end-to-end SaaS feature in the current application. A future newsletter feature should be treated as a separate product scope with its own data model, approval rules, sending provider, unsubscribe/compliance model, templates, scheduling, analytics, and worker lifecycle.
+The current project includes a Newsletter Automation workspace with persisted newsletter records, groups, signup profiles, bounded jobs, per-task outcomes, and review states. Treat provider-specific publisher pages, consent screens, and any external sending or unsubscribe behavior as integration-specific: they require live verification and must not be inferred from a completed browser action. The product does not claim a universal newsletter sending provider or unrestricted unattended signup flow.
 
 ### LLM-driven automation
 

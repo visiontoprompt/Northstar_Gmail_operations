@@ -21,7 +21,7 @@ from .contacts import build_google_contacts_csv, contact_file_checksum, new_cont
 from .addons import select_addon_candidates
 from .alerts import choose_alert_topics
 from .db import SessionLocal
-from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialChangePlan, CredentialRevision, Employee, EmployeeGroupAccess, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterAutomationSkill, NewsletterSubscription, OperationDraft, Organization, ProxyGroup, ProxyInventory, WorkspaceSettings, utcnow
+from .models import AccountGroup, AccountSecret, AuditEvent, BrowserProfile, BrowserSession, ContactFile, CredentialChangePlan, CredentialRevision, Employee, EmployeeGroupAccess, GmailAccount, ImportOperation, JobLock, LoginJob, LoginJobItem, Newsletter, NewsletterAccountIdentity, NewsletterAutomationProfile, NewsletterAutomationSkill, NewsletterSubscription, OperationDraft, Organization, OvhProxyGroupLink, ProxyGroup, ProxyInventory, WorkspaceSettings, utcnow
 from .schemas import NEWSLETTER_SIGNABLE_PROFILE_STATUSES, AccountStructuredInput, BulkPreviewResponse, PreviewRow
 from .security import SecretCipher, mask_recovery
 from .notifications import notification_settings, publish, safe_notification_settings
@@ -3355,6 +3355,60 @@ def list_proxy_groups(db: Session, organization_id: str) -> list[dict]:
     for name, count in counts.items():
         groups[name] = {"id": f"legacy:{name}", "name": name, "proxy_count": int(count)}
     return sorted(groups.values(), key=lambda group: group["name"].casefold())
+
+
+def _proxy_group_name(db: Session, organization_id: str, group_id: str) -> tuple[str, ProxyGroup | None]:
+    if group_id.startswith("legacy:"):
+        name = group_id.removeprefix("legacy:")
+        if not name or not (db.scalar(select(ProxyInventory.id).where(ProxyInventory.organization_id == organization_id, ProxyInventory.proxy_group == name).limit(1)) or db.scalar(select(OvhProxyGroupLink.id).where(OvhProxyGroupLink.organization_id == organization_id, OvhProxyGroupLink.proxy_group == name).limit(1))):
+            raise ImportValidationError("Proxy group not found")
+        return name, None
+    group = db.scalar(select(ProxyGroup).where(ProxyGroup.organization_id == organization_id, ProxyGroup.id == group_id).with_for_update())
+    if group is None:
+        raise ImportValidationError("Proxy group not found")
+    return group.name, group
+
+
+def rename_proxy_group(db: Session, organization_id: str, actor_id: str, group_id: str, raw_name: str) -> dict:
+    name = " ".join(raw_name.split())
+    if not name or len(name) > 80:
+        raise ImportValidationError("Proxy group names must contain 1–80 characters")
+    old_name, group = _proxy_group_name(db, organization_id, group_id)
+    if name == old_name:
+        count = db.scalar(select(func.count(ProxyInventory.id)).where(ProxyInventory.organization_id == organization_id, ProxyInventory.proxy_group == old_name)) or 0
+        return {"id": group.id if group else f"legacy:{name}", "name": name, "proxy_count": int(count), "renamed": False}
+    duplicate = db.scalar(select(ProxyGroup.id).where(ProxyGroup.organization_id == organization_id, ProxyGroup.name == name))
+    if duplicate or db.scalar(select(ProxyInventory.id).where(ProxyInventory.organization_id == organization_id, ProxyInventory.proxy_group == name).limit(1)) or db.scalar(select(OvhProxyGroupLink.id).where(OvhProxyGroupLink.organization_id == organization_id, OvhProxyGroupLink.proxy_group == name).limit(1)):
+        raise ImportValidationError("A proxy group with that name already exists. Choose a different name.")
+    inventory = db.scalars(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id, ProxyInventory.proxy_group == old_name).with_for_update()).all()
+    links = db.scalars(select(OvhProxyGroupLink).where(OvhProxyGroupLink.organization_id == organization_id, OvhProxyGroupLink.proxy_group == old_name).with_for_update()).all()
+    if group is None:
+        group = ProxyGroup(id=_new_id("proxy_group"), organization_id=organization_id, name=name)
+        db.add(group)
+    else:
+        group.name = name
+    for record in inventory:
+        record.proxy_group = name
+    for link in links:
+        link.proxy_group = name
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.group_renamed", target_type="proxy_group", target_id=group_id, result="success", metadata_json={"old_name": old_name, "new_name": name, "proxy_count": len(inventory), "ovh_link_count": len(links)}))
+    db.commit()
+    return {"id": group.id, "name": name, "proxy_count": len(inventory), "renamed": True}
+
+
+def delete_proxy_group(db: Session, organization_id: str, actor_id: str, group_id: str) -> dict:
+    name, group = _proxy_group_name(db, organization_id, group_id)
+    inventory = db.scalars(select(ProxyInventory).where(ProxyInventory.organization_id == organization_id, ProxyInventory.proxy_group == name).with_for_update()).all()
+    links = db.scalars(select(OvhProxyGroupLink).where(OvhProxyGroupLink.organization_id == organization_id, OvhProxyGroupLink.proxy_group == name).with_for_update()).all()
+    for record in inventory:
+        record.proxy_group = None
+    for link in links:
+        db.delete(link)
+    if group is not None:
+        db.delete(group)
+    db.add(AuditEvent(id=_new_id("audit"), organization_id=organization_id, actor_id=actor_id, action="proxy.group_deleted", target_type="proxy_group", target_id=group_id, result="success", metadata_json={"name": name, "proxy_count_ungrouped": len(inventory), "ovh_link_count_removed": len(links)}))
+    db.commit()
+    return {"id": group_id, "name": name, "ungrouped_count": len(inventory), "removed_ovh_links": len(links)}
 
 
 def update_proxy_group(db: Session, organization_id: str, actor_id: str, proxy_ids: list[str], group_name: str | None) -> dict:
