@@ -1745,7 +1745,7 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
             if purpose == "newsletter_confirm"
             else str((newsletter_config or {}).get("signup_url") or "")
             if purpose == "newsletter"
-            else "https://accounts.google.com/v3/signin/identifier"
+            else "https://accounts.google.com/"
             if purpose == "login"
             else None
         ),

@@ -137,7 +137,7 @@ def test_imported_profile_opens_gmail_before_claiming_authentication(workspace, 
     assert (root / "profile-acct-a" / "Default" / "Network" / "Cookies").read_bytes() == b"saved-cookies"
 
 
-def test_explicit_imported_profile_login_starts_at_google_identifier(workspace, monkeypatch):
+def test_explicit_imported_profile_login_starts_at_google_root(workspace, monkeypatch):
     _db, root, _tmp_path = workspace
     captured = {}
 
@@ -160,7 +160,7 @@ def test_explicit_imported_profile_login_starts_at_google_identifier(workspace, 
     monkeypatch.setattr(service, "_record_observer_status", lambda *_args, **_kwargs: None)
 
     assert service._start_observer("session-login-url", "profile-acct-a", "org-import", "admin", purpose="login", imported_profile=True)
-    assert captured["start_url"] == "https://accounts.google.com/v3/signin/identifier"
+    assert captured["start_url"] == "https://accounts.google.com/"
 
 
 def test_imported_profile_survives_login_prompt_and_close(workspace, monkeypatch):
