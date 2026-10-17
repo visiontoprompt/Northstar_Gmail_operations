@@ -753,9 +753,18 @@ def test_auto_login_fills_otp_from_stored_secret():
     assert getattr(button, "clicked", False) is True
 
 
-def test_explicit_login_waits_for_manual_mfa_even_when_totp_is_saved():
+def test_explicit_login_automatically_handles_mfa_when_totp_is_saved():
     page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Enter the code from the Google Authenticator app", otp="")
     observer = BrowserObserver("s-manual-login", "p-manual-login", 9222, purpose="login", resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP")
+    with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
+        observer._tick(_fake_browser([page]))
+    assert page.cred_fields["otp"].value.isdigit() and len(page.cred_fields["otp"].value) == 6
+    assert not observer._stop.is_set()
+
+
+def test_explicit_login_waits_for_manual_mfa_when_totp_is_missing():
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Enter the code from the Google Authenticator app", otp="")
+    observer = BrowserObserver("s-manual-mfa", "p-manual-mfa", 9222, purpose="login", resolve_otp_secret=lambda sid: None)
     with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["otp"].value == ""

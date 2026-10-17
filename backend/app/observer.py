@@ -905,7 +905,7 @@ class BrowserObserver:
             # A visible challenge must stay in the same browser until the
             # operator completes it. A saved TOTP is the sole automatic
             # exception, and only on Google's Authenticator-code route.
-            if self.purpose != "login" and signal.value == "MFA_OR_SECURITY_CHECK" and is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None:
+            if signal.value == "MFA_OR_SECURITY_CHECK" and is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None:
                 if _otp_should_attempt(page, self, url):
                     _fill_otp_code(page, self, url)
             state_key = (signal.value, url)
