@@ -1097,8 +1097,6 @@ def get_profile_sizes(payload: ProfileSizesRequest, request: Request, db: Sessio
     accounts = db.scalars(select(GmailAccount).where(
         GmailAccount.organization_id == settings.demo_org_id,
         GmailAccount.id.in_(payload.account_ids),
-        GmailAccount.lifecycle_status != "ARCHIVED",
-        GmailAccount.account_type != "EXTERNAL_RECIPIENT",
     )).all()
     by_id = {account.id: account for account in accounts}
     if len(by_id) != len(payload.account_ids) or any(not operator.can_access_group(account.group_id, "OPERATOR") for account in accounts):

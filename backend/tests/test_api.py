@@ -495,6 +495,37 @@ def test_selected_profile_export_and_size_endpoint(tmp_path) -> None:
         settings.profile_root = original_profile_root
 
 
+def test_profile_sizes_include_archived_accounts_still_in_profile_inventory(tmp_path) -> None:
+    original_profile_root = settings.profile_root
+    settings.profile_root = str(tmp_path / "profiles")
+    try:
+        with TestClient(app) as client:
+            group_id = client.get("/api/v1/groups").json()[0]["id"]
+            account = client.post("/api/v1/accounts/single", json={"email": "archived-profile@example.com", "password": "secret", "group_id": group_id}).json()
+            active_account = client.post("/api/v1/accounts/single", json={"email": "active-profile@example.com", "password": "secret", "group_id": group_id}).json()
+            profile_dir = Path(settings.profile_root) / account["profile"]["id"]
+            profile_dir.mkdir(parents=True)
+            profile_file = profile_dir / "Local State"
+            profile_file.write_text("profile data", encoding="utf-8")
+            active_profile_dir = Path(settings.profile_root) / active_account["profile"]["id"]
+            active_profile_dir.mkdir(parents=True)
+            (active_profile_dir / "Local State").write_text("active profile", encoding="utf-8")
+
+            archived = client.request("DELETE", f"/api/v1/accounts/{account['id']}", json={"confirmation_email": account["email"]})
+            assert archived.status_code == 200
+            listed_ids = {profile["account_id"] for profile in client.get("/api/v1/browser-profiles").json()}
+            assert {account["id"], active_account["id"]}.issubset(listed_ids)
+
+            sizes = client.post("/api/v1/profiles/sizes", json={"account_ids": [account["id"], active_account["id"]]})
+            assert sizes.status_code == 200
+            assert sizes.json()["items"] == [
+                {"account_id": account["id"], "size_bytes": len("profile data")},
+                {"account_id": active_account["id"], "size_bytes": len("active profile")},
+            ]
+    finally:
+        settings.profile_root = original_profile_root
+
+
 def test_profile_export_is_admin_only(tmp_path) -> None:
     from unittest.mock import patch
 
