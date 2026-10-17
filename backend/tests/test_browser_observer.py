@@ -745,12 +745,30 @@ def test_auto_login_fills_otp_from_stored_secret():
     events = []
     button = _FakeButton("Next")
     page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Enter the code from the Google Authenticator app", otp="", buttons=[button])
-    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP", report_event=lambda sid, event, detail, result: events.append(event))
+    observer = BrowserObserver("s1", "p1", 9222, purpose="security", observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP", report_event=lambda sid, event, detail, result: events.append(event))
     with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["otp"].value.isdigit() and len(page.cred_fields["otp"].value) == 6
     assert "otp_filled" in events
     assert getattr(button, "clicked", False) is True
+
+
+def test_explicit_login_waits_for_manual_mfa_even_when_totp_is_saved():
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Enter the code from the Google Authenticator app", otp="")
+    observer = BrowserObserver("s-manual-login", "p-manual-login", 9222, purpose="login", resolve_otp_secret=lambda sid: "JBSWY3DPEHPK3PXP")
+    with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
+        observer._tick(_fake_browser([page]))
+    assert page.cred_fields["otp"].value == ""
+    assert not observer._stop.is_set()
+
+
+def test_explicit_login_does_not_auto_solve_captcha():
+    page = _FakePage("https://accounts.google.com/v3/signin/challenge", "Security check", "I'm not a robot")
+    observer = BrowserObserver("s-manual-captcha", "p-manual-captcha", 9222, purpose="login", captcha_api_key="configured-key")
+    with patch("app.observer.classify_page", return_value=(PageSignal.CAPTCHA, PageAction.WAIT_FOR_HUMAN)), patch("app.observer._handle_supported_captcha_tick") as solve:
+        observer._tick(_fake_browser([page]))
+    solve.assert_not_called()
+    assert not observer._stop.is_set()
 
 
 def test_auto_login_retries_rejected_otp_with_a_fresh_time_window_code():
@@ -788,7 +806,7 @@ def test_auto_login_does_not_resubmit_same_otp_time_window():
 def test_auto_login_skips_otp_without_stored_secret():
     events = []
     page = _FakePage("https://accounts.google.com/v3/signin/challenge/totp/xyz", "Enter the code", "Google Authenticator", otp="")
-    observer = BrowserObserver("s1", "p1", 9222, observe_session_page=lambda *a: None, resolve_otp_secret=lambda sid: None, report_event=lambda sid, event, detail, result: events.append(event))
+    observer = BrowserObserver("s1", "p1", 9222, purpose="security", observe_session_page=lambda *a: None, resolve_otp_secret=lambda sid: None, report_event=lambda sid, event, detail, result: events.append(event))
     with patch("app.observer.classify_page", return_value=(PageSignal.MFA_OR_SECURITY_CHECK, PageAction.WAIT_FOR_HUMAN)):
         observer._tick(_fake_browser([page]))
     assert page.cred_fields["otp"].value == ""

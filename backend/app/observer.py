@@ -895,7 +895,7 @@ class BrowserObserver:
                 self._stop.set()
                 return
 
-        if self._captcha_api_key and (signal == PageSignal.CAPTCHA or self.purpose == "newsletter"):
+        if self._captcha_api_key and self.purpose != "login" and (signal == PageSignal.CAPTCHA or self.purpose == "newsletter"):
             if _handle_supported_captcha_tick(self, page, url):
                 return
 
@@ -905,7 +905,7 @@ class BrowserObserver:
             # A visible challenge must stay in the same browser until the
             # operator completes it. A saved TOTP is the sole automatic
             # exception, and only on Google's Authenticator-code route.
-            if signal.value == "MFA_OR_SECURITY_CHECK" and is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None:
+            if self.purpose != "login" and signal.value == "MFA_OR_SECURITY_CHECK" and is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None:
                 if _otp_should_attempt(page, self, url):
                     _fill_otp_code(page, self, url)
             state_key = (signal.value, url)
@@ -930,7 +930,7 @@ class BrowserObserver:
                 self._chooser_clicked_urls.add(url)
             elif url not in self._continue_clicked_urls and _handle_google_account_continue(page, self, url, host):
                 self._continue_clicked_urls.add(url)
-            if is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None and _otp_should_attempt(page, self, url):
+            if self.purpose != "login" and is_totp_challenge_url(url) and _has_otp_input(page) and self._resolve_otp_secret is not None and _otp_should_attempt(page, self, url):
                 _fill_otp_code(page, self, url)
         elif host in _ACCOUNT_HANDOFF_HOSTS and url not in self._continue_clicked_urls:
             # A saved profile can render the account hand-off inside Gmail or

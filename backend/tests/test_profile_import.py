@@ -137,6 +137,32 @@ def test_imported_profile_opens_gmail_before_claiming_authentication(workspace, 
     assert (root / "profile-acct-a" / "Default" / "Network" / "Cookies").read_bytes() == b"saved-cookies"
 
 
+def test_explicit_imported_profile_login_starts_at_google_identifier(workspace, monkeypatch):
+    _db, root, _tmp_path = workspace
+    captured = {}
+
+    class Observer:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(
+        browser_observer_enabled=True,
+        browser_desktop_enabled=False,
+        profile_root=str(root),
+        browser_observe_interval=1.0,
+        browser_observe_settle_seconds=5.0,
+    ))
+    monkeypatch.setattr(service, "BrowserObserver", Observer)
+    monkeypatch.setattr(service, "resolve_browser_executable", lambda: "/usr/bin/chromium")
+    monkeypatch.setattr(service, "_record_observer_status", lambda *_args, **_kwargs: None)
+
+    assert service._start_observer("session-login-url", "profile-acct-a", "org-import", "admin", purpose="login", imported_profile=True)
+    assert captured["start_url"] == "https://accounts.google.com/v3/signin/identifier"
+
+
 def test_imported_profile_survives_login_prompt_and_close(workspace, monkeypatch):
     db, root, tmp_path = workspace
     zipped = archive(tmp_path / "connected.zip", {"Default/Preferences": b"browser-state", "Default/Network/Cookies": b"saved-cookies"})

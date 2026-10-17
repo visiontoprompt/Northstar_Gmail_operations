@@ -1745,8 +1745,8 @@ def _start_observer(session_id: str, profile_id: str, organization_id: str, acto
             if purpose == "newsletter_confirm"
             else str((newsletter_config or {}).get("signup_url") or "")
             if purpose == "newsletter"
-            else "https://mail.google.com/"
-            if purpose == "login" and imported_profile
+            else "https://accounts.google.com/v3/signin/identifier"
+            if purpose == "login"
             else None
         ),
         observe_session_page=lambda sid, url, title, text: _observe_in_own_session(organization_id, actor_id, sid, url, title, text),
