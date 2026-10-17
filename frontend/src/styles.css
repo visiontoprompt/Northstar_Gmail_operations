@@ -741,7 +741,7 @@ table { min-width: 1050px; }
 .proxy-group-admin-list { display: grid; max-height: min(54vh, 520px); overflow: auto; border: 1px solid var(--color-line); border-radius: 10px; }
 .proxy-group-admin-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; background: var(--color-surface); border-bottom: 1px solid var(--color-line); }
 .proxy-group-admin-row:last-child { border-bottom: 0; }
-.proxy-group-admin-main { display: grid; min-width: 160px; gap: 4px; }
+.proxy-group-admin-main { display: grid; min-width: min(100%, 260px); flex: 1 1 260px; gap: 5px; }
 .proxy-group-admin-main > strong { color: var(--color-ink); font-size: 12px; }
 .proxy-group-admin-main > small { color: var(--color-muted); font-size: 10px; }
 .proxy-group-admin-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
