@@ -1266,11 +1266,22 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
     finally { setProfileZipBusy(false); }
   };
 
-  const startAccounts = async (chosen: Account[]) => {
+  const startAccounts = async (chosen: Account[], forceLogin = false) => {
     if (!chosen.length) { setError(scope === "selected" ? "Select one or more accounts from this group first." : "No accounts match the current group and filters."); return; }
     setLaunching(true); setError(""); setNotice("");
     try {
-      const existing = chosen.map((account) => activeByAccount.get(account.id)).filter((session): session is Session => Boolean(session));
+      let existing = chosen.map((account) => activeByAccount.get(account.id)).filter((session): session is Session => Boolean(session));
+      if (forceLogin) {
+        const loginInProgress = new Set(["REQUIRED", "PROFILE_CHECK", "VERIFICATION_REQUIRED", "MFA_REQUIRED", "CAPTCHA", "UNKNOWN_PAGE"]);
+        const keepRunningLogin = existing.filter((session) => session.purpose === "login" && loginInProgress.has(session.login_state));
+        const restart = existing.filter((session) => !keepRunningLogin.includes(session));
+        for (const session of restart) await api<Session>(`/api/v1/sessions/${session.id}/close`, { method: "POST" });
+        if (restart.length) {
+          const restartedIds = new Set(restart.map((session) => session.id));
+          setSessions((current) => current.filter((session) => !restartedIds.has(session.id)));
+          existing = keepRunningLogin;
+        }
+      }
       const live = existing.filter((session) => session.browser_alive);
       const orphaned = existing.filter((session) => !session.browser_alive);
       if (orphaned.length) {
@@ -1298,13 +1309,13 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
         // verification-required accounts, and any other account needing review
         // must enter the visible Gmail login/check flow instead of being
         // rejected as an unauthenticated saved-profile operation.
-        const purpose = account.profile.status === "SAVED" && account.login_status === "AUTHENTICATED" ? "reuse" : "login";
+        const purpose = forceLogin ? "login" : account.profile.status === "SAVED" && account.login_status === "AUTHENTICATED" ? "reuse" : "login";
         const session = await api<Session>(`/api/v1/accounts/${account.id}/sessions`, { method: "POST", body: JSON.stringify({ purpose }) });
         setSessions((current) => [session, ...current.filter((row) => row.account_id !== account.id)]);
         setSelectedSessionId(session.id);
-        setNotice(`Browser session started for ${account.email}.`);
+        setNotice(forceLogin ? `Login check started for ${account.email}. Complete any sign-in or verification steps in the browser.` : `Browser session started for ${account.email}.`);
       } else {
-        const created = await api<LoginJob>("/api/v1/login-jobs", { method: "POST", body: JSON.stringify({ group_id: null, account_ids: pendingAccounts.map((account) => account.id), concurrency_limit: concurrency }) });
+        const created = await api<LoginJob>("/api/v1/login-jobs", { method: "POST", body: JSON.stringify({ group_id: null, account_ids: pendingAccounts.map((account) => account.id), concurrency_limit: concurrency, force_login: forceLogin }) });
         const started = await api<LoginJob>(`/api/v1/login-jobs/${created.id}/start`, { method: "POST" });
         setJob(started);
         const pendingIds = new Set(pendingAccounts.map((account) => account.id));
@@ -1322,10 +1333,11 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
         }
         const liveCount = livePendingCount();
         setNotice(liveCount
-          ? `Batch dispatched for ${pendingAccounts.length} accounts; ${liveCount} of ${pendingAccounts.length} browser windows are open. Select any account tab to switch windows.`
-          : `Batch dispatched for ${pendingAccounts.length} accounts, but no Chrome windows have appeared yet. Check batch progress and retry failed accounts.`);
+          ? `${forceLogin ? "Login check" : "Batch"} dispatched for ${pendingAccounts.length} accounts; ${liveCount} of ${pendingAccounts.length} browser windows are open. Select any account tab to switch windows.`
+          : `${forceLogin ? "Login check" : "Batch"} dispatched for ${pendingAccounts.length} accounts, but no Chrome windows have appeared yet. Check batch progress and retry failed accounts.`);
       }
-      setSelectedIds([]); onRefresh();
+      if (!forceLogin) setSelectedIds([]);
+      onRefresh();
     } catch (requestError) { setError((requestError as Error).message || "The selected browser sessions could not be started."); }
     finally { setLaunching(false); }
   };
@@ -1444,7 +1456,7 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
           <label className="desktop-operation-row" htmlFor="desktop-scope"><span>Apply to</span><select id="desktop-scope" value={scope} onChange={(event) => setScope(event.target.value as "selected" | "filtered")}><option value="selected">Selected accounts ({visibleSelectedIds.size})</option><option value="filtered">All filtered accounts ({filteredAccounts.length})</option></select></label>
           <div className="desktop-inspector-operation-grid" role="group" aria-label="Available account operations">{registryActions.map((action) => {
             const disabled = !operationTargets.length || (["credentials", "upload_profile"].includes(action.kind) && operationTargets.length !== 1);
-            return <button key={action.kind} type="button" className={`desktop-inspector-operation-button${operation === action.kind ? " active" : ""}${action.tone ? ` ${action.tone}` : ""}`} aria-pressed={operation === action.kind} disabled={disabled || launching} title={action.kind === "credentials" && operationTargets.length !== 1 ? "Credentials require exactly one account." : action.kind === "login" ? `Start a browser session for ${operationTargets.length} scoped account${operationTargets.length === 1 ? "" : "s"}.` : action.label} onClick={() => { setOperation(action.kind); if (action.kind === "login") void startAccounts(operationTargets); else void runChosenOperation(action.kind); }}><span>{action.icon}</span>{action.shortLabel}</button>;
+            return <button key={action.kind} type="button" className={`desktop-inspector-operation-button${operation === action.kind ? " active" : ""}${action.tone ? ` ${action.tone}` : ""}`} aria-pressed={operation === action.kind} disabled={disabled || launching} title={action.kind === "credentials" && operationTargets.length !== 1 ? "Credentials require exactly one account." : action.kind === "login" ? `Run the login check and sign-in flow for ${operationTargets.length} scoped account${operationTargets.length === 1 ? "" : "s"}.` : action.label} onClick={() => { setOperation(action.kind); if (action.kind === "login") void startAccounts(operationTargets, true); else void runChosenOperation(action.kind); }}><span>{action.icon}</span>{action.shortLabel}</button>;
           })}</div>
           <div className="desktop-operation-hint" role="status">{operation === "login" ? "Login starts browser sessions for the scope selected above. The left Start button launches checked accounts." : "Choose an operation above to open its existing setup in this inspector."}</div>
           <button type="button" className="button secondary small desktop-inspector-compact" onClick={() => onCompactProfiles(operationTargets)} disabled={!operationTargets.length} title={operationTargets.length === 1 ? `Compact ${operationTargets[0].email}'s closed profile` : `Compact ${operationTargets.length} selected profiles`}><Archive size={14} />Compact {operationTargets.length === 1 ? "profile" : "profiles"}</button>

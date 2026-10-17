@@ -873,6 +873,7 @@ class LoginJobCreate(BaseModel):
     group_id: str | None = None
     account_ids: list[str] = Field(default_factory=list, max_length=300)
     concurrency_limit: int = Field(default=4, ge=1, le=50)
+    force_login: bool = False
 
 
 class LoginJobItemResponse(BaseModel):

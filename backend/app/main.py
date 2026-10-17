@@ -1458,7 +1458,7 @@ def cancel_account_credential_change_plan(plan_id: str, db: Session = Depends(ge
 def create_bulk_login_job(payload: LoginJobCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     try:
         user = _account_operator(request, db)
-        return create_login_job(db, settings.demo_org_id, user.employee_id, payload.group_id, payload.account_ids, payload.concurrency_limit)
+        return create_login_job(db, settings.demo_org_id, user.employee_id, payload.group_id, payload.account_ids, payload.concurrency_limit, operation_config={"force_login": payload.force_login})
     except ImportValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

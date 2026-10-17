@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 os.environ["DATABASE_URL"] = "sqlite:///./data/test_gmail_ops.db"
 os.environ["SECRET_KEY"] = "test-secret-key-without-credential-material"
@@ -26,6 +27,15 @@ def _create_account(client: TestClient, email: str = "saved@example.com") -> dic
         "/api/v1/accounts/single",
         json={"email": email, "password": "secret", "recovery": "recovery@example.com", "2fa": "totp", "group_id": group_id},
     ).json()
+
+
+def test_explicit_login_job_does_not_reuse_authenticated_profile() -> None:
+    from app.service import _login_job_session_purpose
+
+    saved_profile = SimpleNamespace(authenticated_at="2026-10-17T00:00:00Z")
+    assert _login_job_session_purpose(saved_profile, {"force_login": True}) == "login"
+    assert _login_job_session_purpose(saved_profile, {}) == "reuse"
+    assert _login_job_session_purpose(None, {"force_login": True}) == "login"
 
 
 def test_login_completion_saves_profile_for_later_reopen(monkeypatch) -> None:
@@ -96,6 +106,23 @@ def test_reuse_requires_saved_profile(monkeypatch) -> None:
         reused = client.post(f"/api/v1/accounts/{account['id']}/sessions", json={"purpose": "reuse"})
         assert reused.status_code == 422
         assert "saved" in reused.json()["detail"]
+
+
+def test_login_purpose_runs_login_check_even_for_saved_authenticated_profile(monkeypatch) -> None:
+    from app import service
+
+    monkeypatch.setattr(service, "launch_local_browser", lambda _profile_id, _session_id: (True, 4242))
+    with TestClient(app) as client:
+        account = _create_account(client, email="force-login@example.com")
+        first = client.post(f"/api/v1/accounts/{account['id']}/sessions")
+        client.post(f"/api/v1/sessions/{first.json()['id']}/events", json={"event_type": "LOGIN_COMPLETED"})
+        client.post(f"/api/v1/sessions/{first.json()['id']}/close")
+
+        login = client.post(f"/api/v1/accounts/{account['id']}/sessions", json={"purpose": "login"})
+
+    assert login.status_code == 201
+    assert login.json()["purpose"] == "login"
+    assert login.json()["login_state"] == "REQUIRED"
 
 
 def test_invalid_session_purpose_is_rejected(monkeypatch) -> None:

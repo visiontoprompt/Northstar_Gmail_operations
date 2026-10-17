@@ -2765,6 +2765,13 @@ def _observe_in_own_session(organization_id: str, actor_id: str, session_id: str
         db.close()
 
 
+def _login_job_session_purpose(saved_profile: BrowserProfile | None, operation_config: dict[str, object] | None) -> str:
+    """Select whether a queued browser opens in sign-in/check or reuse mode."""
+    if bool((operation_config or {}).get("force_login")):
+        return "login"
+    return "reuse" if saved_profile and saved_profile.authenticated_at else "login"
+
+
 def enqueue_queued_items(db: Session, job_id: str) -> int:
     """Push every QUEUED item of a job into the Redis queue."""
     items = db.scalars(select(LoginJobItem).where(LoginJobItem.job_id == job_id, LoginJobItem.state == "QUEUED")).all()
@@ -2846,7 +2853,7 @@ def dispatch_ready_items(db: Session, organization_id: str, actor_id: str, job_i
                 session = start_mail_workflow(db, organization_id, session_actor_id, item.account_id, dict(job.operation_config or {}))
             else:
                 saved_profile = db.scalar(select(BrowserProfile).where(BrowserProfile.account_id == item.account_id))
-                purpose = "reuse" if saved_profile and saved_profile.authenticated_at else "login"
+                purpose = _login_job_session_purpose(saved_profile, job.operation_config)
                 session = start_login_session(db, organization_id, session_actor_id, item.account_id, purpose=purpose)
         except BrowserLaunchError as exc:
             # Do not leave an item looking like a healthy queued launch forever.
