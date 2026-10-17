@@ -846,6 +846,16 @@ def test_observer_clicks_use_another_account_on_chooser():
     assert "https://accounts.google.com/signin/v2/identifier" in observer._chooser_clicked_urls
 
 
+def test_observer_clicks_french_use_another_account_on_chooser():
+    button = _FakeButton("Utiliser un autre compte")
+    page = _FakePage("https://accounts.google.com/v3/signin/accountchooser", "Sélectionnez un compte", "Sélectionnez un compte", buttons=[button])
+    observer = BrowserObserver("s-fr", "p-fr", 9222, observe_session_page=lambda *a: None, resolve_credentials=lambda sid: ("alice@example.com", "s3cret"), report_event=lambda *a: None)
+    with patch("app.observer.classify_page", return_value=(PageSignal.ORDINARY_INTERSTITIAL, PageAction.SAFE_TO_OBSERVE)):
+        observer._tick(_fake_browser([page]))
+    assert getattr(button, "clicked", False) is True
+    assert "https://accounts.google.com/v3/signin/accountchooser" in observer._chooser_clicked_urls
+
+
 def test_observer_fills_identifier_after_chooser_is_expanded():
     clicked = [_FakeButton("Use another account")]
     page = _FakePage("https://accounts.google.com/signin/v2/identifier", "sign in", "Email or phone", identifier="", buttons=clicked)

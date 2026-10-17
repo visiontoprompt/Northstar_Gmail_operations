@@ -1632,10 +1632,24 @@ def _fill_otp_code(page: "Page", observer: "BrowserObserver", url: str) -> None:
 def _handle_account_chooser(page: "Page", observer: "BrowserObserver", url: str) -> bool:
     """The dedicated profile may already remember an account, so Google shows a
     "Choose an account" page without any input field. Expand it by clicking
-    "Use another account"; the identifier form then appears on the same URL."""
+    the localized "Use another account" action; the identifier form then
+    appears on the same URL. Google uses the browser/profile locale here, so
+    matching English only leaves non-English profiles stuck at the chooser."""
     if _has_credential_input(page):
         return False
-    clicked = _click_element_with_text(page, ("use another account",))
+    clicked = _click_element_with_text(page, (
+        "use another account",
+        "utiliser un autre compte",
+        "utiliser un autre compte google",
+        "se connecter avec un autre compte",
+        "usar otra cuenta",
+        "usar outra conta",
+        "anderes konto verwenden",
+        "anderes konto hinzufügen",
+        "usa un altro account",
+        "使用其他账号",
+        "別のアカウントを使用",
+    ))
     if clicked:
         observer._emit("chooser_expanded", url)
     return clicked
