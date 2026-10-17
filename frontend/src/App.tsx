@@ -63,6 +63,7 @@ import { api } from "./api";
 import { AccountProfileImportModal, BulkProfileImportSection } from "./profile-import/ProfileImport";
 import { ProfileCompactionModal } from "./profile-compaction/ProfileCompactionModal";
 import { OvhPage } from "./ovh/OvhPage";
+import { pasteTextIntoVnc, type VncClipboardTarget } from "./vnc-clipboard";
 import { GoDaddyPage } from "./godaddy/GoDaddyPage";
 import { canRunDesktopOperation, countDesktopAccounts, filterDesktopAccounts, searchDesktopAccounts, selectedLiveSessions, type DesktopAccountFilter } from "./desktop-contract";
 
@@ -677,20 +678,18 @@ function GroupsPage({ groups, refreshKey, onRefresh, onOpenGroup, canManage, onN
   const attentionTotal = groups.reduce((total, group) => total + group.issue_count, 0);
   return <div className="workspace-page groups-page">
     <WorkspacePageHeader eyebrow="WORKSPACE STRUCTURE" title="Account groups" description="Organize accounts into clear operating teams and review their readiness at a glance." action={<><button type="button" className="button secondary" onClick={onRefresh}><RefreshCw size={16} /> Refresh</button>{canManage && <button type="button" className="button primary" onClick={() => setCreateOpen(true)}><Plus size={16} /> Create group</button>}</>} />
-    <section className="groups-summary-strip" aria-label="Account group totals"><div><span>GROUPS</span><strong>{groups.length}</strong><small>Operating teams</small></div><div><span>ACCOUNTS</span><strong>{accountTotal.toLocaleString()}</strong><small>Across all groups</small></div><div><span>READY</span><strong>{readyTotal.toLocaleString()}</strong><small>Ready for login</small></div><div className={attentionTotal ? "attention" : ""}><span>NEEDS ATTENTION</span><strong>{attentionTotal.toLocaleString()}</strong><small>Operator review</small></div></section>
-    <section className="workspace-panel groups-directory-panel" aria-labelledby="groups-directory-title">
-      <div className="panel-header groups-directory-header"><div><h2 id="groups-directory-title">Group directory</h2><p>{groups.length ? `${visibleGroups.length} of ${groups.length} groups · select one to inspect its accounts` : "Create a group to organize account onboarding."}</p></div><span className="inventory-count">{accountTotal.toLocaleString()} accounts</span></div>
-      {groups.length > 0 && <div className="groups-directory-tools"><label className="groups-search"><Search size={15} /><span className="sr-only">Search account groups</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search groups or descriptions" /></label><div className="groups-state-filter" role="group" aria-label="Filter groups by state">{(["ALL", "ACTIVE", "PAUSED"] as const).map((state) => <button type="button" key={state} className={stateFilter === state ? "active" : ""} aria-pressed={stateFilter === state} onClick={() => setStateFilter(state)}>{state === "ALL" ? "All" : state === "ACTIVE" ? "Active" : "Paused"}<span>{state === "ALL" ? groups.length : groups.filter((group) => group.status === state).length}</span></button>)}</div></div>}
-      {visibleGroups.length ? <div className="group-directory-list" role="list" aria-label="Account groups">{visibleGroups.map((group) => {
+    <section className="groups-workspace" aria-labelledby="groups-directory-title">
+      <header className="groups-workspace-header"><div><span className="groups-workspace-kicker">ACCOUNT POOLS <i /> {groups.length} TEAMS</span><h2 id="groups-directory-title">Your teams, at a glance</h2><p>Check capacity and account readiness, then jump straight into a team’s registry.</p></div><div className="groups-workspace-totals"><span><strong>{accountTotal.toLocaleString()}</strong> accounts</span><span><strong>{readyTotal.toLocaleString()}</strong> ready</span><span className={attentionTotal ? "attention" : ""}><strong>{attentionTotal.toLocaleString()}</strong> need review</span></div></header>
+      {groups.length > 0 && <div className="groups-directory-tools"><label className="groups-search"><Search size={15} /><span className="sr-only">Search account groups</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a team by name or description" /></label><div className="groups-state-filter" role="group" aria-label="Filter groups by state">{(["ALL", "ACTIVE", "PAUSED"] as const).map((state) => <button type="button" key={state} className={stateFilter === state ? "active" : ""} aria-pressed={stateFilter === state} onClick={() => setStateFilter(state)}>{state === "ALL" ? "All teams" : state === "ACTIVE" ? "Active" : "Paused"}<span>{state === "ALL" ? groups.length : groups.filter((group) => group.status === state).length}</span></button>)}</div></div>}
+      {visibleGroups.length ? <div className="groups-team-grid" role="list" aria-label="Account groups">{visibleGroups.map((group) => {
         const utilization = Math.min(100, Math.round((group.account_count / group.capacity) * 100));
-        return <article className="group-directory-row" role="listitem" key={group.id}>
-          <div className="group-directory-identity"><span className="group-card-mark"><UsersRound size={16} /></span><div><h3>{group.name}</h3><p title={group.description || "No description provided."}>{group.description || "No description provided."}</p></div></div>
-          <div className="group-directory-capacity"><div className="group-directory-metric"><span>Accounts</span><strong>{group.account_count}<small> / {group.capacity}</small></strong></div><div className="capacity-meter" aria-label={`${group.account_count} of ${group.capacity} accounts`}><span style={{ width: `${utilization}%` }} /></div></div>
-          <div className="group-directory-readiness"><span className="group-directory-metric"><span>Ready</span><strong>{group.ready_count}</strong></span><span className="group-directory-metric"><span>Issues</span><strong className={group.issue_count ? "has-issues" : ""}>{group.issue_count}</strong></span></div>
-          <InventoryStatus status={group.status} />
-          <div className="group-directory-actions">{canManage && <><button type="button" className="button secondary small" onClick={() => setEditingGroup(group)}><Pencil size={13} /> Edit</button><button type="button" className="button danger small" onClick={() => setDeletingGroup(group)}><Trash2 size={13} /> Delete</button></>}<button type="button" className="button primary small" onClick={() => onOpenGroup(group.id)}>Open accounts <ArrowRight size={14} /></button></div>
+        return <article className="groups-team-card" role="listitem" key={group.id}>
+          <div className="groups-team-card-top"><span className="groups-team-mark"><UsersRound size={17} /></span><InventoryStatus status={group.status} /><span className="groups-team-id" title={group.id}>{group.id}</span></div>
+          <div className="groups-team-title"><div><h3>{group.name}</h3><p title={group.description || "No description provided."}>{group.description || "No description provided."}</p></div><button type="button" className="button secondary small groups-open-action" onClick={() => onOpenGroup(group.id)}>Open team <ArrowRight size={14} /></button></div>
+          <div className="groups-team-capacity"><div><strong>{group.account_count.toLocaleString()}</strong><span>accounts</span></div><span className="groups-team-capacity-limit">of {group.capacity.toLocaleString()} seats</span><div className="groups-team-meter" role="img" aria-label={`${utilization}% of capacity used`}><span style={{ width: `${utilization}%` }} /></div><small>{utilization}% capacity used</small></div>
+          <div className="groups-team-footer"><div className="groups-team-health"><span><i className="ready" />{group.ready_count} ready</span><span className={group.issue_count ? "needs-review" : ""}><i className={group.issue_count ? "issue" : "ready"} />{group.issue_count} need review</span></div><div className="groups-team-actions">{canManage && <><button type="button" className="button secondary small" onClick={() => setEditingGroup(group)}><Pencil size={13} /> Edit</button><button type="button" className="button danger small" onClick={() => setDeletingGroup(group)}><Trash2 size={13} /> Delete</button></>}</div></div>
         </article>;
-      })}</div> : groups.length ? <div className="workspace-empty compact"><Search size={20} /><strong>No groups match this view</strong><span>Adjust the search or status filter to see other groups.</span><button type="button" className="button secondary small" onClick={() => { setQuery(""); setStateFilter("ALL"); }}>Clear filters</button></div> : <div className="workspace-empty"><UsersRound size={20} /><strong>No groups yet</strong><span>Groups are required before an account can be onboarded.</span>{canManage && <button type="button" className="button primary small" onClick={() => setCreateOpen(true)}><Plus size={15} /> Create first group</button>}</div>}
+      })}</div> : groups.length ? <div className="workspace-empty compact"><Search size={20} /><strong>No teams match this view</strong><span>Adjust the search or status filter to see other groups.</span><button type="button" className="button secondary small" onClick={() => { setQuery(""); setStateFilter("ALL"); }}>Clear filters</button></div> : <div className="workspace-empty"><UsersRound size={20} /><strong>No groups yet</strong><span>Groups are required before an account can be onboarded.</span>{canManage && <button type="button" className="button primary small" onClick={() => setCreateOpen(true)}><Plus size={15} /> Create first group</button>}</div>}
     </section>
     <footer className="page-footer"><span>Northstar Operations</span><span>Group directory · {refreshKey ? "live" : "initial"}</span></footer>
     {canManage && createOpen && <CreateGroupModal onClose={() => setCreateOpen(false)} onCreated={(group) => { setCreateOpen(false); onNotify("success", `${group.name} created with capacity for ${group.capacity} accounts.`); onRefresh(); }} onError={(message) => onNotify("error", message)} />}
@@ -1162,16 +1161,22 @@ function SessionsPage({ groups, refreshKey, onRefresh, canDeleteHistory, onDelet
   return <div className="infra-page"><InfrastructureHeader eyebrow="RUNTIME CONTROL" title="Sessions" description="Review every profile-backed action and its evidence-based outcome for each account." icon={<Clock3 size={20} />} onRefresh={onRefresh} loading={loading} /><section className="summary-grid" aria-label="Session summary"><SummaryCard label={scope === "latest" ? "Accounts in view" : "Activity records"} value={sessions.length.toString()} note={scopeLabel} icon={<Clock3 size={17} />} /><SummaryCard label="Completed" value={completedCount.toString()} note="Recorded terminal success" icon={<Check size={17} />} tone="teal" /><SummaryCard label="Interrupted" value={interruptedCount.toString()} note="Needs attention" icon={<Activity size={17} />} tone="amber" /><SummaryCard label="Not finished" value={unfinishedCount.toString()} note={`${failedCount} failed · ${openCount} open · ${savedCount} saved`} icon={<XCircle size={17} />} /></section><section className="infra-panel"><div className="panel-header"><div><h2>{scopeLabel}</h2><p>{scope === "latest" ? "One latest action per account. Switch to All activity to inspect completed and interrupted history." : "All stored session actions in the selected scope, ordered by most recent event."}</p></div><div className="session-context-controls"><div className="group-context"><span>GROUP CONTEXT</span><label className="select-wrap"><select aria-label="Filter sessions by account group" value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="all">All groups</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name} · {group.account_count} accounts</option>)}</select><ChevronDown size={15} /></label></div><div className="group-context"><span>VIEW</span><label className="select-wrap"><select aria-label="Choose session view" value={scope} onChange={(event) => setScope(event.target.value as "latest" | "all")}><option value="latest">Latest per account</option><option value="all">All activity</option></select><ChevronDown size={15} /></label></div>{canDeleteHistory && <button type="button" className="button danger small session-history-delete" disabled={deleting} onClick={() => { if (!window.confirm("Delete all closed session history? Active sessions will stay open, and audit events are retained.")) return; setDeleting(true); void onDeleteHistory().catch((requestError) => setError((requestError as Error).message)).finally(() => setDeleting(false)); }}><Trash2 size={14} />{deleting ? "Deleting…" : "Delete history"}</button>}</div></div><div className="session-filter-row"><InventoryToolbar value={query} onChange={setQuery} onClear={() => setQuery("")} placeholder="Search account, action, session, or outcome" status={status} onStatusChange={setStatus} statuses={[{ value: "IN_PROGRESS", label: "In progress" }, { value: "COMPLETED", label: "Completed" }, { value: "INTERRUPTED", label: "Interrupted" }, { value: "NOT_FINISHED", label: "Not finished" }, { value: "FAILED", label: "Failed" }]} loading={loading} onRefresh={onRefresh} /><label className="filter-select session-action-filter"><Filter size={15} /><span className="sr-only">Filter sessions by action</span><select aria-label="Filter sessions by action" value={action} onChange={(event) => setAction(event.target.value)}><option value="ALL">All actions</option>{actionOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label></div>{error && <div className="inline-error" role="alert"><XCircle size={17} /><span>{error}</span><button type="button" className="text-button" onClick={onRefresh}>Retry</button></div>}{!loading && !filtered.length ? <div className="table-state empty-state"><div className="empty-icon"><Clock3 size={21} /></div><strong>No session activity matches this view</strong><span>Try a different action, outcome, group, or view scope.</span></div> : <div className="table-scroll"><table className="infra-table sessions-table"><caption className="sr-only">{scopeLabel} session activity</caption><thead><tr><th>Account</th><th>Action</th><th>Outcome</th><th>Gmail state</th><th>Profile</th><th>Runtime</th><th>Last event</th><th><span className="sr-only">Open</span></th></tr></thead><tbody>{filtered.map((session) => <tr key={session.id}><td><button type="button" className="infra-link" onClick={() => onOpenAccount(session.account_id)}><strong>{session.account_email}</strong><small className="mono">{session.id}</small></button></td><td><strong className="session-action-label">{session.action ?? labelStatus(session.purpose ?? "login")}</strong><small className="table-subtext">{session.duration_seconds != null ? `${session.duration_seconds}s duration` : "Duration pending"}</small></td><td><InventoryStatus status={session.operation_status ?? "NOT_FINISHED"} /><small className="table-subtext">{session.status_detail ?? labelStatus(session.state)}</small></td><td><InventoryStatus status={session.login_state || session.state} /><small className="table-subtext">{labelStatus(session.state)}</small></td><td><span className="metadata-cell"><span className={`status-dot ${session.profile_saved ? "teal" : "neutral"}`} />{session.profile_saved ? "Saved" : "Reserved"}</span></td><td><span className="table-subtext">{labelStatus(session.runtime_type)}</span><small className="table-subtext">{session.browser_opened ? "Browser open" : "Browser closed"}</small></td><td><span className="table-subtext">{formatDateTime(session.last_event_at)}</span></td><td><button type="button" className="row-open" aria-label={`Open session for ${session.account_email}`} onClick={() => onOpenSession(session)}><ArrowRight size={16} /></button></td></tr>)}</tbody></table></div>}</section><footer className="page-footer"><span>Northstar Operations</span><span>Session ledger · {scopeLabel.toLowerCase()}</span></footer></div>;
 }
 
-type VncClipboardClient = { clipboardPasteFrom: (text: string) => void; scaleViewport: boolean; resizeSession: boolean; showDotCursor: boolean; disconnect: () => void; addEventListener: (name: string, listener: EventListener) => void; removeEventListener: (name: string, listener: EventListener) => void };
+type VncClipboardClient = VncClipboardTarget & { scaleViewport: boolean; resizeSession: boolean; showDotCursor: boolean; disconnect: () => void; addEventListener: (name: string, listener: EventListener) => void; removeEventListener: (name: string, listener: EventListener) => void };
 
 function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElement> }) {
   const targetRef = useRef<HTMLDivElement>(null);
+  const remoteClipboardRef = useRef<HTMLTextAreaElement>(null);
   const clientRef = useRef<VncClipboardClient | null>(null);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("Connecting to the browser desktop…");
   const [remoteClipboard, setRemoteClipboard] = useState("");
   const [pasteText, setPasteText] = useState("");
   const [clipboardError, setClipboardError] = useState("");
+  const pasteIntoBrowser = (text: string) => {
+    const client = clientRef.current;
+    if (!client || !text) return;
+    pasteTextIntoVnc(client, text);
+  };
   useEffect(() => {
     let disposed = false;
     let client: VncClipboardClient | null = null;
@@ -1181,8 +1186,7 @@ function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElem
       const detail = (event as CustomEvent<{ text?: string }>).detail;
       if (typeof detail?.text !== "string") return;
       setRemoteClipboard(detail.text);
-      if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(detail.text).then(() => setClipboardError("Text copied in VNC was also copied to your local clipboard.")).catch(() => setClipboardError("Text copied in VNC. Choose Copy browser clipboard to transfer it to your computer."));
-      else setClipboardError("Text copied in VNC. Choose Copy browser clipboard to transfer it to your computer.");
+      setClipboardError("Browser text received. Use Copy to computer, or select the text below and press Ctrl+C.");
     };
     const onPasteShortcut = (event: Event) => {
       const keyboard = event as KeyboardEvent;
@@ -1192,9 +1196,9 @@ function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElem
       keyboard.stopImmediatePropagation();
       void navigator.clipboard?.readText().then((text) => {
         if (!text) { setClipboardError("Your local clipboard is empty."); return; }
-        clientRef.current?.clipboardPasteFrom(text);
-        setClipboardError("Local clipboard pasted into VNC.");
-      }).catch(() => setClipboardError("Clipboard access was blocked. Use Paste local clipboard or the Clipboard fallback below."));
+        pasteIntoBrowser(text);
+        setClipboardError("Local clipboard sent and pasted into the active browser field.");
+      }).catch(() => setClipboardError("Clipboard permission blocked. Paste into the Computer → browser box below, then send it."));
     };
     void (async () => {
       try {
@@ -1221,27 +1225,47 @@ function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElem
   const copyRemote = async () => {
     setClipboardError("");
     if (!remoteClipboard) { setClipboardError("The browser has not copied any text yet."); return; }
-    try { await navigator.clipboard.writeText(remoteClipboard); setClipboardError("Copied browser text to your clipboard."); }
-    catch { setClipboardError("Clipboard access was blocked. Select the text below and copy it manually."); }
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(remoteClipboard);
+      setClipboardError("Copied browser text to your computer clipboard.");
+    } catch {
+      const field = remoteClipboardRef.current;
+      field?.focus(); field?.select();
+      let copied = false;
+      try { copied = document.execCommand("copy"); } catch { copied = false; }
+      setClipboardError(copied ? "Copied browser text to your computer clipboard." : "Text selected below. Press Ctrl+C to copy it to your computer.");
+    }
   };
   const pasteLocal = async () => {
     setClipboardError("");
     let text = pasteText;
     try { text = await navigator.clipboard.readText(); setPasteText(text); }
-    catch { if (!text) { setClipboardError("Clipboard access is blocked. Paste into the text box, then choose Send to browser."); return; } }
+    catch { if (!text) { setClipboardError("Clipboard permission blocked. Paste into the Computer → browser box below, then send it."); return; } }
     if (!text) { setClipboardError("Your local clipboard is empty."); return; }
-    clientRef.current?.clipboardPasteFrom(text);
-    setClipboardError("Sent local clipboard text to the browser.");
+    pasteIntoBrowser(text);
+    setClipboardError("Local clipboard text sent and pasted into the active browser field.");
   };
-  const sendTypedText = () => { if (pasteText) { clientRef.current?.clipboardPasteFrom(pasteText); setClipboardError("Sent text to the browser."); } };
+  const sendTypedText = () => { if (pasteText) { pasteIntoBrowser(pasteText); setClipboardError("Text sent and pasted into the active browser field."); } };
   return <div className="vnc-viewer-shell" ref={frameRef}>
     <div className="vnc-clipboard-toolbar" role="group" aria-label="VNC clipboard controls">
       <span className={`vnc-connection-state${connected ? " connected" : ""}`} role="status"><i />{status}</span>
-      <div><button type="button" className="button secondary small" onClick={() => void copyRemote()} disabled={!connected}><ClipboardCopy size={14} />Copy browser clipboard</button><button type="button" className="button secondary small" onClick={() => void pasteLocal()} disabled={!connected}><ClipboardPaste size={14} />Paste local clipboard</button></div>
+      <div><button type="button" className="button secondary small" onClick={() => void copyRemote()} disabled={!connected || !remoteClipboard}><ClipboardCopy size={14} />Copy to computer</button><button type="button" className="button secondary small" onClick={() => void pasteLocal()} disabled={!connected}><ClipboardPaste size={14} />Read computer clipboard</button></div>
       {clipboardError && <span className="vnc-clipboard-feedback" role="status" aria-live="polite">{clipboardError}</span>}
     </div>
+    <section className="vnc-clipboard-transfer" aria-label="Manual clipboard transfer">
+      <div className="vnc-clipboard-direction">
+        <label htmlFor="vnc-clipboard-text"><span>Computer <ArrowRight size={12} /> Browser</span><small>Paste here with Ctrl+V. Click the destination field in VNC first, then send.</small></label>
+        <textarea id="vnc-clipboard-text" className="resize-none" value={pasteText} onChange={(event) => setPasteText(event.target.value)} rows={2} placeholder="Paste text here from your computer…" />
+        <button type="button" className="button secondary small" onClick={sendTypedText} disabled={!connected || !pasteText}><ClipboardPaste size={13} />Paste into browser</button>
+      </div>
+      <div className="vnc-clipboard-direction">
+        <label htmlFor="vnc-remote-clipboard"><span>Browser <ArrowRight size={12} /> Computer</span><small>Copy text inside the browser first. Then copy it here.</small></label>
+        <textarea id="vnc-remote-clipboard" className="resize-none" ref={remoteClipboardRef} readOnly value={remoteClipboard} rows={2} placeholder="Text copied in the browser appears here…" onFocus={(event) => event.currentTarget.select()} />
+        <button type="button" className="button secondary small" onClick={() => void copyRemote()} disabled={!connected || !remoteClipboard}><ClipboardCopy size={13} />Copy to computer</button>
+      </div>
+    </section>
     <div className="vnc-canvas-host" ref={targetRef} aria-label="Remote browser screen" />
-    <details className="vnc-clipboard-fallback"><summary>Clipboard fallback</summary><label htmlFor="vnc-clipboard-text">Paste or edit text here, then send it to the browser</label><textarea id="vnc-clipboard-text" value={pasteText} onChange={(event) => setPasteText(event.target.value)} rows={3} /><button type="button" className="button secondary small" onClick={sendTypedText} disabled={!connected || !pasteText}><ClipboardPaste size={14} />Send to browser</button>{remoteClipboard && <div><label htmlFor="vnc-remote-clipboard">Text copied in the browser</label><textarea id="vnc-remote-clipboard" readOnly value={remoteClipboard} rows={3} /></div>}{clipboardError && <span role="status">{clipboardError}</span>}</details>
   </div>;
 }
 
