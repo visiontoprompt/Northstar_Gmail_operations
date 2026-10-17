@@ -12,7 +12,6 @@ import {
   CircleHelp,
   ClipboardCheck,
   ClipboardCopy,
-  ClipboardPaste,
   Clock3,
   Copy,
   Database,
@@ -1165,18 +1164,30 @@ type VncClipboardClient = VncClipboardTarget & { scaleViewport: boolean; resizeS
 
 function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElement> }) {
   const targetRef = useRef<HTMLDivElement>(null);
-  const remoteClipboardRef = useRef<HTMLTextAreaElement>(null);
   const clientRef = useRef<VncClipboardClient | null>(null);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("Connecting to the browser desktop…");
-  const [remoteClipboard, setRemoteClipboard] = useState("");
-  const [pasteText, setPasteText] = useState("");
   const [clipboardError, setClipboardError] = useState("");
-  const [clipboardToolsOpen, setClipboardToolsOpen] = useState(false);
   const pasteIntoBrowser = (text: string) => {
     const client = clientRef.current;
     if (!client || !text) return;
     pasteTextIntoVnc(client, text);
+  };
+  const syncLocalClipboard = (paste: boolean) => {
+    if (!navigator.clipboard?.readText) {
+      setClipboardError("Clipboard access is unavailable. Allow clipboard access for this site and retry.");
+      return;
+    }
+    // Run from a user gesture so the browser can apply its normal clipboard
+    // permission checks without requiring a separate transfer control.
+    void navigator.clipboard.readText().then((text) => {
+      if (!text) { setClipboardError("The computer clipboard is empty."); return; }
+      const client = clientRef.current;
+      if (!client) return;
+      if (paste) pasteIntoBrowser(text);
+      else client.clipboardPasteFrom(text);
+      setClipboardError("Clipboard synced from your computer to the remote browser.");
+    }).catch(() => setClipboardError("Browser blocked clipboard access. Allow clipboard access for this site, then retry."));
   };
   useEffect(() => {
     let disposed = false;
@@ -1186,14 +1197,23 @@ function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElem
     const onClipboard: EventListener = (event) => {
       const detail = (event as CustomEvent<{ text?: string }>).detail;
       if (typeof detail?.text !== "string") return;
-      setRemoteClipboard(detail.text);
-      setClipboardError("Text copied in the browser. Use Ctrl+C in the remote app; if your browser blocks clipboard sharing, open Clipboard tools to copy it manually.");
-      // Browsers may allow this when the user has granted clipboard-write. If
-      // they require a fresh gesture, the compact manual Copy action remains.
-      void navigator.clipboard?.writeText(detail.text).then(() => {
+      if (!navigator.clipboard?.writeText) {
+        setClipboardError("Remote clipboard received. Allow clipboard access for this site to sync it automatically.");
+        return;
+      }
+      void navigator.clipboard.writeText(detail.text).then(() => {
         setClipboardError("Browser text copied to your computer clipboard.");
-      }).catch(() => undefined);
+      }).catch(() => setClipboardError("Remote clipboard received. Browser blocked automatic sync; allow clipboard access for this site."));
     };
+    const onPasteShortcut = (event: Event) => {
+      const keyboard = event as KeyboardEvent;
+      const target = keyboard.target as HTMLElement | null;
+      if (!(keyboard.ctrlKey || keyboard.metaKey) || keyboard.key.toLowerCase() !== "v" || !target || !targetRef.current?.contains(target) || target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      keyboard.preventDefault();
+      keyboard.stopImmediatePropagation();
+      syncLocalClipboard(true);
+    };
+    const onRemoteContextMenu = () => syncLocalClipboard(false);
     void (async () => {
       try {
         const moduleUrl = "/desktop/core/rfb.js";
@@ -1208,51 +1228,21 @@ function OperatorVncViewer({ frameRef }: { frameRef: React.RefObject<HTMLDivElem
         client.addEventListener("connect", onConnect);
         client.addEventListener("disconnect", onDisconnect);
         client.addEventListener("clipboard", onClipboard);
+        targetRef.current.addEventListener("keydown", onPasteShortcut, true);
+        targetRef.current.addEventListener("contextmenu", onRemoteContextMenu, true);
         clientRef.current = client;
       } catch (error) {
         if (!disposed) setStatus((error as Error).message || "Could not load the VNC client.");
       }
     })();
-    return () => { disposed = true; if (client) { client.removeEventListener("connect", onConnect); client.removeEventListener("disconnect", onDisconnect); client.removeEventListener("clipboard", onClipboard); client.disconnect(); } clientRef.current = null; };
+    return () => { disposed = true; targetRef.current?.removeEventListener("keydown", onPasteShortcut, true); targetRef.current?.removeEventListener("contextmenu", onRemoteContextMenu, true); if (client) { client.removeEventListener("connect", onConnect); client.removeEventListener("disconnect", onDisconnect); client.removeEventListener("clipboard", onClipboard); client.disconnect(); } clientRef.current = null; };
   }, []);
-  const copyRemote = async () => {
-    setClipboardError("");
-    if (!remoteClipboard) { setClipboardError("The browser has not copied any text yet."); return; }
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
-      await navigator.clipboard.writeText(remoteClipboard);
-      setClipboardError("Copied browser text to your computer clipboard.");
-    } catch {
-      const field = remoteClipboardRef.current;
-      field?.focus(); field?.select();
-      let copied = false;
-      try { copied = document.execCommand("copy"); } catch { copied = false; }
-      setClipboardError(copied ? "Copied browser text to your computer clipboard." : "Text selected below. Press Ctrl+C to copy it to your computer.");
-    }
-  };
-  const sendTypedText = () => { if (pasteText) { pasteIntoBrowser(pasteText); setClipboardError("Text sent and pasted into the active browser field."); } };
-  return <div className={`vnc-viewer-shell${clipboardToolsOpen ? " clipboard-tools-open" : ""}`} ref={frameRef}>
-    <div className="vnc-clipboard-toolbar" role="group" aria-label="VNC clipboard controls">
+  return <div className="vnc-viewer-shell" ref={frameRef}>
+    <div className="vnc-clipboard-toolbar" role="group" aria-label="VNC clipboard status">
       <span className={`vnc-connection-state${connected ? " connected" : ""}`} role="status"><i />{status}</span>
-      <div className="vnc-clipboard-toolbar-actions">
-        {remoteClipboard && <button type="button" className="button secondary small" onClick={() => void copyRemote()} disabled={!connected}><ClipboardCopy size={14} />Copy from browser</button>}
-        <button type="button" className="button secondary small" aria-expanded={clipboardToolsOpen} aria-controls="vnc-clipboard-tools" onClick={() => setClipboardToolsOpen((open) => !open)}><ClipboardPaste size={14} />Clipboard tools</button>
-      </div>
-      <span className="vnc-clipboard-hint">Click the remote screen, then use Ctrl+C / Ctrl+V or right-click.</span>
+      <span className="vnc-clipboard-hint">Automatic clipboard sync · Ctrl+C / Ctrl+V · right-click</span>
       {clipboardError && <span className="vnc-clipboard-feedback" role="status" aria-live="polite">{clipboardError}</span>}
     </div>
-    {clipboardToolsOpen && <section id="vnc-clipboard-tools" className="vnc-clipboard-transfer" aria-label="Manual clipboard transfer">
-      <div className="vnc-clipboard-direction">
-        <label htmlFor="vnc-clipboard-text"><span>Computer to browser</span><small>If Ctrl+V is blocked, paste here, focus a remote field, then send.</small></label>
-        <textarea id="vnc-clipboard-text" className="resize-none" value={pasteText} onChange={(event) => setPasteText(event.target.value)} rows={2} placeholder="Paste text here from your computer…" />
-        <button type="button" className="button secondary small" onClick={sendTypedText} disabled={!connected || !pasteText}><ClipboardPaste size={13} />Paste into browser</button>
-      </div>
-      <div className="vnc-clipboard-direction">
-        <label htmlFor="vnc-remote-clipboard"><span>Browser to computer</span><small>Ctrl+C in the remote app sends available text here.</small></label>
-        <textarea id="vnc-remote-clipboard" className="resize-none" ref={remoteClipboardRef} readOnly value={remoteClipboard} rows={2} placeholder="Text copied in the browser appears here…" onFocus={(event) => event.currentTarget.select()} />
-        <button type="button" className="button secondary small" onClick={() => void copyRemote()} disabled={!connected || !remoteClipboard}><ClipboardCopy size={13} />Copy to computer</button>
-      </div>
-    </section>}
     <div className="vnc-canvas-host" ref={targetRef} aria-label="Remote browser screen" />
   </div>;
 }
