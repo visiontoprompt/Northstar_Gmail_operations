@@ -1152,6 +1152,9 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
   const inspectedSession = inspectedAccount ? activeByAccount.get(inspectedAccount.id) ?? null : selectedSession;
   const visibleSelectedIds = new Set(filteredAccounts.filter((account) => selectedIds.includes(account.id)).map((account) => account.id));
   const operationTargets = scope === "selected" ? filteredAccounts.filter((account) => visibleSelectedIds.has(account.id)) : filteredAccounts;
+  // Browser launches follow the left account checklist only. The inspector's
+  // operation scope is independent and must not disable or redirect Login.
+  const launchTargets = filteredAccounts.filter((account) => selectedIds.includes(account.id));
   const selectedOpenSessions = selectedLiveSessions(sessions, new Set(selectedIds), new Set(filteredAccounts.map((account) => account.id)));
 
   useEffect(() => { window.localStorage.setItem("northstar-desktop-accounts-collapsed", String(accountRailCollapsed)); }, [accountRailCollapsed]);
@@ -1417,9 +1420,9 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
               {Array.from({ length: maxConcurrency }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value} concurrent {value === 1 ? "session" : "sessions"}</option>)}
             </select>
           </label>
-          <button type="button" className="button primary desktop-run-operation" onClick={() => void runChosenOperation("login")} disabled={launching || !operationTargets.length} aria-busy={launching}>
+          <button type="button" className="button primary desktop-run-operation" onClick={() => void startAccounts(launchTargets)} disabled={launching || !launchTargets.length} aria-busy={launching} title={launchTargets.length ? `Open browsers for ${launchTargets.length} checked account${launchTargets.length === 1 ? "" : "s"}` : "Select accounts from the left list to start browser sessions."}>
             {launching ? <span className="button-spinner" /> : <Play size={15} />}
-            {launching ? "Starting…" : "Start " + operationTargets.length + " session" + (operationTargets.length === 1 ? "" : "s")}
+            {launching ? "Starting…" : "Start " + launchTargets.length + " session" + (launchTargets.length === 1 ? "" : "s")}
           </button>
         </div>
         </>}
@@ -1440,10 +1443,11 @@ function BrowserDesktopPage({ isAdmin, isActive, groups, refreshKey, onRefresh, 
           <div className="desktop-operation-heading"><div><span className="detail-label">{scope === "selected" ? "SELECTED ACCOUNTS" : "FILTERED GROUP SCOPE"}</span><strong>Choose an operation for this scope</strong></div><span>{operationTargets.length} {operationTargets.length === 1 ? "account" : "accounts"}</span></div>
           <label className="desktop-operation-row" htmlFor="desktop-scope"><span>Apply to</span><select id="desktop-scope" value={scope} onChange={(event) => setScope(event.target.value as "selected" | "filtered")}><option value="selected">Selected accounts ({visibleSelectedIds.size})</option><option value="filtered">All filtered accounts ({filteredAccounts.length})</option></select></label>
           <div className="desktop-inspector-operation-grid" role="group" aria-label="Available account operations">{registryActions.map((action) => {
-            const disabled = !operationTargets.length || (["credentials", "upload_profile"].includes(action.kind) && operationTargets.length !== 1);
+            const actionTargets = action.kind === "login" ? launchTargets : operationTargets;
+            const disabled = !actionTargets.length || (action.kind !== "login" && ["credentials", "upload_profile"].includes(action.kind) && operationTargets.length !== 1);
             return <button key={action.kind} type="button" className={`desktop-inspector-operation-button${operation === action.kind ? " active" : ""}${action.tone ? ` ${action.tone}` : ""}`} aria-pressed={operation === action.kind} disabled={disabled || launching} title={action.kind === "credentials" && operationTargets.length !== 1 ? "Credentials require exactly one account." : action.label} onClick={() => { setOperation(action.kind); if (action.kind !== "login") void runChosenOperation(action.kind); }}><span>{action.icon}</span>{action.shortLabel}</button>;
           })}</div>
-          {operation !== "login" && <div className="desktop-operation-hint" role="status">Choose an operation above to open its existing setup in this inspector.</div>}
+          <div className="desktop-operation-hint" role="status">{operation === "login" ? "Select accounts in the left list, then press Start sessions at the bottom of that panel." : "Choose an operation above to open its existing setup in this inspector."}</div>
           <button type="button" className="button secondary small desktop-inspector-compact" onClick={() => onCompactProfiles(operationTargets)} disabled={!operationTargets.length} title={operationTargets.length === 1 ? `Compact ${operationTargets[0].email}'s closed profile` : `Compact ${operationTargets.length} selected profiles`}><Archive size={14} />Compact {operationTargets.length === 1 ? "profile" : "profiles"}</button>
           <small className="desktop-operation-help">Actions use only the accounts shown in this scope. Configure forms and confirmations stay in this panel.</small>
         </section>
